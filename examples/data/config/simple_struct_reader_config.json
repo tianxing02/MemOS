@@ -1,0 +1,26 @@
+{
+  "llm": {
+    "backend": "ollama",
+    "config": {
+      "model_name_or_path": "qwen3:0.6b",
+      "temperature": 0.0,
+      "remove_think_prefix": true,
+      "max_tokens": 8192
+    }
+  },
+  "embedder": {
+    "backend": "ollama",
+    "config": {
+      "model_name_or_path": "nomic-embed-text:latest"
+    }
+  },
+  "chunker": {
+    "backend": "sentence",
+    "config": {
+      "tokenizer_or_token_counter": "gpt2",
+      "chunk_size": 512,
+      "chunk_overlap": 128,
+      "min_sentences_per_chunk": 1
+    }
+  }
+}
