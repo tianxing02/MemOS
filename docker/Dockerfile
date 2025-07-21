@@ -18,7 +18,7 @@ RUN pip install --upgrade pip && pip install --no-cache-dir -r requirements.txt
 
 RUN pip install chonkie
 
-COPY . .
+COPY ../. .
 ENV PYTHONPATH=/app/src
 
 EXPOSE 8000
