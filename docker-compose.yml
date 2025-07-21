@@ -2,6 +2,7 @@ name: memos-dev
 
 services:
   memos:
+    container_name: memos-api-server
     build:
       context: .
       dockerfile: Dockerfile
@@ -21,6 +22,7 @@ services:
 
   neo4j:
     image: neo4j:5.26.4
+    container_name: neo4j-server
     ports:
       - "7474:7474"   # HTTP
       - "7687:7687"   # Bolt
