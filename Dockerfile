@@ -31,5 +31,6 @@ ENV PYTHONPATH=/app/src
 # Expose port
 EXPOSE 8000
 
+
 # Start API service
 CMD ["poetry", "run", "uvicorn", "memos.api.product_api:app", "--host", "0.0.0.0", "--port", "8000"]
