@@ -50,9 +50,12 @@ config = {
                 "config": openapi_config,
             },
             "embedder": {
-                "backend": "ollama",
+                "backend": "universal_api",
                 "config": {
-                    "model_name_or_path": "nomic-embed-text:latest",
+                    "provider": "openai",
+                    "api_key": "sk-jz4BGHJftedu1UYMPTt3r2h9s1DuQFU2Co74YZa1aMUUNokK",
+                    "model_name_or_path": "text-embedding-3-large",
+                    "base_url": "http://123.129.219.111:3000/v1",
                 },
             },
             "chunker": {
@@ -105,17 +108,21 @@ config = GeneralMemCubeConfig.model_validate(
                     "config": {
                         "uri": neo4j_uri,
                         "user": "neo4j",
-                        "password": "12345678",
+                        "password": "iaarlichunyu",
                         "db_name": f"db{user_name.replace('-', '')}",
                         "auto_create": True,
                     },
                 },
                 "embedder": {
-                    "backend": "ollama",
+                    "backend": "universal_api",
                     "config": {
-                        "model_name_or_path": "nomic-embed-text:latest",
+                        "provider": "openai",
+                        "api_key": "sk-jz4BGHJftedu1UYMPTt3r2h9s1DuQFU2Co74YZa1aMUUNokK",
+                        "model_name_or_path": "text-embedding-3-large",
+                        "base_url": "http://123.129.219.111:3000/v1",
                     },
                 },
+                "reorganize": True,
             },
         },
         "act_mem": {},
@@ -259,11 +266,12 @@ print(
 # 7. Add document
 print(f"🚀 [{datetime.now().strftime('%H:%M:%S')}] Starting to add document...")
 start_time = time.time()
-## 7.1 add pdf for ./tmp/data if use doc mem mos.add(doc_path="./tmp/data/")
-start_time = time.time()
 
+## 7.1 add pdf for ./tmp/data if use doc mem mos.add(doc_path="./tmp/data/")
+mos.add(doc_path="examples/data/docs/test/")
 get_all_results = mos.get_all()
 filtered_results = filter_memory_data(get_all_results)
+
 print(f"Get all results after add doc: {filtered_results}")
 
 print(

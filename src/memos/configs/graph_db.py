@@ -68,7 +68,7 @@ class Neo4jGraphDBConfig(BaseGraphDBConfig):
         ),
     )
 
-    embedding_dimension: int = Field(default=768, description="Dimension of vector embedding")
+    embedding_dimension: int = Field(default=3072, description="Dimension of vector embedding")
 
     @model_validator(mode="after")
     def validate_config(self):
