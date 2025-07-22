@@ -13,12 +13,13 @@ WORKDIR /app
 
 ENV HF_ENDPOINT=https://hf-mirror.com
 
-COPY requirements.txt .
+COPY server/requirements.txt .
 RUN pip install --upgrade pip && pip install --no-cache-dir -r requirements.txt
 
-RUN pip install chonkie
+# 复制 server 和 src 代码
+COPY server/ ./server/
+COPY src/ ./src/
 
-COPY ../. .
 ENV PYTHONPATH=/app/src
 
 EXPOSE 8000
