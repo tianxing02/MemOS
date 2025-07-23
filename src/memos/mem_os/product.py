@@ -16,12 +16,18 @@ from memos.log import get_logger
 from memos.mem_cube.general import GeneralMemCube
 from memos.mem_os.core import MOSCore
 from memos.mem_os.utils.format_utils import (
+    clean_json_response,
     convert_graph_to_tree_forworkmem,
+    ensure_unique_tree_ids,
     filter_nodes_by_tree_ids,
     remove_embedding_recursive,
     sort_children_by_memory_type,
 )
-from memos.mem_scheduler.modules.schemas import ANSWER_LABEL, QUERY_LABEL, ScheduleMessageItem
+from memos.mem_scheduler.schemas.general_schemas import (
+    ANSWER_LABEL,
+    QUERY_LABEL,
+)
+from memos.mem_scheduler.schemas.message_schemas import ScheduleMessageItem
 from memos.mem_user.persistent_user_manager import PersistentUserManager
 from memos.mem_user.user_manager import UserRole
 from memos.memories.textual.item import (
@@ -599,7 +605,7 @@ class MOSProduct(MOSCore):
                 try:
                     default_mem_cube.dump(mem_cube_name_or_path)
                 except Exception as e:
-                    print(e)
+                    logger.error(f"Failed to dump default cube: {e}")
 
             # Register the default cube with MOS
             self.register_mem_cube(
@@ -656,7 +662,7 @@ class MOSProduct(MOSCore):
             you should generate some suggestion query, the query should be user what to query,
             user recently memories is:
             {memories}
-            please generate 3 suggestion query in English,
+            if the user recently memories is empty, please generate 3 suggestion query in English,
             output should be a json format, the key is "query", the value is a list of suggestion query.
 
             example:
@@ -664,7 +670,7 @@ class MOSProduct(MOSCore):
                 "query": ["query1", "query2", "query3"]
             }}
             """
-        text_mem_result = super().search("my recently memories", user_id=user_id, top_k=10)[
+        text_mem_result = super().search("my recently memories", user_id=user_id, top_k=3)[
             "text_mem"
         ]
         if text_mem_result:
@@ -673,60 +679,9 @@ class MOSProduct(MOSCore):
             memories = ""
         message_list = [{"role": "system", "content": suggestion_prompt.format(memories=memories)}]
         response = self.chat_llm.generate(message_list)
-        response_json = json.loads(response)
-
+        clean_response = clean_json_response(response)
+        response_json = json.loads(clean_response)
         return response_json["query"]
-
-    def chat(
-        self,
-        query: str,
-        user_id: str,
-        cube_id: str | None = None,
-        history: MessageList | None = None,
-    ) -> Generator[str, None, None]:
-        """Chat with LLM SSE Type.
-        Args:
-            query (str): Query string.
-            user_id (str): User ID.
-            cube_id (str, optional): Custom cube ID for user.
-            history (list[dict], optional): Chat history.
-
-        Returns:
-            Generator[str, None, None]: The response string generator.
-        """
-        # Use MOSCore's built-in validation
-        if cube_id:
-            self._validate_cube_access(user_id, cube_id)
-        else:
-            self._validate_user_exists(user_id)
-
-        # Load user cubes if not already loaded
-        self._load_user_cubes(user_id, self.default_cube_config)
-        time_start = time.time()
-        memories_list = super().search(query, user_id)["text_mem"]
-        # Get response from parent MOSCore (returns string, not generator)
-        response = super().chat(query, user_id)
-        time_end = time.time()
-
-        # Use tiktoken for proper token-based chunking
-        for chunk in self._chunk_response_with_tiktoken(response, chunk_size=5):
-            chunk_data = f"data: {json.dumps({'type': 'text', 'content': chunk})}\n\n"
-            yield chunk_data
-
-        # Prepare reference data
-        reference = []
-        for memories in memories_list:
-            memories_json = memories.model_dump()
-            memories_json["metadata"]["ref_id"] = f"[{memories.id.split('-')[0]}]"
-            memories_json["metadata"]["embedding"] = []
-            memories_json["metadata"]["sources"] = []
-            reference.append(memories_json)
-
-        yield f"data: {json.dumps({'type': 'reference', 'content': reference})}\n\n"
-        total_time = round(float(time_end - time_start), 1)
-
-        yield f"data: {json.dumps({'type': 'time', 'content': {'total_time': total_time, 'speed_improvement': '23%'}})}\n\n"
-        yield f"data: {json.dumps({'type': 'end'})}\n\n"
 
     def chat_with_references(
         self,
@@ -762,11 +717,12 @@ class MOSProduct(MOSCore):
         system_prompt = self._build_system_prompt(user_id, memories_list)
 
         # Get chat history
-        target_user_id = user_id if user_id is not None else self.user_id
-        if target_user_id not in self.chat_history_manager:
-            self._register_chat_history(target_user_id)
+        if user_id not in self.chat_history_manager:
+            self._register_chat_history(user_id)
 
-        chat_history = self.chat_history_manager[target_user_id]
+        chat_history = self.chat_history_manager[user_id]
+        if history:
+            chat_history.chat_history = history[-10:]
         current_messages = [
             {"role": "system", "content": system_prompt},
             *chat_history.chat_history,
@@ -852,15 +808,12 @@ class MOSProduct(MOSCore):
         yield f"data: {json.dumps({'type': 'reference', 'data': reference})}\n\n"
         total_time = round(float(time_end - time_start), 1)
         yield f"data: {json.dumps({'type': 'time', 'data': {'total_time': total_time, 'speed_improvement': '23%'}})}\n\n"
-        chat_history.chat_history.append({"role": "user", "content": query})
-        chat_history.chat_history.append({"role": "assistant", "content": full_response})
         self._send_message_to_scheduler(
             user_id=user_id, mem_cube_id=cube_id, query=query, label=QUERY_LABEL
         )
         self._send_message_to_scheduler(
             user_id=user_id, mem_cube_id=cube_id, query=full_response, label=ANSWER_LABEL
         )
-        self.chat_history_manager[user_id] = chat_history
 
         yield f"data: {json.dumps({'type': 'end'})}\n\n"
         self.add(
@@ -879,12 +832,6 @@ class MOSProduct(MOSCore):
             ],
             mem_cube_id=cube_id,
         )
-        # Keep chat history under 30 messages by removing oldest conversation pair
-        if len(self.chat_history_manager[user_id].chat_history) > 10:
-            self.chat_history_manager[user_id].chat_history.pop(0)  # Remove oldest user message
-            self.chat_history_manager[user_id].chat_history.pop(
-                0
-            )  # Remove oldest assistant response
 
     def get_all(
         self,
@@ -918,8 +865,10 @@ class MOSProduct(MOSCore):
                     "UserMemory": 0.40,
                 }
                 tree_result, node_type_count = convert_graph_to_tree_forworkmem(
-                    memories, target_node_count=150, type_ratios=custom_type_ratios
+                    memories, target_node_count=200, type_ratios=custom_type_ratios
                 )
+                # Ensure all node IDs are unique in the tree structure
+                tree_result = ensure_unique_tree_ids(tree_result)
                 memories_filtered = filter_nodes_by_tree_ids(tree_result, memories)
                 children = tree_result["children"]
                 children_sort = sort_children_by_memory_type(children)
@@ -1009,6 +958,8 @@ class MOSProduct(MOSCore):
             tree_result, node_type_count = convert_graph_to_tree_forworkmem(
                 memories, target_node_count=150, type_ratios=custom_type_ratios
             )
+            # Ensure all node IDs are unique in the tree structure
+            tree_result = ensure_unique_tree_ids(tree_result)
             memories_filtered = filter_nodes_by_tree_ids(tree_result, memories)
             children = tree_result["children"]
             children_sort = sort_children_by_memory_type(children)
@@ -1025,11 +976,9 @@ class MOSProduct(MOSCore):
         return reformat_memory_list
 
     def search(
-        self, query: str, user_id: str, install_cube_ids: list[str] | None = None, top_k: int = 20
+        self, query: str, user_id: str, install_cube_ids: list[str] | None = None, top_k: int = 10
     ):
         """Search memories for a specific user."""
-        # Validate user access
-        self._validate_user_access(user_id)
 
         # Load user cubes if not already loaded
         self._load_user_cubes(user_id, self.default_cube_config)
