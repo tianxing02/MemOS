@@ -53,9 +53,9 @@ config = {
                 "backend": "universal_api",
                 "config": {
                     "provider": "openai",
-                    "api_key": "sk-jz4BGHJftedu1UYMPTt3r2h9s1DuQFU2Co74YZa1aMUUNokK",
+                    "api_key": "sk-xxxxxxxxx",
                     "model_name_or_path": "text-embedding-3-large",
-                    "base_url": "http://123.129.219.111:3000/v1",
+                    "base_url": "http://xxx.xxx.xxx.xxx:xxxx/v1"
                 },
             },
             "chunker": {
@@ -116,10 +116,10 @@ config = GeneralMemCubeConfig.model_validate(
                 "embedder": {
                     "backend": "universal_api",
                     "config": {
-                        "provider": "openai",
-                        "api_key": "sk-jz4BGHJftedu1UYMPTt3r2h9s1DuQFU2Co74YZa1aMUUNokK",
-                        "model_name_or_path": "text-embedding-3-large",
-                        "base_url": "http://123.129.219.111:3000/v1",
+                         "provider": "openai",
+                          "api_key": "sk-xxxxxxxxx",
+                          "model_name_or_path": "text-embedding-3-large",
+                          "base_url": "http://xxx.xxx.xxx.xxx:xxxx/v1"
                     },
                 },
                 "reorganize": True,
