@@ -18,11 +18,11 @@ WORKDIR /app
 ENV HF_ENDPOINT=https://hf-mirror.com
 
 # Install Python packages
-COPY server/requirements.txt .
+COPY docker/requirements.txt .
 RUN pip install --upgrade pip && pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
-COPY server/ ./server/
+COPY docker/ ./docker/
 COPY src/ ./src/
 
 # Set Python import path
@@ -31,5 +31,5 @@ ENV PYTHONPATH=/app/src
 # Expose port
 EXPOSE 8000
 
-# Start the server
+# Start the docker
 CMD ["uvicorn", "memos.api.product_api:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
