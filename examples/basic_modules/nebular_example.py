@@ -12,9 +12,9 @@ embedder_config = EmbedderConfigFactory.model_validate(
         "backend": "universal_api",
         "config": {
             "provider": "openai",
-            "api_key": "sk-pCuT1CqW4XfPmOZsZGp0ugF8xd4uU61nOrVm4JpWCz1dmWaT",
+            "api_key": "sk-xxxxxxxx",
             "model_name_or_path": "text-embedding-3-large",
-            "base_url": "http://123.129.219.111:3000/v1",
+            "base_url": "http://xxx.xxx.xxx.xxx:xxxx/v1",
         },
     }
 )
@@ -30,9 +30,9 @@ def example_multi_db(db_name: str = "paper"):
     config = GraphDBConfigFactory(
         backend="nebular",
         config={
-            "hosts": ["106.14.142.60:9669", "120.55.160.164:9669", "106.15.38.5:9669"],
+            "hosts": ["xxx.xx.xxx.xx:xxxx", "xxx.xx.xxx.xx:xxxx", "xxx.xx.xxx.xx:xxxx"],
             "user_name": "root",
-            "password": "Nebula123",
+            "password": "xxxxxxxx",
             "space": db_name,
             "auto_create": True,
             "embedding_dimension": 3072,
@@ -88,8 +88,8 @@ def example_shared_db(db_name: str = "shared-traval-group"):
         config = GraphDBConfigFactory(
             backend="nebular",
             config={
-                "hosts": ["106.14.142.60:9669", "120.55.160.164:9669", "106.15.38.5:9669"],
-                "password": "Nebula123",
+                "hosts": ["xxx.xx.xxx.xx:xxxx", "xxx.xx.xxx.xx:xxxx", "xxx.xx.xxx.xx:xxxx"],
+                "password": "xxxxxxxx",
                 "space": db_name,
                 "user_name": "root",
                 "auto_create": True,
@@ -176,8 +176,8 @@ def example_shared_db(db_name: str = "shared-traval-group"):
     config_alice = GraphDBConfigFactory(
         backend="nebular",
         config={
-            "hosts": ["106.14.142.60:9669", "120.55.160.164:9669", "106.15.38.5:9669"],
-            "password": "Nebula123",
+             "hosts": ["xxx.xx.xxx.xx:xxxx", "xxx.xx.xxx.xx:xxxx", "xxx.xx.xxx.xx:xxxx"],
+            "password": "xxxxxxxx",
             "space": db_name,
             "user_name": "root",
             "embedding_dimension": 3072,
