@@ -1,6 +1,8 @@
 from datetime import datetime
 from typing import Any, Literal
 
+from nebulagraph_python.value_wrapper import ValueWrapper
+
 from memos.configs.graph_db import NebulaGraphDBConfig
 from memos.dependency import require_python_package
 from memos.graph_dbs.base import BaseGraphDB
@@ -170,7 +172,35 @@ class NebulaGraphDB(BaseGraphDB):
 
     # Graph Query & Reasoning
     def get_node(self, id: str) -> dict[str, Any] | None:
-        raise NotImplementedError
+        """
+        Retrieve a Memory node by its unique ID.
+
+        Args:
+            id (str): Node ID (Memory.id)
+
+        Returns:
+            dict: Node properties as key-value pairs, or None if not found.
+        """
+        gql = f"""
+               USE memory_graph
+               MATCH (v {{id: '{id}'}})
+               RETURN v
+           """
+
+        try:
+            result = self.client.execute(gql)
+            record = result.one_or_none()
+            if record is None:
+                return None
+
+            node_wrapper = record["v"].as_node()
+            props = node_wrapper.get_properties()
+
+            return {key: self._parse_node(val) for key, val in props.items()}
+
+        except Exception as e:
+            logger.error(f"[get_node] Failed to retrieve node '{id}': {e}")
+            return None
 
     def get_nodes(self, ids: list[str]) -> list[dict[str, Any]]:
         raise NotImplementedError
@@ -237,8 +267,49 @@ class NebulaGraphDB(BaseGraphDB):
             - Typical use case: restrict to 'status = activated' to avoid
             matching archived or merged nodes.
         """
+        dim = len(vector)
+        vector_str = ",".join(f"{float(x)}" for x in vector)
+        gql_vector = f"VECTOR<{dim}, FLOAT>([{vector_str}])"
 
-        raise NotImplementedError
+        where_clauses = []
+        if scope:
+            where_clauses.append(f'n.memory_type == "{scope}"')
+        if status:
+            where_clauses.append(f'n.status == "{status}"')
+        if not self.config.use_multi_db and self.config.user_name:
+            where_clauses.append(f'n.user_name == "{self.config.user_name}"')
+
+        where_clause = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+
+        gql = f"""
+               USE memory_graph
+               MATCH (n@Memory)
+               {where_clause}
+               ORDER BY euclidean(n.embedding, {gql_vector}) ASC
+               APPROXIMATE
+               LIMIT {top_k}
+               OPTIONS {{ METRIC: L2, TYPE: IVF, NPROBE: 8 }}
+               RETURN n.id AS id, euclidean(n.embedding, {gql_vector}) AS score
+           """
+
+        try:
+            result = self.client.execute(gql)
+        except Exception as e:
+            logger.error(f"[search_by_embedding] Query failed: {e}")
+            return []
+
+        try:
+            output = []
+            for row in result:
+                values = row.values()
+                id_val = values[0].as_string()
+                score_val = values[1].as_double()
+                if threshold is None or score_val <= threshold:
+                    output.append({"id": id_val, "score": score_val})
+            return output
+        except Exception as e:
+            logger.error(f"[search_by_embedding] Result parse failed: {e}")
+            return []
 
     def get_by_metadata(self, filters: list[dict[str, Any]]) -> list[str]:
         raise NotImplementedError
@@ -356,10 +427,23 @@ class NebulaGraphDB(BaseGraphDB):
         """
         create_graph = "CREATE GRAPH IF NOT EXISTS memory_graph TYPED MemoryGraphType"
         set_graph_working = "SESSION SET GRAPH memory_graph"
+        create_vector_index = """
+                CREATE VECTOR INDEX IF NOT EXISTS memory_vector_index
+                ON NODE Memory::embedding
+                OPTIONS {
+                    DIM: 3072,
+                    METRIC: L2,
+                    TYPE: IVF,
+                    NLIST: 100,
+                    TRAINSIZE: 1000
+                }
+                FOR memory_graph
+            """
         try:
             self.client.execute(create_tag)
             self.client.execute(create_graph)
             self.client.execute(set_graph_working)
+            self.client.execute(create_vector_index)
             logger.info("✅ Graph `memory_graph` is now the working graph.")
         except Exception as e:
             logger.error(f"❌ Failed to create tag: {e}")
@@ -378,5 +462,25 @@ class NebulaGraphDB(BaseGraphDB):
     def _index_exists(self, index_name: str) -> bool:
         """raise NotImplementedError"""
 
-    def _parse_node(self, node_data: dict[str, Any]) -> dict[str, Any]:
-        return node_data
+    def _parse_node(self, value: ValueWrapper) -> Any:
+        if value is None or value.is_null():
+            return None
+        try:
+            primitive_value = value.cast_primitive()
+        except Exception as e:
+            logger.warning(f"cast_primitive failed for value: {value}, error: {e}")
+            try:
+                primitive_value = value.cast()
+            except Exception as e2:
+                logger.warning(f"cast failed for value: {value}, error: {e2}")
+                return str(value)
+
+        if isinstance(primitive_value, ValueWrapper):
+            return self._parse_node(primitive_value)
+
+        if isinstance(primitive_value, list):
+            return [
+                self._parse_node(v) if isinstance(v, ValueWrapper) else v for v in primitive_value
+            ]
+
+        return primitive_value

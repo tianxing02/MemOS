@@ -180,7 +180,7 @@ def example_shared_db(db_name: str = "shared-traval-group"):
     print("\n=== Export entire DB (for verification, includes ALL users) ===")
     graph = GraphStoreFactory.from_config(config)
     all_graph_data = graph.export_graph()
-    print(all_graph_data)
+    print(str(all_graph_data)[:1000])
 
     # Step 6: Search for alice's data only
     print("\n=== Search for travel_member_alice ===")
@@ -195,9 +195,9 @@ def example_shared_db(db_name: str = "shared-traval-group"):
         },
     )
     graph_alice = GraphStoreFactory.from_config(config_alice)
-    nodes = graph_alice.search_by_embedding(vector=embed_memory_item("travel itinerary"), top_k=1)
+    nodes = graph_alice.search_by_embedding(vector=embed_memory_item("travel itinerary"), top_k=3)
     for node in nodes:
-        print(graph_alice.get_node(node["id"]))
+        print(str(graph_alice.get_node(node["id"]))[:1000])
 
 
 if __name__ == "__main__":
