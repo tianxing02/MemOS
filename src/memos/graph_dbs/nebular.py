@@ -1,5 +1,3 @@
-import json
-
 from datetime import datetime
 from typing import Any, Literal
 
@@ -16,15 +14,20 @@ def _escape_str(value: str) -> str:
     return value.replace('"', '\\"')
 
 
-def _format_value(val: Any) -> str:
+def _format_value(val: Any, key: str = "") -> str:
     if isinstance(val, str):
         return f'"{_escape_str(val)}"'
-    elif isinstance(val, int | float):
+    elif isinstance(val, (int | float)):
         return str(val)
     elif isinstance(val, datetime):
         return f'datetime("{val.isoformat()}")'
     elif isinstance(val, list):
-        return json.dumps(val)
+        if key == "embedding":
+            dim = len(val)
+            joined = ",".join(str(float(x)) for x in val)
+            return f"VECTOR<{dim}, FLOAT>([{joined}])"
+        else:
+            return f"[{', '.join(_format_value(v) for v in val)}]"
     elif val is None:
         return "NULL"
     else:
@@ -107,17 +110,18 @@ class NebulaGraphDB(BaseGraphDB):
         """
         Insert or update a Memory node in NebulaGraph.
         """
+        if not self.config.use_multi_db and self.config.user_name:
+            metadata["user_name"] = self.config.user_name
+
         now = datetime.utcnow()
         metadata = metadata.copy()
         metadata.setdefault("created_at", now)
         metadata.setdefault("updated_at", now)
-        metadata.pop("embedding")
         metadata["node_type"] = metadata.pop("type")
         metadata["id"] = id
         metadata["memory"] = memory
 
-        print("metadata: ", metadata)
-        properties = ", ".join(f"{k}: {_format_value(v)}" for k, v in metadata.items())
+        properties = ", ".join(f"{k}: {_format_value(v, k)}" for k, v in metadata.items())
         gql = f"INSERT OR IGNORE (n@Memory {{{properties}}})"
 
         try:
@@ -151,8 +155,6 @@ class NebulaGraphDB(BaseGraphDB):
                MATCH (a@Memory {{id: "{source_id}"}}), (b@Memory {{id: "{target_id}"}})
                INSERT (a) -[e@{type} {props}]-> (b)
            '''
-
-        print(f"[add_edge] Executing NGQL:\n{insert_stmt}")
         try:
             self.client.execute(insert_stmt)
         except Exception:
@@ -213,6 +215,29 @@ class NebulaGraphDB(BaseGraphDB):
         status: str | None = None,
         threshold: float | None = None,
     ) -> list[dict]:
+        """
+        Retrieve node IDs based on vector similarity.
+
+        Args:
+            vector (list[float]): The embedding vector representing query semantics.
+            top_k (int): Number of top similar nodes to retrieve.
+            scope (str, optional): Memory type filter (e.g., 'WorkingMemory', 'LongTermMemory').
+            status (str, optional): Node status filter (e.g., 'active', 'archived').
+                            If provided, restricts results to nodes with matching status.
+            threshold (float, optional): Minimum similarity score threshold (0 ~ 1).
+
+        Returns:
+            list[dict]: A list of dicts with 'id' and 'score', ordered by similarity.
+
+        Notes:
+            - This method uses Neo4j native vector indexing to search for similar nodes.
+            - If scope is provided, it restricts results to nodes with matching memory_type.
+            - If 'status' is provided, only nodes with the matching status will be returned.
+            - If threshold is provided, only results with score >= threshold will be returned.
+            - Typical use case: restrict to 'status = activated' to avoid
+            matching archived or merged nodes.
+        """
+
         raise NotImplementedError
 
     def get_by_metadata(self, filters: list[dict[str, Any]]) -> list[str]:
@@ -243,7 +268,50 @@ class NebulaGraphDB(BaseGraphDB):
         """
 
     def export_graph(self) -> dict[str, Any]:
-        raise NotImplementedError
+        """
+        Export all graph nodes and edges in a structured form.
+
+        Returns:
+            {
+                "nodes": [ { "id": ..., "memory": ..., "metadata": {...} }, ... ],
+                "edges": [ { "source": ..., "target": ..., "type": ... }, ... ]
+            }
+        """
+        node_query = "MATCH (n@Memory)"
+        edge_query = "MATCH (a@Memory)-[r]->(b@Memory)"
+
+        if not self.config.use_multi_db and self.config.user_name:
+            username = self.config.user_name
+            node_query += f' WHERE n.user_name = "{username}"'
+            edge_query += f' WHERE r.user_name = "{username}"'
+
+        try:
+            full_node_query = f"{node_query} RETURN n"
+            node_result = self.client.execute(full_node_query)
+            nodes = []
+            for row in node_result:
+                node_wrapper = row.values()[0].as_node()
+                props = node_wrapper.get_properties()
+
+                metadata = {key: self._parse_node(val) for key, val in props.items()}
+
+                memory = metadata.get("memory", "")
+
+                nodes.append({"id": node_wrapper.get_id(), "memory": memory, "metadata": metadata})
+        except Exception as e:
+            raise RuntimeError(f"[EXPORT GRAPH - NODES] Exception: {e}") from e
+
+        try:
+            full_edge_query = f"{edge_query} RETURN a.id AS source, b.id AS target"
+            edge_result = self.client.execute(full_edge_query)
+            edges = [
+                {"source": row.values()[0].value, "target": row.values()[1].value}
+                for row in edge_result
+            ]
+        except Exception as e:
+            raise RuntimeError(f"[EXPORT GRAPH - EDGES] Exception: {e}") from e
+
+        return {"nodes": nodes, "edges": edges}
 
     def import_graph(self, data: dict[str, Any]) -> None:
         raise NotImplementedError
@@ -263,6 +331,7 @@ class NebulaGraphDB(BaseGraphDB):
             NODE Memory (:MemoryTag {
                 id STRING,
                 memory STRING,
+                user_name STRING,
                 created_at STRING,
                 updated_at STRING,
                 status STRING,
@@ -279,6 +348,7 @@ class NebulaGraphDB(BaseGraphDB):
                 usage LIST<STRING>,
                 background STRING,
                 hierarchy_level STRING,
+                embedding VECTOR<3072, FLOAT>,
                 PRIMARY KEY(id)
             }),
             EDGE RELATE_TO (Memory) -[{user_name STRING}]-> (Memory)
@@ -286,12 +356,7 @@ class NebulaGraphDB(BaseGraphDB):
         """
         create_graph = "CREATE GRAPH IF NOT EXISTS memory_graph TYPED MemoryGraphType"
         set_graph_working = "SESSION SET GRAPH memory_graph"
-
-        drop_graph = "DROP GRAPH memory_graph"
-        drop_type = "DROP GRAPH TYPE MemoryGraphType"
         try:
-            self.client.execute(drop_graph)
-            self.client.execute(drop_type)
             self.client.execute(create_tag)
             self.client.execute(create_graph)
             self.client.execute(set_graph_working)
@@ -314,5 +379,4 @@ class NebulaGraphDB(BaseGraphDB):
         """raise NotImplementedError"""
 
     def _parse_node(self, node_data: dict[str, Any]) -> dict[str, Any]:
-        """ """
-        raise NotImplementedError
+        return node_data

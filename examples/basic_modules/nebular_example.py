@@ -1,4 +1,11 @@
+import json
+import os
+
 from datetime import datetime
+
+import numpy as np
+
+from dotenv import load_dotenv
 
 from memos.configs.embedder import EmbedderConfigFactory
 from memos.configs.graph_db import GraphDBConfigFactory
@@ -7,14 +14,16 @@ from memos.graph_dbs.factory import GraphStoreFactory
 from memos.memories.textual.item import TextualMemoryItem, TreeNodeTextualMemoryMetadata
 
 
+load_dotenv()
+
 embedder_config = EmbedderConfigFactory.model_validate(
     {
         "backend": "universal_api",
         "config": {
             "provider": "openai",
-            "api_key": "sk-pCuT1CqW4XfPmOZsZGp0ugF8xd4uU61nOrVm4JpWCz1dmWaT",
+            "api_key": os.getenv("OPENAI_API_KEY", "sk-xxxxx"),
             "model_name_or_path": "text-embedding-3-large",
-            "base_url": "http://123.129.219.111:3000/v1",
+            "base_url": os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1"),
         },
     }
 )
@@ -22,7 +31,10 @@ embedder = EmbedderFactory.from_config(embedder_config)
 
 
 def embed_memory_item(memory: str) -> list[float]:
-    return embedder.embed([memory])[0]
+    embedding = embedder.embed([memory])[0]
+    embedding_np = np.array(embedding, dtype=np.float32)
+    embedding_list = embedding_np.tolist()
+    return embedding_list
 
 
 def example_multi_db(db_name: str = "paper"):
@@ -30,9 +42,9 @@ def example_multi_db(db_name: str = "paper"):
     config = GraphDBConfigFactory(
         backend="nebular",
         config={
-            "hosts": ["106.14.142.60:9669", "120.55.160.164:9669", "106.15.38.5:9669"],
-            "user_name": "root",
-            "password": "Nebula123",
+            "hosts": json.loads(os.getenv("NEBULAR_HOSTS", "localhost")),
+            "user_name": os.getenv("NEBULAR_USER", "root"),
+            "password": os.getenv("NEBULAR_PASSWORD", "xxxxxx"),
             "space": db_name,
             "auto_create": True,
             "embedding_dimension": 3072,
@@ -81,17 +93,17 @@ def example_shared_db(db_name: str = "shared-traval-group"):
     Multiple users' data in the same Neo4j DB with user_name as a tag.
     """
     # users
-    user_list = ["travel_member_alice", "travel_member_bob"]
+    user_list = ["root"]
 
     for user_name in user_list:
         # Step 1: Build factory config
         config = GraphDBConfigFactory(
             backend="nebular",
             config={
-                "hosts": ["106.14.142.60:9669", "120.55.160.164:9669", "106.15.38.5:9669"],
-                "password": "Nebula123",
+                "hosts": json.loads(os.getenv("NEBULAR_HOSTS", "localhost")),
+                "user_name": os.getenv("NEBULAR_USER", "root"),
+                "password": os.getenv("NEBULAR_PASSWORD", "xxxxxx"),
                 "space": db_name,
-                "user_name": "root",
                 "auto_create": True,
                 "embedding_dimension": 3072,
                 "use_multi_db": False,
@@ -162,7 +174,6 @@ def example_shared_db(db_name: str = "shared-traval-group"):
 
         # Link concept to topic
         graph.add_edge(source_id=concept.id, target_id=topic.id, type="RELATE_TO")
-
         print(f"[INFO] Added nodes for {user_name}")
 
         # Step 5: Query and print ALL for verification
@@ -176,10 +187,10 @@ def example_shared_db(db_name: str = "shared-traval-group"):
     config_alice = GraphDBConfigFactory(
         backend="nebular",
         config={
-            "hosts": ["106.14.142.60:9669", "120.55.160.164:9669", "106.15.38.5:9669"],
-            "password": "Nebula123",
+            "hosts": json.loads(os.getenv("NEBULAR_HOSTS", "localhost")),
+            "user_name": os.getenv("NEBULAR_USER", "root"),
+            "password": os.getenv("NEBULAR_PASSWORD", "xxxxxx"),
             "space": db_name,
-            "user_name": "root",
             "embedding_dimension": 3072,
         },
     )
