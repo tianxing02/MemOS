@@ -113,6 +113,7 @@ class NebulaGraphDB(BaseGraphDB):
             username=config.get("user_name"),
             password=config.get("password"),
         )
+        self.db_name = config.db_name
         self.space = config.get("space")
         self.user_name = config.user_name
         self.system_db_name = "system" if config.use_multi_db else config.space
@@ -854,7 +855,14 @@ class NebulaGraphDB(BaseGraphDB):
         Permanently delete the entire database this instance is using.
         WARNING: This operation is destructive and cannot be undone.
         """
-        raise NotImplementedError
+        if self.config.use_multi_db:
+            self.client.execute(f"DROP DATABASE {self.db_name} IF EXISTS")
+            logger.info(f"Database '{self.db_name}' has been dropped.")
+        else:
+            raise ValueError(
+                f"Refusing to drop protected database: {self.db_name} in "
+                f"Shared Database Multi-Tenant mode"
+            )
 
     def detect_conflicts(self) -> list[tuple[str, str]]:
         """
