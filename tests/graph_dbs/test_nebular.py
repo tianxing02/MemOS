@@ -25,7 +25,6 @@ gpt_config = {
         "base_url": os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1"),
     },
 }
-
 nebular_config = {
     "hosts": json.loads(os.getenv("NEBULAR_HOSTS", "localhost")),
     "user_name": os.getenv("NEBULAR_USER", "root"),
@@ -35,6 +34,8 @@ nebular_config = {
     "embedding_dimension": 3072,
     "use_multi_db": False,
 }
+
+
 embedder_config = EmbedderConfigFactory.model_validate(gpt_config)
 embedder = EmbedderFactory.from_config(embedder_config)
 
@@ -46,33 +47,81 @@ def embed_memory_item(memory: str) -> list[float]:
     return embedding_list
 
 
+now = datetime.now(timezone.utc).isoformat()
+test_node1 = TextualMemoryItem(
+    memory="This is a test node",
+    metadata=TreeNodeTextualMemoryMetadata(
+        memory_type="LongTermMemory",
+        key="Research Topic",
+        hierarchy_level="topic",
+        type="fact",
+        memory_time="2024-01-01",
+        status="activated",
+        visibility="public",
+        updated_at=now,
+        embedding=embed_memory_item("This is a test node"),
+    ),
+)
+
+test_node2 = TextualMemoryItem(
+    memory="This is another test node",
+    metadata=TreeNodeTextualMemoryMetadata(
+        memory_type="LongTermMemory",
+        key="Research Topic",
+        hierarchy_level="topic",
+        type="fact",
+        memory_time="2024-01-01",
+        status="activated",
+        visibility="public",
+        updated_at=now,
+        embedding=embed_memory_item("This is another test node"),
+    ),
+)
+
+
 def test_get_memory_count():
     config = GraphDBConfigFactory(backend="nebular", config=nebular_config)
-
     graph = GraphStoreFactory.from_config(config)
     graph.clear()
-    now = datetime.now(timezone.utc).isoformat()
 
-    # Insert memory
-    mem = TextualMemoryItem(
-        memory="Example A",
-        metadata=TreeNodeTextualMemoryMetadata(
-            memory_type="LongTermMemory",
-            key="Research Topic",
-            hierarchy_level="topic",
-            type="fact",
-            memory_time="2024-01-01",
-            status="activated",
-            visibility="public",
-            updated_at=now,
-            embedding=embed_memory_item("Example A"),
-        ),
-    )
+    mem = test_node1
     graph.add_node(mem.id, mem.memory, mem.metadata.model_dump(exclude_none=True))
 
     count = graph.get_memory_count('"LongTermMemory"')  # quoting string literal for Cypher
     print("Memory Count:", count)
     assert count == 1
+
+
+def test_count_nodes():
+    graph = GraphStoreFactory.from_config(
+        GraphDBConfigFactory(
+            backend="nebular",
+            config=nebular_config,
+        )
+    )
+    graph.clear()
+
+    # Insert two nodes
+    for i in range(2):
+        mem = TextualMemoryItem(
+            memory=f"Memory {i}",
+            metadata=TreeNodeTextualMemoryMetadata(
+                memory_type="LongTermMemory",
+                key="Research Topic",
+                hierarchy_level="topic",
+                type="fact",
+                memory_time="2024-01-01",
+                status="activated",
+                visibility="public",
+                updated_at=now,
+                embedding=embed_memory_item(f"Memory {i}"),
+            ),
+        )
+        graph.add_node(mem.id, mem.memory, mem.metadata.model_dump(exclude_none=True))
+
+    count = graph.count_nodes('"LongTermMemory"')
+    print("Node Count:", count)
+    assert count == 2
 
 
 def test_get_nodes():
@@ -81,25 +130,12 @@ def test_get_nodes():
     )
     graph.clear()
 
-    now = datetime.now(timezone.utc).isoformat()
-    mem = TextualMemoryItem(
-        memory="Test node",
-        metadata=TreeNodeTextualMemoryMetadata(
-            memory_type="LongTermMemory",
-            key="Research Topic",
-            hierarchy_level="topic",
-            type="fact",
-            memory_time="2024-01-01",
-            status="activated",
-            visibility="public",
-            updated_at=now,
-            embedding=embed_memory_item("Test node"),
-        ),
-    )
+    mem = test_node1
     graph.add_node(mem.id, mem.memory, mem.metadata.model_dump(exclude_none=True))
+
     nodes = graph.get_nodes([mem.id])
     assert len(nodes) == 1
-    assert nodes[0]["id"] == mem.id
+    assert nodes[0]["properties"]["id"] == mem.id
 
 
 def test_edge_exists():
@@ -112,8 +148,13 @@ def test_edge_exists():
         memory="Edge topic",
         metadata=TreeNodeTextualMemoryMetadata(
             memory_type="LongTermMemory",
-            key="topic",
-            updated_at=datetime.now().isoformat(),
+            key="Research Topic",
+            hierarchy_level="topic",
+            type="fact",
+            memory_time="2024-01-01",
+            status="activated",
+            visibility="public",
+            updated_at=now,
             embedding=embed_memory_item("Edge topic"),
         ),
     )
@@ -122,8 +163,13 @@ def test_edge_exists():
         memory="Edge concept",
         metadata=TreeNodeTextualMemoryMetadata(
             memory_type="LongTermMemory",
-            key="concept",
-            updated_at=datetime.now().isoformat(),
+            key="Research Topic",
+            hierarchy_level="topic",
+            type="fact",
+            memory_time="2024-01-01",
+            status="activated",
+            visibility="public",
+            updated_at=now,
             embedding=embed_memory_item("Edge concept"),
         ),
     )
@@ -144,18 +190,28 @@ def test_get_edges():
     source = TextualMemoryItem(
         memory="Source",
         metadata=TreeNodeTextualMemoryMetadata(
-            memory_type="WorkingMemory",
-            key="src",
-            updated_at=datetime.now().isoformat(),
+            memory_type="LongTermMemory",
+            key="Research Topic",
+            hierarchy_level="topic",
+            type="fact",
+            memory_time="2024-01-01",
+            status="activated",
+            visibility="public",
+            updated_at=now,
             embedding=embed_memory_item("Source"),
         ),
     )
     target = TextualMemoryItem(
         memory="Target",
         metadata=TreeNodeTextualMemoryMetadata(
-            memory_type="WorkingMemory",
-            key="tgt",
-            updated_at=datetime.now().isoformat(),
+            memory_type="LongTermMemory",
+            key="Research Topic",
+            hierarchy_level="topic",
+            type="fact",
+            memory_time="2024-01-01",
+            status="activated",
+            visibility="public",
+            updated_at=now,
             embedding=embed_memory_item("Target"),
         ),
     )

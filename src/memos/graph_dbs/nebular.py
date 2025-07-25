@@ -281,15 +281,12 @@ class NebulaGraphDB(BaseGraphDB):
         query += "\nRETURN COUNT(n) AS count"
 
         try:
-            print(f"\n ======> query: {query}\n")
             result = self.client.execute(query)
-            print(result.one_or_none()["count"].value)
             return result.one_or_none()["count"].value
         except Exception as e:
             logger.error(f"[get_memory_count] Failed: {e}")
             return -1
 
-    # TODO
     def count_nodes(self, scope: str) -> int:
         query = f"""
                 MATCH (n@Memory)
@@ -297,13 +294,12 @@ class NebulaGraphDB(BaseGraphDB):
                 """
         if not self.config.use_multi_db and self.config.user_name:
             user_name = self.config.user_name
-            query += f"\nAND n.user_name = {user_name}"
+            query += f"\nAND n.user_name = '{user_name}'"
         query += "\nRETURN count(n) AS count"
 
         result = self.client.execute(query)
-        return result.one_or_none().values()["count"]
+        return result.one_or_none()["count"].value
 
-    # TODO
     def edge_exists(
         self, source_id: str, target_id: str, type: str = "ANY", direction: str = "OUTGOING"
     ) -> bool:
@@ -319,15 +315,15 @@ class NebulaGraphDB(BaseGraphDB):
             True if the edge exists, otherwise False.
         """
         # Prepare the relationship pattern
-        rel = "r" if type == "ANY" else f"r:{type}"
+        rel = "r" if type == "ANY" else f"r@{type}"
 
         # Prepare the match pattern with direction
         if direction == "OUTGOING":
-            pattern = f"(a@Memory {{id: {source_id}}})-[{rel}]->(b@Memory {{id: {target_id}}})"
+            pattern = f"(a@Memory {{id: '{source_id}'}})-[{rel}]->(b@Memory {{id: '{target_id}'}})"
         elif direction == "INCOMING":
-            pattern = f"(a@Memory {{id: {source_id}}})<-[{rel}]-(b@Memory {{id: {target_id}}})"
+            pattern = f"(a@Memory {{id: '{source_id}'}})<-[{rel}]-(b@Memory {{id: '{target_id}'}})"
         elif direction == "ANY":
-            pattern = f"(a@Memory {{id: {source_id}}})-[{rel}]-(b@Memory {{id: {target_id}}})"
+            pattern = f"(a@Memory {{id: '{source_id}'}})-[{rel}]-(b@Memory {{id: '{target_id}'}})"
         else:
             raise ValueError(
                 f"Invalid direction: {direction}. Must be 'OUTGOING', 'INCOMING', or 'ANY'."
@@ -335,10 +331,11 @@ class NebulaGraphDB(BaseGraphDB):
         query = f"MATCH {pattern}"
         if not self.config.use_multi_db and self.config.user_name:
             user_name = self.config.user_name
-            query += f"\nWHERE a.user_name = {user_name} AND b.user_name = {user_name}"
+            query += f"\nWHERE a.user_name = '{user_name}' AND b.user_name = '{user_name}'"
         query += "\nRETURN r"
 
         # Run the Cypher query
+        print("\n ======> query: ", query)
         result = self.client.execute(query)
         return result.one_or_none().values() is not None
 
@@ -374,7 +371,6 @@ class NebulaGraphDB(BaseGraphDB):
             logger.error(f"[get_node] Failed to retrieve node '{id}': {e}")
             return None
 
-    # TODO
     def get_nodes(self, ids: list[str]) -> list[dict[str, Any]]:
         """
         Retrieve the metadata and memory of a list of nodes.
@@ -392,14 +388,13 @@ class NebulaGraphDB(BaseGraphDB):
 
         where_user = ""
         if not self.config.use_multi_db and self.config.user_name:
-            where_user = f" AND n.user_name = {self.config.user_name}"
+            where_user = f" AND n.user_name = '{self.config.user_name}'"
 
         query = f"MATCH (n@Memory) WHERE n.id IN {ids} {where_user} RETURN n"
 
         results = self.client.execute(query)
-        return [self._parse_node(dict(record.values()["n"])) for record in results]
+        return [self._parse_node(record["n"]) for record in results]
 
-    # TODO
     def get_edges(self, id: str, type: str = "ANY", direction: str = "ANY") -> list[dict[str, str]]:
         """
         Get edges connected to a node, with optional type and direction filter.
@@ -417,15 +412,15 @@ class NebulaGraphDB(BaseGraphDB):
             ]
         """
         # Build relationship type filter
-        rel_type = "" if type == "ANY" else f":{type}"
+        rel_type = "" if type == "ANY" else f"@{type}"
 
         # Build Cypher pattern based on direction
         if direction == "OUTGOING":
             pattern = f"(a@Memory)-[r{rel_type}]->(b@Memory)"
-            where_clause = f"a.id = {id}"
+            where_clause = f"a.id = '{id}'"
         elif direction == "INCOMING":
             pattern = f"(a@Memory)<-[r{rel_type}]-(b@Memory)"
-            where_clause = f"a.id = {id}"
+            where_clause = f"a.id = '{id}'"
         elif direction == "ANY":
             pattern = f"(a@Memory)-[r{rel_type}]-(b@Memory)"
             where_clause = f"a.id = {id} OR b.id = {id}"
@@ -433,12 +428,12 @@ class NebulaGraphDB(BaseGraphDB):
             raise ValueError("Invalid direction. Must be 'OUTGOING', 'INCOMING', or 'ANY'.")
 
         if not self.config.use_multi_db and self.config.user_name:
-            where_clause += f" AND a.user_name = {self.config.user_name} AND b.user_name = {self.config.user_name}"
+            where_clause += f" AND a.user_name = '{self.config.user_name}' AND b.user_name = '{self.config.user_name}'"
 
         query = f"""
                     MATCH {pattern}
                     WHERE {where_clause}
-                    RETURN a.id AS from_id, b.id AS to_id, type(r) AS type
+                    RETURN a.id AS from_id, b.id AS to_id, type(r) AS edge_type
                 """
 
         result = self.client.execute(query)
@@ -448,11 +443,12 @@ class NebulaGraphDB(BaseGraphDB):
                 {
                     "from": record["from_id"].value,
                     "to": record["to_id"].value,
-                    "type": record["type"].value,
+                    "type": record["edge_type"].value,
                 }
             )
         return edges
 
+    # TODO
     def get_neighbors_by_tag(
         self,
         tags: list[str],
@@ -544,7 +540,7 @@ class NebulaGraphDB(BaseGraphDB):
                    collect(EDGES(p)) AS edge_chains
             """
 
-        result = self.client.execute(gql).one_or_none()  # 执行查询
+        result = self.client.execute(gql).one_or_none()
         if not result or result.size == 0:
             return {"core_node": None, "neighbors": [], "edges": []}
 
@@ -734,7 +730,6 @@ class NebulaGraphDB(BaseGraphDB):
 
         return output
 
-    # TODO
     def clear(self) -> None:
         """
         Clear the entire graph if the target database exists.
@@ -745,13 +740,11 @@ class NebulaGraphDB(BaseGraphDB):
             else:
                 query = "MATCH (n) DETACH DELETE n"
 
-            # Step 2: Clear the graph in that database
             self.client.execute(query)
             logger.info("Cleared all nodes from database.")
 
         except Exception as e:
             logger.error(f"[ERROR] Failed to clear database: {e}")
-            raise
 
     def export_graph(self) -> dict[str, Any]:
         """
