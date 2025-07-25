@@ -113,7 +113,7 @@ class NebulaGraphDB(BaseGraphDB):
             username=config.get("user_name"),
             password=config.get("password"),
         )
-        self.db_name = config.db_name
+        self.db_name = config.space
         self.space = config.get("space")
         self.user_name = config.user_name
         self.system_db_name = "system" if config.use_multi_db else config.space
@@ -336,7 +336,6 @@ class NebulaGraphDB(BaseGraphDB):
         query += "\nRETURN r"
 
         # Run the Cypher query
-        print("\n ======> query: ", query)
         result = self.client.execute(query)
         return result.one_or_none().values() is not None
 
@@ -661,7 +660,40 @@ class NebulaGraphDB(BaseGraphDB):
             - Supports structured querying such as tag/category/importance/time filtering.
             - Can be used for faceted recall or prefiltering before embedding rerank.
         """
-        raise NotImplementedError
+        where_clauses = []
+        for _i, f in enumerate(filters):
+            field = f["field"]
+            op = f.get("op", "=")
+            value = f["value"]
+
+            # Build WHERE clause
+            if op == "=":
+                where_clauses.append(f"n.{field} = {value}")
+            elif op == "in":
+                where_clauses.append(f"n.{field} IN {value}")
+            elif op == "contains":
+                where_clauses.append(f"ANY(x IN {value} WHERE x IN n.{field})")
+            elif op == "starts_with":
+                where_clauses.append(f"n.{field} STARTS WITH {value}")
+            elif op == "ends_with":
+                where_clauses.append(f"n.{field} ENDS WITH {value}")
+            elif op in [">", ">=", "<", "<="]:
+                where_clauses.append(f"n.{field} {op} {value}")
+            else:
+                raise ValueError(f"Unsupported operator: {op}")
+
+        if not self.config.use_multi_db and self.config.user_name:
+            where_clauses.append(f"n.user_name = '{self.config.user_name}'")
+
+        where_str = " AND ".join(where_clauses)
+        query = f"MATCH (n@Memory) WHERE {where_str} RETURN n.id AS id"
+
+        try:
+            print("\n==========>   query:\n", query)
+            result = self.client.execute(query)
+            return [record["id"].value for record in result]
+        except Exception as e:
+            logger.error(f"Failed to get metadata: {e}")
 
     def get_grouped_counts(
         self,
@@ -827,7 +859,6 @@ class NebulaGraphDB(BaseGraphDB):
            '''
             self.client.execute(edge_gql)
 
-    # TODO
     def get_all_memory_items(self, scope: str) -> list[dict]:
         """
         Retrieve all memory items of a specific memory_type.
@@ -838,7 +869,24 @@ class NebulaGraphDB(BaseGraphDB):
         Returns:
             list[dict]: Full list of memory items under this scope.
         """
-        raise NotImplementedError
+        if scope not in {"WorkingMemory", "LongTermMemory", "UserMemory"}:
+            raise ValueError(f"Unsupported memory type scope: {scope}")
+
+        where_clause = f"WHERE n.memory_type = '{scope}'"
+
+        if not self.config.use_multi_db and self.config.user_name:
+            where_clause += f" AND n.user_name = '{self.config.user_name}'"
+
+        query = f"""
+                   MATCH (n@Memory)
+                   {where_clause}
+                   RETURN n
+                   """
+        try:
+            results = self.client.execute(query)
+            return [self._parse_node(record["n"]) for record in results]
+        except Exception as e:
+            logger.error(f"Failed to get memories: {e}")
 
     # TODO
     def get_structure_optimization_candidates(self, scope: str) -> list[dict]:
@@ -847,16 +895,35 @@ class NebulaGraphDB(BaseGraphDB):
         - Isolated nodes, nodes with empty background, or nodes with exactly one child.
         - Plus: the child of any parent node that has exactly one child.
         """
-        raise NotImplementedError
+        where_clause = f"""
+                        WHERE n.memory_type = '{scope}'
+                          AND n.status = 'activated'
+                          AND NOT ( (n)-[r@PARENT]->() OR ()-[r@PARENT]->(n) )
+                    """
 
-    # TODO
+        if not self.config.use_multi_db and self.config.user_name:
+            where_clause += f" AND n.user_name = '{self.config.user_name}'"
+
+        query = f"""
+                    MATCH (n@Memory)
+                    {where_clause}
+                    RETURN n.id AS id, n AS node
+                    """
+        try:
+            results = self.client.execute(query)
+            return [
+                self._parse_node({"id": record["id"], **dict(record["node"])}) for record in results
+            ]
+        except Exception as e:
+            logger.error(f"Failed : {e}")
+
     def drop_database(self) -> None:
         """
         Permanently delete the entire database this instance is using.
         WARNING: This operation is destructive and cannot be undone.
         """
         if self.config.use_multi_db:
-            self.client.execute(f"DROP DATABASE {self.db_name} IF EXISTS")
+            self.client.execute(f"DROP GRAPH {self.db_name}")
             logger.info(f"Database '{self.db_name}' has been dropped.")
         else:
             raise ValueError(
@@ -992,7 +1059,6 @@ class NebulaGraphDB(BaseGraphDB):
         """
         raise NotImplementedError
 
-    # TODO
     def _index_exists(self, index_name: str) -> bool:
         """
         Check if an index with the given name exists.
