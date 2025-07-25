@@ -132,7 +132,25 @@ class NebulaGraphDB(BaseGraphDB):
             logger.error(f"Failed to insert vertex {id}: {e}")
 
     def update_node(self, id: str, fields: dict[str, Any]) -> None:
-        raise NotImplementedError
+        """
+        Update node fields in Nebular, auto-converting `created_at` and `updated_at` to datetime type if present.
+        """
+        fields = fields.copy()
+        set_clauses = []
+        for k, v in fields.items():
+            set_clauses.append(f"n.{k} = {_format_value(v, k)}")
+
+        set_clause_str = ",\n    ".join(set_clauses)
+
+        query = f"""
+            MATCH (n@Memory {{id: "{id}"}})
+            """
+
+        if not self.config.use_multi_db and self.config.user_name:
+            query += f'WHERE n.user_name = "{self.config.user_name}"'
+
+        query += f"\nSET {set_clause_str}"
+        self.client.execute(query)
 
     def delete_node(self, id: str) -> None:
         raise NotImplementedError
@@ -159,8 +177,8 @@ class NebulaGraphDB(BaseGraphDB):
            '''
         try:
             self.client.execute(insert_stmt)
-        except Exception:
-            logger.error("Failed to insert edge")
+        except Exception as e:
+            logger.error(f"Failed to insert edge: {e}", exc_info=True)
 
     def delete_edge(self, source_id: str, target_id: str, type: str) -> None:
         raise NotImplementedError
@@ -220,7 +238,58 @@ class NebulaGraphDB(BaseGraphDB):
         top_k: int = 5,
         min_overlap: int = 1,
     ) -> list[dict[str, Any]]:
-        raise NotImplementedError
+        """
+        Find top-K neighbor nodes with maximum tag overlap.
+
+        Args:
+            tags: The list of tags to match.
+            exclude_ids: Node IDs to exclude (e.g., local cluster).
+            top_k: Max number of neighbors to return.
+            min_overlap: Minimum number of overlapping tags required.
+
+        Returns:
+            List of dicts with node details and overlap count.
+        """
+        if not tags:
+            return []
+
+        tag_filter_str = ", ".join(f'"{tag}"' for tag in tags)
+
+        gql = """
+                MATCH (n@Memory)
+                WHERE n.status = "activated"
+                  AND n.node_type <> "reasoning"
+                  AND n.memory_type <> "WorkingMemory"
+            """
+
+        if exclude_ids:
+            exclude_str = ", ".join(f'"{eid}"' for eid in exclude_ids)
+            gql += f" AND id(n) NOT IN [{exclude_str}]"
+
+        if self.config.user_name and not self.config.use_multi_db:
+            gql += f' AND n.user_name = "{self.config.user_name}"'
+            gql += f"""
+                WITH n, n.tags AS tags
+                UNWIND tags AS tag
+                WITH n, tag
+                WHERE tag IN [{tag_filter_str}]
+                WITH n, count(*) AS overlap_count
+                WHERE overlap_count >= {min_overlap}
+                RETURN n, overlap_count
+                ORDER BY overlap_count DESC
+                LIMIT {top_k}
+                """
+
+        print("===== GQL:\n", gql)
+        try:
+            result = self.client.execute(gql)
+            return [
+                {**self._parse_node(row.values[0]), "overlap_count": row.values[1].cast(int)}
+                for row in result.rows()
+            ]
+        except Exception as e:
+            logger.error(f"Failed to get neighbors by tag: {e}", exc_info=True)
+            return []
 
     def get_children_with_embeddings(self, id: str) -> list[dict[str, Any]]:
         raise NotImplementedError
@@ -231,7 +300,54 @@ class NebulaGraphDB(BaseGraphDB):
     def get_subgraph(
         self, center_id: str, depth: int = 2, center_status: str = "activated"
     ) -> dict[str, Any]:
-        raise NotImplementedError
+        """
+        Retrieve a local subgraph centered at a given node.
+        Args:
+            center_id: The ID of the center node.
+            depth: The hop distance for neighbors.
+            center_status: Required status for center node.
+        Returns:
+            {
+                "core_node": {...},
+                "neighbors": [...],
+                "edges": [...]
+            }
+        """
+        if not 1 <= depth <= 5:
+            raise ValueError("depth must be 1-5")
+
+        user_name = self.config.user_name
+        gql = f"""
+             MATCH (center@Memory)
+            WHERE center.id = '{center_id}'
+              AND center.status = '{center_status}'
+              AND center.user_name = '{user_name}'
+            OPTIONAL MATCH p = (center)-[e]->{{1,{depth}}}(neighbor@Memory)
+            WHERE neighbor.user_name = '{user_name}'
+            RETURN center,
+                   collect(DISTINCT neighbor) AS neighbors,
+                   collect(EDGES(p)) AS edge_chains
+            """
+
+        result = self.client.execute(gql).one_or_none()  # 执行查询
+        if not result or result.size == 0:
+            return {"core_node": None, "neighbors": [], "edges": []}
+
+        core_node = self._parse_node(result["center"])
+        neighbors = [self._parse_node(n) for n in result["neighbors"].value]
+        edges = []
+        for rel_chains in result["edge_chains"].value:
+            for chain in rel_chains.value:
+                edge = chain.value
+                edges.append(
+                    {
+                        "type": edge.get_type(),
+                        "source": edge.get_src_id(),
+                        "target": edge.get_dst_id(),
+                    }
+                )
+
+        return {"core_node": core_node, "neighbors": neighbors, "edges": edges}
 
     def get_context_chain(self, id: str, type: str = "FOLLOWS") -> list[str]:
         raise NotImplementedError
@@ -273,11 +389,11 @@ class NebulaGraphDB(BaseGraphDB):
 
         where_clauses = []
         if scope:
-            where_clauses.append(f'n.memory_type == "{scope}"')
+            where_clauses.append(f'n.memory_type = "{scope}"')
         if status:
-            where_clauses.append(f'n.status == "{status}"')
+            where_clauses.append(f'n.status = "{status}"')
         if not self.config.use_multi_db and self.config.user_name:
-            where_clauses.append(f'n.user_name == "{self.config.user_name}"')
+            where_clauses.append(f'n.user_name = "{self.config.user_name}"')
 
         where_clause = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
 
@@ -320,7 +436,67 @@ class NebulaGraphDB(BaseGraphDB):
         where_clause: str = "",
         params: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
-        raise NotImplementedError
+        """
+        Count nodes grouped by any fields.
+
+        Args:
+            group_fields (list[str]): Fields to group by, e.g., ["memory_type", "status"]
+            where_clause (str, optional): Extra WHERE condition. E.g.,
+            "WHERE n.status = 'activated'"
+            params (dict, optional): Parameters for WHERE clause.
+
+        Returns:
+            list[dict]: e.g., [{ 'memory_type': 'WorkingMemory', 'status': 'active', 'count': 10 }, ...]
+        """
+        if not group_fields:
+            raise ValueError("group_fields cannot be empty")
+
+            # GQL-specific modifications
+        if not self.config.use_multi_db and self.config.user_name:
+            user_clause = f"n.user_name = '{self.config.user_name}'"
+            if where_clause:
+                where_clause = where_clause.strip()
+                if where_clause.upper().startswith("WHERE"):
+                    where_clause += f" AND {user_clause}"
+                else:
+                    where_clause = f"WHERE {where_clause} AND {user_clause}"
+            else:
+                where_clause = f"WHERE {user_clause}"
+
+        # Inline parameters if provided
+        if params:
+            for key, value in params.items():
+                # Handle different value types appropriately
+                if isinstance(value, str):
+                    value = f"'{value}'"
+                where_clause = where_clause.replace(f"${key}", str(value))
+
+        return_fields = []
+        group_by_fields = []
+
+        for field in group_fields:
+            alias = field.replace(".", "_")  # 防止特殊字符
+            return_fields.append(f"n.{field} AS {alias}")
+            group_by_fields.append(alias)
+        # Full GQL query construction
+        gql = f"""
+            MATCH (n)
+            {where_clause}
+            RETURN {", ".join(return_fields)}, COUNT(n) AS count
+            GROUP BY {", ".join(group_by_fields)}
+            """
+        result = self.client.execute(gql)  # Pure GQL string execution
+
+        output = []
+        for record in result:
+            group_values = {}
+            for i, field in enumerate(group_fields):
+                value = record.values()[i].as_string()
+                group_values[field] = value
+            count_value = record["count"].value
+            output.append({**group_values, "count": count_value})
+
+        return output
 
     # Structure Maintenance
     def deduplicate_nodes(self) -> None:
@@ -422,9 +598,11 @@ class NebulaGraphDB(BaseGraphDB):
                 embedding VECTOR<3072, FLOAT>,
                 PRIMARY KEY(id)
             }),
-            EDGE RELATE_TO (Memory) -[{user_name STRING}]-> (Memory)
+            EDGE RELATE_TO (Memory) -[{user_name STRING}]-> (Memory),
+            EDGE PARENT (Memory) -[{user_name STRING}]-> (Memory)
         }
         """
+
         create_graph = "CREATE GRAPH IF NOT EXISTS memory_graph TYPED MemoryGraphType"
         set_graph_working = "SESSION SET GRAPH memory_graph"
         create_vector_index = """
