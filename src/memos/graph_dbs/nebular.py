@@ -1,6 +1,7 @@
 from datetime import datetime
-from typing import Any, Literal
+from typing import Any
 
+from nebulagraph_python.py_data_types import NVector
 from nebulagraph_python.value_wrapper import ValueWrapper
 
 from memos.configs.graph_db import NebulaGraphDBConfig
@@ -10,6 +11,34 @@ from memos.log import get_logger
 
 
 logger = get_logger(__name__)
+
+
+def _compose_node(item: dict[str, Any]) -> tuple[str, str, dict[str, Any]]:
+    node_id = item["id"]
+    memory = item["memory"]
+    metadata = item.get("metadata", {})
+    return node_id, memory, metadata
+
+
+def _prepare_node_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+    """
+    Ensure metadata has proper datetime fields and normalized types.
+
+    - Fill `created_at` and `updated_at` if missing (in ISO 8601 format).
+    - Convert embedding to list of float if present.
+    """
+    now = datetime.utcnow().isoformat()
+
+    # Fill timestamps if missing
+    metadata.setdefault("created_at", now)
+    metadata.setdefault("updated_at", now)
+
+    # Normalize embedding type
+    embedding = metadata.get("embedding")
+    if embedding and isinstance(embedding, list):
+        metadata["embedding"] = [float(x) for x in embedding]
+
+    return metadata
 
 
 def _escape_str(value: str) -> str:
@@ -30,6 +59,11 @@ def _format_value(val: Any, key: str = "") -> str:
             return f"VECTOR<{dim}, FLOAT>([{joined}])"
         else:
             return f"[{', '.join(_format_value(v) for v in val)}]"
+    elif isinstance(val, NVector):
+        if key == "embedding":
+            dim = len(val)
+            joined = ",".join(str(float(x)) for x in val)
+            return f"VECTOR<{dim}, FLOAT>([{joined}])"
     elif val is None:
         return "NULL"
     else:
@@ -94,19 +128,72 @@ class NebulaGraphDB(BaseGraphDB):
         self,
         label: str = "Memory",
         vector_property: str = "embedding",
-        dimensions: int = 1536,
+        dimensions: int = 3072,
         index_name: str = "memory_vector_index",
     ) -> None:
-        """raise NotImplementedError"""
+        create_vector_index = f"""
+                CREATE VECTOR INDEX IF NOT EXISTS {index_name}
+                ON NODE Memory::{vector_property}
+                OPTIONS {{
+                    DIM: {dimensions},
+                    METRIC: L2,
+                    TYPE: IVF,
+                    NLIST: 100,
+                    TRAINSIZE: 1000
+                }}
+                FOR memory_graph
+            """
+        self.client.execute(create_vector_index)
 
+    # TODO
     def get_memory_count(self, memory_type: str) -> int:
-        raise NotImplementedError
+        query = f"""
+                MATCH (n@Memory)
+                WHERE n.memory_type = {memory_type}
+                """
+        if not self.config.use_multi_db and self.config.user_name:
+            user_name = self.config.user_name
+            query += f"\nAND n.user_name = {user_name}"
+        query += "\nRETURN COUNT(n) AS count"
 
+        result = self.client.execute(query)
+        return result.one_or_none().values()["count"]
+
+    # TODO
     def count_nodes(self, scope: str) -> int:
-        raise NotImplementedError
+        query = f"""
+                MATCH (n@Memory)
+                WHERE n.memory_type = {scope}
+                """
+        if not self.config.use_multi_db and self.config.user_name:
+            user_name = self.config.user_name
+            query += f"\nAND n.user_name = {user_name}"
+        query += "\nRETURN count(n) AS count"
+
+        result = self.client.execute(query)
+        return result.one_or_none().values()["count"]
 
     def remove_oldest_memory(self, memory_type: str, keep_latest: int) -> None:
-        raise NotImplementedError
+        """
+        Remove all WorkingMemory nodes except the latest `keep_latest` entries.
+
+        Args:
+            memory_type (str): Memory type (e.g., 'WorkingMemory', 'LongTermMemory').
+            keep_latest (int): Number of latest WorkingMemory entries to keep.
+        """
+        optional_condition = ""
+        if not self.config.use_multi_db and self.config.user_name:
+            optional_condition = f"AND n.user_name = '{self.config.user_name}'"
+
+        query = f"""
+            MATCH (n@Memory)
+            WHERE n.memory_type = '{memory_type}'
+            {optional_condition}
+            ORDER BY n.updated_at DESC
+            OFFSET {keep_latest}
+            DETACH DELETE n
+        """
+        self.client.execute(query)
 
     def add_node(self, id: str, memory: str, metadata: dict[str, Any]) -> None:
         """
@@ -153,7 +240,19 @@ class NebulaGraphDB(BaseGraphDB):
         self.client.execute(query)
 
     def delete_node(self, id: str) -> None:
-        raise NotImplementedError
+        """
+        Delete a node from the graph.
+        Args:
+            id: Node identifier to delete.
+        """
+        query = f"""
+            MATCH (n@Memory {{id: "{id}"}})
+            """
+        if not self.config.use_multi_db and self.config.user_name:
+            user_name = self.config.user_name
+            query += f" WHERE n.user_name = {_format_value(user_name)}"
+        query += "\n DETACH DELETE n"
+        self.client.execute(query)
 
     # Edge (Relationship) Management
     def add_edge(self, source_id: str, target_id: str, type: str):
@@ -181,12 +280,63 @@ class NebulaGraphDB(BaseGraphDB):
             logger.error(f"Failed to insert edge: {e}", exc_info=True)
 
     def delete_edge(self, source_id: str, target_id: str, type: str) -> None:
-        raise NotImplementedError
+        """
+        Delete a specific edge between two nodes.
+        Args:
+            source_id: ID of the source node.
+            target_id: ID of the target node.
+            type: Relationship type to remove.
+        """
+        query = f"""
+                   MATCH (a@Memory) -[r@{type}]-> (b@Memory)
+                   WHERE a.id = {_format_value(source_id)} AND b.id = {_format_value(target_id)}
+               """
 
+        if not self.config.use_multi_db and self.config.user_name:
+            user_name = self.config.user_name
+            query += f" AND a.user_name = {_format_value(user_name)} AND b.user_name = {_format_value(user_name)}"
+
+        query += "\nDELETE r"
+        self.client.execute(query)
+
+    # TODO
     def edge_exists(
         self, source_id: str, target_id: str, type: str = "ANY", direction: str = "OUTGOING"
     ) -> bool:
-        raise NotImplementedError
+        """
+        Check if an edge exists between two nodes.
+        Args:
+            source_id: ID of the source node.
+            target_id: ID of the target node.
+            type: Relationship type. Use "ANY" to match any relationship type.
+            direction: Direction of the edge.
+                       Use "OUTGOING" (default), "INCOMING", or "ANY".
+        Returns:
+            True if the edge exists, otherwise False.
+        """
+        # Prepare the relationship pattern
+        rel = "r" if type == "ANY" else f"r:{type}"
+
+        # Prepare the match pattern with direction
+        if direction == "OUTGOING":
+            pattern = f"(a@Memory {{id: {source_id}}})-[{rel}]->(b@Memory {{id: {target_id}}})"
+        elif direction == "INCOMING":
+            pattern = f"(a@Memory {{id: {source_id}}})<-[{rel}]-(b@Memory {{id: {target_id}}})"
+        elif direction == "ANY":
+            pattern = f"(a@Memory {{id: {source_id}}})-[{rel}]-(b@Memory {{id: {target_id}}})"
+        else:
+            raise ValueError(
+                f"Invalid direction: {direction}. Must be 'OUTGOING', 'INCOMING', or 'ANY'."
+            )
+        query = f"MATCH {pattern}"
+        if not self.config.use_multi_db and self.config.user_name:
+            user_name = self.config.user_name
+            query += f"\nWHERE a.user_name = {user_name} AND b.user_name = {user_name}"
+        query += "\nRETURN r"
+
+        # Run the Cypher query
+        result = self.client.execute(query)
+        return result.one_or_none().values() is not None
 
     # Graph Query & Reasoning
     def get_node(self, id: str) -> dict[str, Any] | None:
@@ -220,17 +370,86 @@ class NebulaGraphDB(BaseGraphDB):
             logger.error(f"[get_node] Failed to retrieve node '{id}': {e}")
             return None
 
+    # TODO
     def get_nodes(self, ids: list[str]) -> list[dict[str, Any]]:
-        raise NotImplementedError
+        """
+        Retrieve the metadata and memory of a list of nodes.
+        Args:
+            ids: List of Node identifier.
+        Returns:
+        list[dict]: Parsed node records containing 'id', 'memory', and 'metadata'.
 
+        Notes:
+            - Assumes all provided IDs are valid and exist.
+            - Returns empty list if input is empty.
+        """
+        if not ids:
+            return []
+
+        where_user = ""
+        if not self.config.use_multi_db and self.config.user_name:
+            where_user = f" AND n.user_name = {self.config.user_name}"
+
+        query = f"MATCH (n@Memory) WHERE n.id IN {ids} {where_user} RETURN n"
+
+        results = self.client.execute(query)
+        return [self._parse_node(dict(record.values()["n"])) for record in results]
+
+    # TODO
     def get_edges(self, id: str, type: str = "ANY", direction: str = "ANY") -> list[dict[str, str]]:
-        raise NotImplementedError
+        """
+        Get edges connected to a node, with optional type and direction filter.
 
-    def get_neighbors(
-        self, id: str, type: str, direction: Literal["in", "out", "both"] = "out"
-    ) -> list[str]:
-        raise NotImplementedError
+        Args:
+            id: Node ID to retrieve edges for.
+            type: Relationship type to match, or 'ANY' to match all.
+            direction: 'OUTGOING', 'INCOMING', or 'ANY'.
 
+        Returns:
+            List of edges:
+            [
+              {"from": "source_id", "to": "target_id", "type": "RELATE"},
+              ...
+            ]
+        """
+        # Build relationship type filter
+        rel_type = "" if type == "ANY" else f":{type}"
+
+        # Build Cypher pattern based on direction
+        if direction == "OUTGOING":
+            pattern = f"(a@Memory)-[r{rel_type}]->(b@Memory)"
+            where_clause = f"a.id = {id}"
+        elif direction == "INCOMING":
+            pattern = f"(a@Memory)<-[r{rel_type}]-(b@Memory)"
+            where_clause = f"a.id = {id}"
+        elif direction == "ANY":
+            pattern = f"(a@Memory)-[r{rel_type}]-(b@Memory)"
+            where_clause = f"a.id = {id} OR b.id = {id}"
+        else:
+            raise ValueError("Invalid direction. Must be 'OUTGOING', 'INCOMING', or 'ANY'.")
+
+        if not self.config.use_multi_db and self.config.user_name:
+            where_clause += f" AND a.user_name = {self.config.user_name} AND b.user_name = {self.config.user_name}"
+
+        query = f"""
+                    MATCH {pattern}
+                    WHERE {where_clause}
+                    RETURN a.id AS from_id, b.id AS to_id, type(r) AS type
+                """
+
+        result = self.client.execute(query)
+        edges = []
+        for record in result:
+            edges.append(
+                {
+                    "from": record["from_id"].value,
+                    "to": record["to_id"].value,
+                    "type": record["type"].value,
+                }
+            )
+        return edges
+
+    # TODO
     def get_neighbors_by_tag(
         self,
         tags: list[str],
@@ -250,52 +469,45 @@ class NebulaGraphDB(BaseGraphDB):
         Returns:
             List of dicts with node details and overlap count.
         """
-        if not tags:
-            return []
+        where_user = ""
+        if not self.config.use_multi_db and self.config.user_name:
+            user_name = self.config.user_name
+            where_user = f"AND n.user_name = {user_name}"
 
-        tag_filter_str = ", ".join(f'"{tag}"' for tag in tags)
-
-        gql = """
-                MATCH (n@Memory)
-                WHERE n.status = "activated"
-                  AND n.node_type <> "reasoning"
-                  AND n.memory_type <> "WorkingMemory"
-            """
-
-        if exclude_ids:
-            exclude_str = ", ".join(f'"{eid}"' for eid in exclude_ids)
-            gql += f" AND id(n) NOT IN [{exclude_str}]"
-
-        if self.config.user_name and not self.config.use_multi_db:
-            gql += f' AND n.user_name = "{self.config.user_name}"'
-            gql += f"""
-                WITH n, n.tags AS tags
-                UNWIND tags AS tag
-                WITH n, tag
-                WHERE tag IN [{tag_filter_str}]
-                WITH n, count(*) AS overlap_count
-                WHERE overlap_count >= {min_overlap}
-                RETURN n, overlap_count
-                ORDER BY overlap_count DESC
-                LIMIT {top_k}
-                """
-
-        print("===== GQL:\n", gql)
-        try:
-            result = self.client.execute(gql)
-            return [
-                {**self._parse_node(row.values[0]), "overlap_count": row.values[1].cast(int)}
-                for row in result.rows()
-            ]
-        except Exception as e:
-            logger.error(f"Failed to get neighbors by tag: {e}", exc_info=True)
-            return []
+        query = f"""
+                       MATCH (n@Memory)
+                       LET overlap_tags = [tag IN n.tags WHERE tag IN {tags}]
+                       WHERE NOT n.id IN {exclude_ids}
+                         AND n.status = 'activated'
+                         AND n.node_type <> 'reasoning'
+                         AND n.memory_type <> 'WorkingMemory'
+                         {where_user}
+                         AND size(overlap_tags) >= {min_overlap}
+                       RETURN n, size(overlap_tags) AS overlap_count
+                       ORDER BY overlap_count DESC
+                       LIMIT {top_k}
+                   """
+        print(query)
+        result = self.client.execute(query)
+        return [self._parse_node(dict(record)) for record in result]
 
     def get_children_with_embeddings(self, id: str) -> list[dict[str, Any]]:
-        raise NotImplementedError
+        where_user = ""
 
-    def get_path(self, source_id: str, target_id: str, max_depth: int = 3) -> list[str]:
-        raise NotImplementedError
+        if not self.config.use_multi_db and self.config.user_name:
+            user_name = self.config.user_name
+            where_user = f"AND p.user_name = '{user_name}' AND c.user_name = '{user_name}'"
+
+        query = f"""
+                        MATCH (p@Memory)-[@PARENT]->(c@Memory)
+                        WHERE p.id = "{id}" {where_user}
+                        RETURN c.id AS id, c.embedding AS embedding, c.memory AS memory
+                    """
+        result = self.client.execute(query)
+        return [
+            {"id": r["id"].value, "embedding": r["embedding"].value, "memory": r["memory"].value}
+            for r in result
+        ]
 
     def get_subgraph(
         self, center_id: str, depth: int = 2, center_status: str = "activated"
@@ -348,9 +560,6 @@ class NebulaGraphDB(BaseGraphDB):
                 )
 
         return {"core_node": core_node, "neighbors": neighbors, "edges": edges}
-
-    def get_context_chain(self, id: str, type: str = "FOLLOWS") -> list[str]:
-        raise NotImplementedError
 
     # Search / recall operations
     def search_by_embedding(
@@ -427,6 +636,7 @@ class NebulaGraphDB(BaseGraphDB):
             logger.error(f"[search_by_embedding] Result parse failed: {e}")
             return []
 
+    # TODO
     def get_by_metadata(self, filters: list[dict[str, Any]]) -> list[str]:
         raise NotImplementedError
 
@@ -498,21 +708,9 @@ class NebulaGraphDB(BaseGraphDB):
 
         return output
 
-    # Structure Maintenance
-    def deduplicate_nodes(self) -> None:
-        raise NotImplementedError
-
-    def detect_conflicts(self) -> list[tuple[str, str]]:
-        raise NotImplementedError
-
-    def merge_nodes(self, id1: str, id2: str) -> str:
-        raise NotImplementedError
-
-    # Utilities
+    # TODO
     def clear(self) -> None:
-        """
         raise NotImplementedError
-        """
 
     def export_graph(self) -> dict[str, Any]:
         """
@@ -549,10 +747,14 @@ class NebulaGraphDB(BaseGraphDB):
             raise RuntimeError(f"[EXPORT GRAPH - NODES] Exception: {e}") from e
 
         try:
-            full_edge_query = f"{edge_query} RETURN a.id AS source, b.id AS target"
+            full_edge_query = f"{edge_query} RETURN a.id AS source, b.id AS target, type(r) as edge"
             edge_result = self.client.execute(full_edge_query)
             edges = [
-                {"source": row.values()[0].value, "target": row.values()[1].value}
+                {
+                    "source": row.values()[0].value,
+                    "target": row.values()[1].value,
+                    "type": row.values()[2].value,
+                }
                 for row in edge_result
             ]
         except Exception as e:
@@ -561,14 +763,44 @@ class NebulaGraphDB(BaseGraphDB):
         return {"nodes": nodes, "edges": edges}
 
     def import_graph(self, data: dict[str, Any]) -> None:
-        raise NotImplementedError
+        """
+        Import the entire graph from a serialized dictionary.
 
+        Args:
+            data: A dictionary containing all nodes and edges to be loaded.
+        """
+        for node in data.get("nodes", []):
+            id, memory, metadata = _compose_node(node)
+
+            if not self.config.use_multi_db and self.config.user_name:
+                metadata["user_name"] = self.config.user_name
+
+            metadata = _prepare_node_metadata(metadata)
+            properties = ", ".join(f"{k}: {_format_value(v, k)}" for k, v in metadata.items())
+            node_gql = f"INSERT OR IGNORE (n@Memory {{{properties}}})"
+            self.client.execute(node_gql)
+
+        for edge in data.get("edges", []):
+            source_id, target_id = edge["source"], edge["target"]
+            edge_type = edge["type"]
+            props = ""
+            if not self.config.use_multi_db and self.config.user_name:
+                props = f'{{user_name: "{self.config.user_name}"}}'
+            edge_gql = f'''
+               MATCH (a@Memory {{id: "{source_id}"}}), (b@Memory {{id: "{target_id}"}})
+               INSERT OR IGNORE (a) -[e@{edge_type} {props}]-> (b)
+           '''
+            self.client.execute(edge_gql)
+
+    # TODO
     def get_all_memory_items(self, scope: str) -> list[dict]:
         raise NotImplementedError
 
+    # TODO
     def get_structure_optimization_candidates(self, scope: str) -> list[dict]:
         raise NotImplementedError
 
+    # TODO
     def drop_database(self) -> None:
         raise NotImplementedError
 
@@ -602,43 +834,34 @@ class NebulaGraphDB(BaseGraphDB):
             EDGE PARENT (Memory) -[{user_name STRING}]-> (Memory)
         }
         """
-
         create_graph = "CREATE GRAPH IF NOT EXISTS memory_graph TYPED MemoryGraphType"
         set_graph_working = "SESSION SET GRAPH memory_graph"
-        create_vector_index = """
-                CREATE VECTOR INDEX IF NOT EXISTS memory_vector_index
-                ON NODE Memory::embedding
-                OPTIONS {
-                    DIM: 3072,
-                    METRIC: L2,
-                    TYPE: IVF,
-                    NLIST: 100,
-                    TRAINSIZE: 1000
-                }
-                FOR memory_graph
-            """
+
         try:
             self.client.execute(create_tag)
             self.client.execute(create_graph)
             self.client.execute(set_graph_working)
-            self.client.execute(create_vector_index)
             logger.info("✅ Graph `memory_graph` is now the working graph.")
         except Exception as e:
             logger.error(f"❌ Failed to create tag: {e}")
 
+    # TODO
     def _vector_index_exists(self, index_name: str = "memory_vector_index") -> bool:
-        """raise NotImplementedError"""
+        raise NotImplementedError
 
+    # TODO
     def _create_vector_index(
         self, label: str, vector_property: str, dimensions: int, index_name: str
     ) -> None:
-        """raise NotImplementedError"""
+        raise NotImplementedError
 
+    # TODO
     def _create_basic_property_indexes(self) -> None:
-        """raise NotImplementedError"""
+        raise NotImplementedError
 
+    # TODO
     def _index_exists(self, index_name: str) -> bool:
-        """raise NotImplementedError"""
+        raise NotImplementedError
 
     def _parse_node(self, value: ValueWrapper) -> Any:
         if value is None or value.is_null():

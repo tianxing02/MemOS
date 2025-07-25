@@ -212,7 +212,6 @@ def run_user_session(
     print(f"\n=== {user_name} starts building their memory graph ===")
 
     # Manually initialize correct GraphDB class
-
     config = GraphDBConfigFactory(
         backend="nebular",
         config={
@@ -301,6 +300,7 @@ def run_user_session(
         print("🔍 Search result:", node["memory"])
 
     # === Step 5: Tag-based neighborhood discovery ===
+    # TODO
     neighbors = graph.get_neighbors_by_tag(["concept"], exclude_ids=[], top_k=2)
     print("📎 Tag-related nodes:", [neighbor["memory"] for neighbor in neighbors])
 
@@ -319,7 +319,7 @@ def run_user_session(
     graph.update_node(
         concept_items[0].id, {"confidence": 99.0, "created_at": "2025-07-24T20:11:56.375687"}
     )
-    graph.remove_oldest_memory("WorkingMemory", keep_latest=1)
+    graph.remove_oldest_memory("LongTermMemory", keep_latest=3)
     graph.delete_edge(topic.id, concept_items[0].id, type="PARENT")
     graph.delete_node(concept_items[1].id)
 
