@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from nebulagraph_python.py_data_types import NVector
 from nebulagraph_python.value_wrapper import ValueWrapper
@@ -145,34 +145,6 @@ class NebulaGraphDB(BaseGraphDB):
             """
         self.client.execute(create_vector_index)
 
-    # TODO
-    def get_memory_count(self, memory_type: str) -> int:
-        query = f"""
-                MATCH (n@Memory)
-                WHERE n.memory_type = {memory_type}
-                """
-        if not self.config.use_multi_db and self.config.user_name:
-            user_name = self.config.user_name
-            query += f"\nAND n.user_name = {user_name}"
-        query += "\nRETURN COUNT(n) AS count"
-
-        result = self.client.execute(query)
-        return result.one_or_none().values()["count"]
-
-    # TODO
-    def count_nodes(self, scope: str) -> int:
-        query = f"""
-                MATCH (n@Memory)
-                WHERE n.memory_type = {scope}
-                """
-        if not self.config.use_multi_db and self.config.user_name:
-            user_name = self.config.user_name
-            query += f"\nAND n.user_name = {user_name}"
-        query += "\nRETURN count(n) AS count"
-
-        result = self.client.execute(query)
-        return result.one_or_none().values()["count"]
-
     def remove_oldest_memory(self, memory_type: str, keep_latest: int) -> None:
         """
         Remove all WorkingMemory nodes except the latest `keep_latest` entries.
@@ -254,7 +226,6 @@ class NebulaGraphDB(BaseGraphDB):
         query += "\n DETACH DELETE n"
         self.client.execute(query)
 
-    # Edge (Relationship) Management
     def add_edge(self, source_id: str, target_id: str, type: str):
         """
         Create an edge from source node to target node.
@@ -298,6 +269,39 @@ class NebulaGraphDB(BaseGraphDB):
 
         query += "\nDELETE r"
         self.client.execute(query)
+
+    def get_memory_count(self, memory_type: str) -> int:
+        query = f"""
+                MATCH (n@Memory)
+                WHERE n.memory_type = {memory_type}
+                """
+        if not self.config.use_multi_db and self.config.user_name:
+            user_name = self.config.user_name
+            query += f"\nAND n.user_name = '{user_name}'"
+        query += "\nRETURN COUNT(n) AS count"
+
+        try:
+            print(f"\n ======> query: {query}\n")
+            result = self.client.execute(query)
+            print(result.one_or_none()["count"].value)
+            return result.one_or_none()["count"].value
+        except Exception as e:
+            logger.error(f"[get_memory_count] Failed: {e}")
+            return -1
+
+    # TODO
+    def count_nodes(self, scope: str) -> int:
+        query = f"""
+                MATCH (n@Memory)
+                WHERE n.memory_type = {scope}
+                """
+        if not self.config.use_multi_db and self.config.user_name:
+            user_name = self.config.user_name
+            query += f"\nAND n.user_name = {user_name}"
+        query += "\nRETURN count(n) AS count"
+
+        result = self.client.execute(query)
+        return result.one_or_none().values()["count"]
 
     # TODO
     def edge_exists(
@@ -449,7 +453,6 @@ class NebulaGraphDB(BaseGraphDB):
             )
         return edges
 
-    # TODO
     def get_neighbors_by_tag(
         self,
         tags: list[str],
@@ -638,6 +641,29 @@ class NebulaGraphDB(BaseGraphDB):
 
     # TODO
     def get_by_metadata(self, filters: list[dict[str, Any]]) -> list[str]:
+        """
+        1. ADD logic: "AND" vs "OR"(support logic combination);
+        2. Support nested conditional expressions;
+
+        Retrieve node IDs that match given metadata filters.
+        Supports exact match.
+
+        Args:
+        filters: List of filter dicts like:
+            [
+                {"field": "key", "op": "in", "value": ["A", "B"]},
+                {"field": "confidence", "op": ">=", "value": 80},
+                {"field": "tags", "op": "contains", "value": "AI"},
+                ...
+            ]
+
+        Returns:
+            list[str]: Node IDs whose metadata match the filter conditions. (AND logic).
+
+        Notes:
+            - Supports structured querying such as tag/category/importance/time filtering.
+            - Can be used for faceted recall or prefiltering before embedding rerank.
+        """
         raise NotImplementedError
 
     def get_grouped_counts(
@@ -710,7 +736,22 @@ class NebulaGraphDB(BaseGraphDB):
 
     # TODO
     def clear(self) -> None:
-        raise NotImplementedError
+        """
+        Clear the entire graph if the target database exists.
+        """
+        try:
+            if not self.config.use_multi_db and self.config.user_name:
+                query = f"MATCH (n@Memory) WHERE n.user_name = '{self.config.user_name}' DETACH DELETE n"
+            else:
+                query = "MATCH (n) DETACH DELETE n"
+
+            # Step 2: Clear the graph in that database
+            self.client.execute(query)
+            logger.info("Cleared all nodes from database.")
+
+        except Exception as e:
+            logger.error(f"[ERROR] Failed to clear database: {e}")
+            raise
 
     def export_graph(self) -> dict[str, Any]:
         """
@@ -794,14 +835,96 @@ class NebulaGraphDB(BaseGraphDB):
 
     # TODO
     def get_all_memory_items(self, scope: str) -> list[dict]:
+        """
+        Retrieve all memory items of a specific memory_type.
+
+        Args:
+            scope (str): Must be one of 'WorkingMemory', 'LongTermMemory', or 'UserMemory'.
+
+        Returns:
+            list[dict]: Full list of memory items under this scope.
+        """
         raise NotImplementedError
 
     # TODO
     def get_structure_optimization_candidates(self, scope: str) -> list[dict]:
+        """
+        Find nodes that are likely candidates for structure optimization:
+        - Isolated nodes, nodes with empty background, or nodes with exactly one child.
+        - Plus: the child of any parent node that has exactly one child.
+        """
         raise NotImplementedError
 
     # TODO
     def drop_database(self) -> None:
+        """
+        Permanently delete the entire database this instance is using.
+        WARNING: This operation is destructive and cannot be undone.
+        """
+        raise NotImplementedError
+
+    def detect_conflicts(self) -> list[tuple[str, str]]:
+        """
+        Detect conflicting nodes based on logical or semantic inconsistency.
+        Returns:
+            A list of (node_id1, node_id2) tuples that conflict.
+        """
+        raise NotImplementedError
+
+    # Structure Maintenance
+    def deduplicate_nodes(self) -> None:
+        """
+        Deduplicate redundant or semantically similar nodes.
+        This typically involves identifying nodes with identical or near-identical memory.
+        """
+        raise NotImplementedError
+
+    def get_context_chain(self, id: str, type: str = "FOLLOWS") -> list[str]:
+        """
+        Get the ordered context chain starting from a node, following a relationship type.
+        Args:
+            id: Starting node ID.
+            type: Relationship type to follow (e.g., 'FOLLOWS').
+        Returns:
+            List of ordered node IDs in the chain.
+        """
+        raise NotImplementedError
+
+    def get_neighbors(
+        self, id: str, type: str, direction: Literal["in", "out", "both"] = "out"
+    ) -> list[str]:
+        """
+        Get connected node IDs in a specific direction and relationship type.
+        Args:
+            id: Source node ID.
+            type: Relationship type.
+            direction: Edge direction to follow ('out', 'in', or 'both').
+        Returns:
+            List of neighboring node IDs.
+        """
+        raise NotImplementedError
+
+    def get_path(self, source_id: str, target_id: str, max_depth: int = 3) -> list[str]:
+        """
+        Get the path of nodes from source to target within a limited depth.
+        Args:
+            source_id: Starting node ID.
+            target_id: Target node ID.
+            max_depth: Maximum path length to traverse.
+        Returns:
+            Ordered list of node IDs along the path.
+        """
+        raise NotImplementedError
+
+    def merge_nodes(self, id1: str, id2: str) -> str:
+        """
+        Merge two similar or duplicate nodes into one.
+        Args:
+            id1: First node ID.
+            id2: Second node ID.
+        Returns:
+            ID of the resulting merged node.
+        """
         raise NotImplementedError
 
     def _ensure_database_exists(self):
@@ -853,14 +976,26 @@ class NebulaGraphDB(BaseGraphDB):
     def _create_vector_index(
         self, label: str, vector_property: str, dimensions: int, index_name: str
     ) -> None:
+        """
+        Create a vector index for the specified property in the label.
+        """
         raise NotImplementedError
 
     # TODO
     def _create_basic_property_indexes(self) -> None:
+        """
+        Create standard B-tree indexes on memory_type, created_at,
+        and updated_at fields.
+        Create standard B-tree indexes on user_name when use Shared Database
+        Multi-Tenant Mode
+        """
         raise NotImplementedError
 
     # TODO
     def _index_exists(self, index_name: str) -> bool:
+        """
+        Check if an index with the given name exists.
+        """
         raise NotImplementedError
 
     def _parse_node(self, value: ValueWrapper) -> Any:
