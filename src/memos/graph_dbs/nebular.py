@@ -1181,7 +1181,11 @@ class NebulaGraphDB(BaseGraphDB):
                 PRIMARY KEY(id)
             }),
             EDGE RELATE_TO (Memory) -[{user_name STRING}]-> (Memory),
-            EDGE PARENT (Memory) -[{user_name STRING}]-> (Memory)
+            EDGE PARENT (Memory) -[{user_name STRING}]-> (Memory),
+            EDGE AGGREGATES (Memory) -[{user_name STRING}]-> (Memory),
+            EDGE MERGED_TO (Memory) -[{user_name STRING}]-> (Memory),
+            EDGE INFERS (Memory) -[{user_name STRING}]-> (Memory),
+            EDGE FOLLOWS (Memory) -[{user_name STRING}]-> (Memory)
         }
         """
         create_graph = f"CREATE GRAPH IF NOT EXISTS `{self.db_name}` TYPED MemOSType"
