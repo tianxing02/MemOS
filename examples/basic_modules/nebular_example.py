@@ -16,6 +16,20 @@ from memos.memories.textual.item import TextualMemoryItem, TreeNodeTextualMemory
 
 load_dotenv()
 
+
+def show(nebular_data):
+    from memos.configs.graph_db import Neo4jGraphDBConfig
+    from memos.graph_dbs.neo4j import Neo4jGraphDB
+
+    tree_config = Neo4jGraphDBConfig.from_json_file("../../examples/data/config/neo4j_config.json")
+    tree_config.use_multi_db = True
+    tree_config.db_name = "nebular-show"
+
+    neo4j_db = Neo4jGraphDB(tree_config)
+    neo4j_db.clear()
+    neo4j_db.import_graph(nebular_data)
+
+
 embedder_config = EmbedderConfigFactory.model_validate(
     {
         "backend": "universal_api",
@@ -42,13 +56,13 @@ def example_multi_db(db_name: str = "paper"):
     config = GraphDBConfigFactory(
         backend="nebular",
         config={
-            "hosts": json.loads(os.getenv("NEBULAR_HOSTS", "localhost")),
-            "user_name": os.getenv("NEBULAR_USER", "root"),
+            "uri": json.loads(os.getenv("NEBULAR_HOSTS", "localhost")),
+            "user": os.getenv("NEBULAR_USER", "root"),
             "password": os.getenv("NEBULAR_PASSWORD", "xxxxxx"),
             "space": db_name,
+            "use_multi_db": True,
             "auto_create": True,
             "embedding_dimension": 3072,
-            "use_multi_db": True,
         },
     )
 
@@ -93,20 +107,21 @@ def example_shared_db(db_name: str = "shared-traval-group"):
     Multiple users' data in the same Neo4j DB with user_name as a tag.
     """
     # users
-    user_list = ["root"]
+    user_list = ["travel_member_alice", "travel_member_bob"]
 
     for user_name in user_list:
         # Step 1: Build factory config
         config = GraphDBConfigFactory(
             backend="nebular",
             config={
-                "hosts": json.loads(os.getenv("NEBULAR_HOSTS", "localhost")),
-                "user_name": os.getenv("NEBULAR_USER", "root"),
+                "uri": json.loads(os.getenv("NEBULAR_HOSTS", "localhost")),
+                "user": os.getenv("NEBULAR_USER", "root"),
                 "password": os.getenv("NEBULAR_PASSWORD", "xxxxxx"),
                 "space": db_name,
+                "user_name": user_name,
+                "use_multi_db": False,
                 "auto_create": True,
                 "embedding_dimension": 3072,
-                "use_multi_db": False,
             },
         )
 
@@ -187,10 +202,11 @@ def example_shared_db(db_name: str = "shared-traval-group"):
     config_alice = GraphDBConfigFactory(
         backend="nebular",
         config={
-            "hosts": json.loads(os.getenv("NEBULAR_HOSTS", "localhost")),
-            "user_name": os.getenv("NEBULAR_USER", "root"),
+            "uri": json.loads(os.getenv("NEBULAR_HOSTS", "localhost")),
+            "user": os.getenv("NEBULAR_USER", "root"),
             "password": os.getenv("NEBULAR_PASSWORD", "xxxxxx"),
             "space": db_name,
+            "user_name": user_list[0],
             "auto_create": True,
             "embedding_dimension": 3072,
             "use_multi_db": False,
@@ -215,13 +231,14 @@ def run_user_session(
     config = GraphDBConfigFactory(
         backend="nebular",
         config={
-            "hosts": json.loads(os.getenv("NEBULAR_HOSTS", "localhost")),
-            "user_name": os.getenv("NEBULAR_USER", "root"),
+            "uri": json.loads(os.getenv("NEBULAR_HOSTS", "localhost")),
+            "user": os.getenv("NEBULAR_USER", "root"),
             "password": os.getenv("NEBULAR_PASSWORD", "xxxxxx"),
             "space": db_name,
+            "user_name": user_name,
+            "use_multi_db": False,
             "auto_create": True,
             "embedding_dimension": 3072,
-            "use_multi_db": False,
         },
     )
     graph = GraphStoreFactory.from_config(config)
@@ -242,6 +259,7 @@ def run_user_session(
             memory_time="2024-01-01",
             status="activated",
             visibility="public",
+            tags=["research", "rl"],
             updated_at=now,
             embedding=embed_memory_item(topic_text),
         ),
@@ -300,7 +318,6 @@ def run_user_session(
         print("🔍 Search result:", node["memory"])
 
     # === Step 5: Tag-based neighborhood discovery ===
-    # TODO
     neighbors = graph.get_neighbors_by_tag(["concept"], exclude_ids=[], top_k=2)
     print("📎 Tag-related nodes:", [neighbor["memory"] for neighbor in neighbors])
 
@@ -319,7 +336,7 @@ def run_user_session(
     graph.update_node(
         concept_items[0].id, {"confidence": 99.0, "created_at": "2025-07-24T20:11:56.375687"}
     )
-    graph.remove_oldest_memory("LongTermMemory", keep_latest=3)
+    graph.remove_oldest_memory("WorkingMemory", keep_latest=1)
     graph.delete_edge(topic.id, concept_items[0].id, type="PARENT")
     graph.delete_node(concept_items[1].id)
 
@@ -327,6 +344,30 @@ def run_user_session(
     exported = graph.export_graph()
     graph.import_graph(exported)
     print("📦 Graph exported and re-imported, total nodes:", len(exported["nodes"]))
+
+    # ====================================
+    # 🔍 Step 10: extra function
+    # ====================================
+    print(f"\n=== 🔍 Extra Tests for user: {user_name} ===")
+
+    print(" - Memory count:", graph.get_memory_count("LongTermMemory"))
+    print(" - Node count:", graph.count_nodes("LongTermMemory"))
+    print(" - All LongTermMemory items:", graph.get_all_memory_items("LongTermMemory"))
+
+    if len(exported["edges"]) > 0:
+        n1, n2 = exported["edges"][0]["source"], exported["edges"][0]["target"]
+        print(" - Edge exists?", graph.edge_exists(n1, n2, exported["edges"][0]["type"]))
+        print(" - Edges for node:", graph.get_edges(n1))
+
+    filters = [{"field": "memory_type", "op": "=", "value": "LongTermMemory"}]
+    print(" - Metadata query result:", graph.get_by_metadata(filters))
+    print(
+        " - Optimization candidates:", graph.get_structure_optimization_candidates("LongTermMemory")
+    )
+    try:
+        graph.drop_database()
+    except ValueError as e:
+        print(" - drop_database raised ValueError as expected:", e)
 
 
 def example_complex_shared_db(db_name: str = "shared-traval-group-complex"):
@@ -369,4 +410,4 @@ if __name__ == "__main__":
     example_shared_db(db_name="shared_traval_group")
 
     print("\n=== Example: Single-DB-Complex ===")
-    example_complex_shared_db(db_name="shared-traval-group-complex-new")
+    example_complex_shared_db(db_name="shared-traval-group-complex-new11")

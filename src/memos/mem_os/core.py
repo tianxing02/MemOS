@@ -17,6 +17,7 @@ from memos.mem_scheduler.scheduler_factory import SchedulerFactory
 from memos.mem_scheduler.schemas.general_schemas import (
     ADD_LABEL,
     ANSWER_LABEL,
+    QUERY_LABEL,
 )
 from memos.mem_scheduler.schemas.message_schemas import ScheduleMessageItem
 from memos.mem_user.user_manager import UserManager, UserRole
@@ -167,6 +168,14 @@ class MOSCore:
             if mem_cube.text_mem and mem_cube.text_mem.is_reorganize:
                 logger.info(f"close reorganizer for {mem_cube.text_mem.config.cube_id}")
                 mem_cube.text_mem.memory_manager.close()
+                mem_cube.text_mem.memory_manager.wait_reorganizer()
+
+    def mem_reorganizer_wait(self) -> bool:
+        for mem_cube in self.mem_cubes.values():
+            logger.info(f"try to close reorganizer for {mem_cube.text_mem.config.cube_id}")
+            if mem_cube.text_mem and mem_cube.text_mem.is_reorganize:
+                logger.info(f"close reorganizer for {mem_cube.text_mem.config.cube_id}")
+                mem_cube.text_mem.memory_manager.wait_reorganizer()
 
     def _register_chat_history(self, user_id: str | None = None) -> None:
         """Initialize chat history with user ID."""
@@ -267,7 +276,7 @@ class MOSCore:
                         user_id=target_user_id,
                         mem_cube_id=mem_cube_id,
                         mem_cube=mem_cube,
-                        label=ADD_LABEL,
+                        label=QUERY_LABEL,
                         content=query,
                         timestamp=datetime.now(),
                     )
@@ -521,6 +530,8 @@ class MOSCore:
         user_id: str | None = None,
         install_cube_ids: list[str] | None = None,
         top_k: int | None = None,
+        mode: Literal["fast", "fine"] = "fast",
+        internet_search: bool = False,
     ) -> MOSSearchResult:
         """
         Search for textual memories across all registered MemCubes.
@@ -558,7 +569,11 @@ class MOSCore:
                 and self.config.enable_textual_memory
             ):
                 memories = mem_cube.text_mem.search(
-                    query, top_k=top_k if top_k else self.config.top_k
+                    query,
+                    top_k=top_k if top_k else self.config.top_k,
+                    mode=mode,
+                    manual_close_internet=not internet_search,
+                    info={"user_id": target_user_id, "session_id": str(uuid.uuid4())},
                 )
                 result["text_mem"].append({"cube_id": mem_cube_id, "memories": memories})
                 logger.info(
@@ -631,6 +646,9 @@ class MOSCore:
                 for mem in memories:
                     mem_id_list: list[str] = self.mem_cubes[mem_cube_id].text_mem.add(mem)
                     mem_ids.extend(mem_id_list)
+                    logger.info(
+                        f"Added memory user {target_user_id} to memcube {mem_cube_id}: {mem_id_list}"
+                    )
 
                 # submit messages for scheduler
                 if self.enable_mem_scheduler and self.mem_scheduler is not None:
@@ -671,6 +689,9 @@ class MOSCore:
                 mem_ids = []
                 for mem in memories:
                     mem_id_list: list[str] = self.mem_cubes[mem_cube_id].text_mem.add(mem)
+                    logger.info(
+                        f"Added memory user {target_user_id} to memcube {mem_cube_id}: {mem_id_list}"
+                    )
                     mem_ids.extend(mem_id_list)
 
                 # submit messages for scheduler
