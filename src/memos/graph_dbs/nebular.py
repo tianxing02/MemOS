@@ -1,10 +1,9 @@
+import traceback
+
 from datetime import datetime
 from typing import Any, Literal
 
 import numpy as np
-
-from nebulagraph_python.py_data_types import NVector
-from nebulagraph_python.value_wrapper import ValueWrapper
 
 from memos.configs.graph_db import NebulaGraphDBConfig
 from memos.dependency import require_python_package
@@ -54,6 +53,8 @@ def _escape_str(value: str) -> str:
 
 
 def _format_value(val: Any, key: str = "") -> str:
+    from nebulagraph_python.py_data_types import NVector
+
     if isinstance(val, str):
         return f'"{_escape_str(val)}"'
     elif isinstance(val, (int | float)):
@@ -191,8 +192,9 @@ class NebulaGraphDB(BaseGraphDB):
 
         try:
             self.client.execute(gql)
+            logger.info("insert success")
         except Exception as e:
-            logger.error(f"Failed to insert vertex {id}: {e}")
+            logger.error(f"Failed to insert vertex {id}: {e}\ntrace: {traceback.format_exc()}")
 
     def update_node(self, id: str, fields: dict[str, Any]) -> None:
         """
@@ -370,8 +372,8 @@ class NebulaGraphDB(BaseGraphDB):
 
             node_wrapper = record["v"].as_node()
             props = node_wrapper.get_properties()
-
-            return {key: self._parse_node(val) for key, val in props.items()}
+            node = self._parse_node(props)
+            return node
 
         except Exception as e:
             logger.error(f"[get_node] Failed to retrieve node '{id}': {e}")
@@ -399,7 +401,12 @@ class NebulaGraphDB(BaseGraphDB):
         query = f"MATCH (n@Memory) WHERE n.id IN {ids} {where_user} RETURN n"
 
         results = self.client.execute(query)
-        return [self._parse_node(record["n"]) for record in results]
+        nodes = []
+        for rec in results:
+            node_props = rec["n"].as_node().get_properties()
+            nodes.append(self._parse_node(node_props))
+
+        return nodes
 
     def get_edges(self, id: str, type: str = "ANY", direction: str = "ANY") -> list[dict[str, str]]:
         """
@@ -495,29 +502,20 @@ class NebulaGraphDB(BaseGraphDB):
 
             MATCH (n@Memory)
             WHERE {where_clause}
-            RETURN n.id AS id,
-               n.tags AS tags,
-               n.user_name AS user_name,
-               n.memory AS memory,
-               n.status AS status,
-               n.node_type AS node_type,
-               n.memory_type AS memory_type,
+            RETURN n,
                size( filter( n.tags, t -> t IN tag_list ) ) AS overlap_count
             ORDER BY overlap_count DESC
             LIMIT {top_k}
             """
 
         result = self.client.execute(query)
-        neighbors = []
-        for row in result:
-            props = {col: self._parse_node(row[col]) for col in result.column_names}
+        neighbors: list[dict[str, Any]] = []
+        for r in result:
+            node_props = r["n"].as_node().get_properties()
+            parsed = self._parse_node(node_props)  # --> {id, memory, metadata}
 
-            node_tags = props.get("tags", [])
-            overlap_tags = list(set(node_tags) & set(tags))
-
-            if len(overlap_tags) >= min_overlap:
-                props["overlap_count"] = len(overlap_tags)
-                neighbors.append(props)
+            parsed["overlap_count"] = r["overlap_count"].value
+            neighbors.append(parsed)
 
         neighbors.sort(key=lambda x: x["overlap_count"], reverse=True)
         return neighbors[:top_k]
@@ -536,14 +534,13 @@ class NebulaGraphDB(BaseGraphDB):
                     """
         result = self.client.execute(query)
         children = []
-        for r in result:
-            children.append(
-                {
-                    "id": self._parse_node(r["id"]),
-                    "embedding": self._parse_node(r["embedding"]),
-                    "memory": self._parse_node(r["memory"]),
-                }
-            )
+        for row in result:
+            eid = row["id"].value  # STRING
+            emb_v = row["embedding"].value  # NVector
+            emb = list(emb_v.values) if emb_v else []
+            mem = row["memory"].value  # STRING
+
+            children.append({"id": eid, "embedding": emb, "memory": mem})
         return children
 
     def get_subgraph(
@@ -582,12 +579,17 @@ class NebulaGraphDB(BaseGraphDB):
         if not result or result.size == 0:
             return {"core_node": None, "neighbors": [], "edges": []}
 
-        core_node = self._parse_node(result["center"])
-        neighbors = [self._parse_node(n) for n in result["neighbors"].value]
+        core_node_props = result["center"].as_node().get_properties()
+        core_node = self._parse_node(core_node_props)
+        neighbors = []
+        for n in result["neighbors"].value:
+            n_props = n.as_node().get_properties()
+            neighbors.append(self._parse_node(n_props))
+
         edges = []
-        for rel_chains in result["edge_chains"].value:
-            for chain in rel_chains.value:
-                edge = chain.value
+        for chain_group in result["edge_chains"].value:
+            for edge_wr in chain_group.value:
+                edge = edge_wr.value
                 edges.append(
                     {
                         "type": edge.get_type(),
@@ -855,15 +857,8 @@ class NebulaGraphDB(BaseGraphDB):
                 node_wrapper = row.values()[0].as_node()
                 props = node_wrapper.get_properties()
 
-                metadata = {key: self._parse_node(val) for key, val in props.items()}
-
-                nodes.append(
-                    {
-                        "id": metadata.pop("id"),
-                        "memory": metadata.pop("memory"),
-                        "metadata": metadata,
-                    }
-                )
+                node = self._parse_node(props)
+                nodes.append(node)
         except Exception as e:
             raise RuntimeError(f"[EXPORT GRAPH - NODES] Exception: {e}") from e
 
@@ -1061,27 +1056,26 @@ class NebulaGraphDB(BaseGraphDB):
 
     def _ensure_database_exists(self):
         create_tag = """
-            CREATE GRAPH TYPE IF NOT EXISTS MemoryGraphType AS {
+            CREATE GRAPH TYPE IF NOT EXISTS MemOSType AS {
             NODE Memory (:MemoryTag {
                 id STRING,
                 memory STRING,
                 user_name STRING,
+                user_id STRING,
+                session_id STRING,
+                status STRING,
+                key STRING,
+                confidence FLOAT,
+                tags LIST<STRING>,
                 created_at STRING,
                 updated_at STRING,
-                status STRING,
-                node_type STRING,
-                memory_time STRING,
-                source STRING,
-                confidence FLOAT,
-                entities LIST<STRING>,
-                tags LIST<STRING>,
-                visibility STRING,
                 memory_type STRING,
-                key STRING,
                 sources LIST<STRING>,
+                source STRING,
+                node_type STRING,
+                visibility STRING,
                 usage LIST<STRING>,
                 background STRING,
-                hierarchy_level STRING,
                 embedding VECTOR<3072, FLOAT>,
                 PRIMARY KEY(id)
             }),
@@ -1089,7 +1083,7 @@ class NebulaGraphDB(BaseGraphDB):
             EDGE PARENT (Memory) -[{user_name STRING}]-> (Memory)
         }
         """
-        create_graph = f"CREATE GRAPH IF NOT EXISTS `{self.db_name}` TYPED MemoryGraphType"
+        create_graph = f"CREATE GRAPH IF NOT EXISTS `{self.db_name}` TYPED MemOSType"
         set_graph_working = f"SESSION SET GRAPH `{self.db_name}`"
 
         try:
@@ -1164,32 +1158,37 @@ class NebulaGraphDB(BaseGraphDB):
             logger.error(f"[Nebula] Failed to check index existence: {e}")
             return False
 
-    def _parse_node(self, value: ValueWrapper) -> Any:
-        if value is None or value.is_null():
+    def _parse_value(self, value: Any) -> Any:
+        """turn Nebula ValueWrapper to Python type"""
+        from nebulagraph_python.value_wrapper import ValueWrapper
+
+        if value is None or (hasattr(value, "is_null") and value.is_null()):
             return None
         try:
-            primitive_value = value.cast_primitive()
+            prim = value.cast_primitive() if isinstance(value, ValueWrapper) else value
         except Exception as e:
-            logger.warning(f"cast_primitive failed for value: {value}, error: {e}")
-            try:
-                primitive_value = value.cast()
-            except Exception as e2:
-                logger.warning(f"cast failed for value: {value}, error: {e2}")
-                return str(value)
+            logger.warning(f"Error when decode Nebula ValueWrapper: {e}")
+            prim = value.cast() if isinstance(value, ValueWrapper) else value
 
-        if isinstance(primitive_value, ValueWrapper):
-            return self._parse_node(primitive_value)
+        if isinstance(prim, ValueWrapper):
+            return self._parse_value(prim)
+        if isinstance(prim, list):
+            return [self._parse_value(v) for v in prim]
+        if type(prim).__name__ == "NVector":
+            return list(prim.values)
 
-        if isinstance(primitive_value, list):
-            return [
-                self._parse_node(v) if isinstance(v, ValueWrapper) else v for v in primitive_value
-            ]
+        return prim  # already a Python primitive
 
-        if type(primitive_value).__name__ == "NVector":
-            try:
-                return list(primitive_value.values)
-            except Exception as e3:
-                logger.warning(f"Failed to convert NVector: {primitive_value}, error: {e3}")
-                return str(primitive_value)
+    def _parse_node(self, props: dict[str, Any]) -> dict[str, Any]:
+        parsed = {k: self._parse_value(v) for k, v in props.items()}
 
-        return primitive_value
+        for tf in ("created_at", "updated_at"):
+            if tf in parsed and hasattr(parsed[tf], "isoformat"):
+                parsed[tf] = parsed[tf].isoformat()
+
+        node_id = parsed.pop("id")
+        memory = parsed.pop("memory", "")
+        parsed.pop("user_name", None)  # 移除租户字段等
+        metadata = parsed
+
+        return {"id": node_id, "memory": memory, "metadata": metadata}
