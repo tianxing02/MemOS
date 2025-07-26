@@ -292,6 +292,26 @@ class NebulaGraphDB(BaseGraphDB):
                 f"Failed to insert vertex {id}: gql: {gql}, {e}\ntrace: {traceback.format_exc()}"
             )
 
+    def node_not_exist(self, scope: str) -> int:
+        if not self.config.use_multi_db and self.config.user_name:
+            filter_clause = f'n.memory_type = "{scope}" AND n.user_name = "{self.config.user_name}"'
+        else:
+            filter_clause = f'n.memory_type = "{scope}"'
+
+        query = f"""
+        MATCH (n@Memory)
+        WHERE {filter_clause}
+        RETURN n
+        LIMIT 1
+        """
+
+        try:
+            result = self.execute_query(query)
+            return result.size == 0
+        except Exception as e:
+            logger.error(f"[node_not_exist] Query failed: {e}", exc_info=True)
+            raise
+
     def update_node(self, id: str, fields: dict[str, Any]) -> None:
         """
         Update node fields in Nebular, auto-converting `created_at` and `updated_at` to datetime type if present.
