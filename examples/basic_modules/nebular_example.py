@@ -197,9 +197,6 @@ def example_shared_db(db_name: str = "shared-traval-group"):
     all_graph_data = graph.export_graph()
     print(str(all_graph_data)[:1000])
 
-    all_nodes = graph.export_graph()
-    show(all_nodes)
-
     # Step 6: Search for alice's data only
     print("\n=== Search for travel_member_alice ===")
     config_alice = GraphDBConfigFactory(
@@ -319,9 +316,6 @@ def run_user_session(
     for r in search_result:
         node = graph.get_node(r["id"])
         print("🔍 Search result:", node["memory"])
-
-    all_nodes = graph.export_graph()
-    show(all_nodes)
 
     # === Step 5: Tag-based neighborhood discovery ===
     neighbors = graph.get_neighbors_by_tag(["concept"], exclude_ids=[], top_k=2)

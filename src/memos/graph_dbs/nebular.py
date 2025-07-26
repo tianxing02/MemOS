@@ -103,7 +103,7 @@ class NebulaGraphDB(BaseGraphDB):
         - hosts: list[str] like ["host1:port", "host2:port"]
         - user: str
         - password: str
-        - space: str (optional for basic commands)
+        - db_name: str (optional for basic commands)
 
         Example config:
             {
@@ -122,11 +122,12 @@ class NebulaGraphDB(BaseGraphDB):
             password=config.get("password"),
         )
         self.db_name = config.space
-        self.space = config.get("space")
         self.user_name = config.user_name
         self.system_db_name = "system" if config.use_multi_db else config.space
         if config.auto_create:
             self._ensure_database_exists()
+
+        self.client.execute(f"SESSION SET GRAPH `{self.db_name}`")
 
         # Create only if not exists
         self.create_index(dimensions=config.embedding_dimension)
@@ -140,9 +141,8 @@ class NebulaGraphDB(BaseGraphDB):
         dimensions: int = 3072,
         index_name: str = "memory_vector_index",
     ) -> None:
-        # Create vector index if it doesn't exist
-        if not self._vector_index_exists(index_name):
-            self._create_vector_index(label, vector_property, dimensions, index_name)
+        # Create vector index
+        self._create_vector_index(label, vector_property, dimensions, index_name)
         # Create indexes
         self._create_basic_property_indexes()
 
@@ -354,7 +354,7 @@ class NebulaGraphDB(BaseGraphDB):
             dict: Node properties as key-value pairs, or None if not found.
         """
         gql = f"""
-               USE memory_graph
+               USE `{self.db_name}`
                MATCH (v {{id: '{id}'}})
                RETURN v
            """
@@ -451,7 +451,6 @@ class NebulaGraphDB(BaseGraphDB):
             )
         return edges
 
-    # TODO
     def get_neighbors_by_tag(
         self,
         tags: list[str],
@@ -643,7 +642,7 @@ class NebulaGraphDB(BaseGraphDB):
         where_clause = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
 
         gql = f"""
-               USE memory_graph
+               USE `{self.db_name}`
                MATCH (n@Memory)
                {where_clause}
                ORDER BY inner_product(n.embedding, {gql_vector}) DESC
@@ -961,11 +960,11 @@ class NebulaGraphDB(BaseGraphDB):
         WARNING: This operation is destructive and cannot be undone.
         """
         if self.config.use_multi_db:
-            self.client.execute(f"DROP GRAPH {self.db_name}")
-            logger.info(f"Database '{self.db_name}' has been dropped.")
+            self.client.execute(f"DROP GRAPH `{self.db_name}`")
+            logger.info(f"Database '`{self.db_name}`' has been dropped.")
         else:
             raise ValueError(
-                f"Refusing to drop protected database: {self.db_name} in "
+                f"Refusing to drop protected database: `{self.db_name}` in "
                 f"Shared Database Multi-Tenant mode"
             )
 
@@ -1063,20 +1062,16 @@ class NebulaGraphDB(BaseGraphDB):
             EDGE PARENT (Memory) -[{user_name STRING}]-> (Memory)
         }
         """
-        create_graph = "CREATE GRAPH IF NOT EXISTS memory_graph TYPED MemoryGraphType"
-        set_graph_working = "SESSION SET GRAPH memory_graph"
+        create_graph = f"CREATE GRAPH IF NOT EXISTS `{self.db_name}` TYPED MemoryGraphType"
+        set_graph_working = f"SESSION SET GRAPH `{self.db_name}`"
 
         try:
             self.client.execute(create_tag)
             self.client.execute(create_graph)
             self.client.execute(set_graph_working)
-            logger.info("✅ Graph `memory_graph` is now the working graph.")
+            logger.info(f"✅ Graph ``{self.db_name}`` is now the working graph.")
         except Exception as e:
             logger.error(f"❌ Failed to create tag: {e}")
-
-    # TODO
-    def _vector_index_exists(self, index_name: str = "memory_vector_index") -> bool:
-        return False
 
     def _create_vector_index(
         self, label: str, vector_property: str, dimensions: int, index_name: str
@@ -1094,7 +1089,7 @@ class NebulaGraphDB(BaseGraphDB):
                             NLIST: 100,
                             TRAINSIZE: 1000
                         }}
-                        FOR memory_graph
+                        FOR `{self.db_name}`
                     """
         self.client.execute(create_vector_index)
 
@@ -1113,7 +1108,7 @@ class NebulaGraphDB(BaseGraphDB):
             index_name = f"idx_memory_{field}"
             gql = f"""
                 CREATE INDEX IF NOT EXISTS {index_name} ON NODE Memory({field})
-                FOR memory_graph
+                FOR `{self.db_name}`
                 """
             try:
                 self.client.execute(gql)
@@ -1125,7 +1120,22 @@ class NebulaGraphDB(BaseGraphDB):
         """
         Check if an index with the given name exists.
         """
-        raise NotImplementedError
+        """
+            Check if a vector index with the given name exists in NebulaGraph.
+
+            Args:
+                index_name (str): The name of the index to check.
+
+            Returns:
+                bool: True if the index exists, False otherwise.
+            """
+        query = "SHOW VECTOR INDEXES"
+        try:
+            result = self.client.execute(query)
+            return any(row.values()[0].as_string() == index_name for row in result)
+        except Exception as e:
+            logger.error(f"[Nebula] Failed to check index existence: {e}")
+            return False
 
     def _parse_node(self, value: ValueWrapper) -> Any:
         if value is None or value.is_null():
