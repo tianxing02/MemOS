@@ -220,9 +220,9 @@ class NebulaGraphDB(BaseGraphDB):
 
         logger.info("Connected to NebulaGraph successfully.")
 
-    def execute_query(self, gql: str, timeout: float = 5.0):
+    def execute_query(self, gql: str, timeout: float = 5.0, auto_set_db: bool = True):
         with self.pool.get() as client:
-            if self.db_name:
+            if auto_set_db and self.db_name:
                 client.execute(f"SESSION SET GRAPH `{self.db_name}`")
             return client.execute(gql, timeout=timeout)
 
@@ -1196,12 +1196,12 @@ class NebulaGraphDB(BaseGraphDB):
         set_graph_working = f"SESSION SET GRAPH `{self.db_name}`"
 
         try:
-            self.execute_query(create_tag)
-            self.execute_query(create_graph)
+            self.execute_query(create_tag, auto_set_db=False)
+            self.execute_query(create_graph, auto_set_db=False)
             self.execute_query(set_graph_working)
             logger.info(f"✅ Graph ``{self.db_name}`` is now the working graph.")
         except Exception as e:
-            logger.error(f"❌ Failed to create tag: {e}")
+            logger.error(f"❌ Failed to create tag: {e} trace: {traceback.format_exc()}")
 
     def _create_vector_index(
         self, label: str, vector_property: str, dimensions: int, index_name: str
