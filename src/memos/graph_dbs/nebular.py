@@ -582,9 +582,13 @@ class NebulaGraphDB(BaseGraphDB):
         core_node_props = result["center"].as_node().get_properties()
         core_node = self._parse_node(core_node_props)
         neighbors = []
+        vid_to_id_map = {result["center"].as_node().node_id: core_node["id"]}
         for n in result["neighbors"].value:
-            n_props = n.as_node().get_properties()
-            neighbors.append(self._parse_node(n_props))
+            n_node = n.as_node()
+            n_props = n_node.get_properties()
+            node_parsed = self._parse_node(n_props)
+            neighbors.append(node_parsed)
+            vid_to_id_map[n_node.node_id] = node_parsed["id"]
 
         edges = []
         for chain_group in result["edge_chains"].value:
@@ -593,8 +597,8 @@ class NebulaGraphDB(BaseGraphDB):
                 edges.append(
                     {
                         "type": edge.get_type(),
-                        "source": edge.get_src_id(),
-                        "target": edge.get_dst_id(),
+                        "source": vid_to_id_map.get(edge.get_src_id()),
+                        "target": vid_to_id_map.get(edge.get_dst_id()),
                     }
                 )
 
@@ -932,11 +936,15 @@ class NebulaGraphDB(BaseGraphDB):
                    {where_clause}
                    RETURN n
                    """
+        nodes = []
         try:
             results = self.client.execute(query)
-            return [self._parse_node(record["n"]) for record in results]
+            for rec in results:
+                node_props = rec["n"].as_node().get_properties()
+                nodes.append(self._parse_node(node_props))
         except Exception as e:
             logger.error(f"Failed to get memories: {e}")
+        return nodes
 
     def get_structure_optimization_candidates(self, scope: str) -> list[dict]:
         """
@@ -959,19 +967,15 @@ class NebulaGraphDB(BaseGraphDB):
             OPTIONAL MATCH (n)-[@PARENT]->(c@Memory)
             OPTIONAL MATCH (p@Memory)-[@PARENT]->(n)
             WHERE c IS NULL AND p IS NULL
-            RETURN n.id AS id, n AS node
+            RETURN n
         """
 
         candidates = []
         try:
             results = self.client.execute(query)
-            for record in results:
-                node_id = record["id"].value
-                node_wrapper = record["node"].as_node()
-                props = node_wrapper.get_properties()
-                parsed_props = {key: self._parse_node(val) for key, val in props.items()}
-
-                candidates.append({"id": node_id, **parsed_props})
+            for rec in results:
+                node_props = rec["n"].as_node().get_properties()
+                candidates.append(self._parse_node(node_props))
         except Exception as e:
             logger.error(f"Failed : {e}")
         return candidates
