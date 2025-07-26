@@ -277,7 +277,7 @@ class NebulaGraphDB(BaseGraphDB):
     def get_memory_count(self, memory_type: str) -> int:
         query = f"""
                 MATCH (n@Memory)
-                WHERE n.memory_type = {memory_type}
+                WHERE n.memory_type = "{memory_type}"
                 """
         if not self.config.use_multi_db and self.config.user_name:
             user_name = self.config.user_name
@@ -294,7 +294,7 @@ class NebulaGraphDB(BaseGraphDB):
     def count_nodes(self, scope: str) -> int:
         query = f"""
                 MATCH (n@Memory)
-                WHERE n.memory_type = {scope}
+                WHERE n.memory_type = "{scope}"
                 """
         if not self.config.use_multi_db and self.config.user_name:
             user_name = self.config.user_name
@@ -340,7 +340,10 @@ class NebulaGraphDB(BaseGraphDB):
 
         # Run the Cypher query
         result = self.client.execute(query)
-        return result.one_or_none().values() is not None
+        record = result.one_or_none()
+        if record is None:
+            return False
+        return record.values() is not None
 
     # Graph Query & Reasoning
     def get_node(self, id: str) -> dict[str, Any] | None:
@@ -426,7 +429,7 @@ class NebulaGraphDB(BaseGraphDB):
             where_clause = f"a.id = '{id}'"
         elif direction == "ANY":
             pattern = f"(a@Memory)-[r{rel_type}]-(b@Memory)"
-            where_clause = f"a.id = {id} OR b.id = {id}"
+            where_clause = f"a.id = '{id}' OR b.id = '{id}'"
         else:
             raise ValueError("Invalid direction. Must be 'OUTGOING', 'INCOMING', or 'ANY'.")
 
@@ -672,7 +675,6 @@ class NebulaGraphDB(BaseGraphDB):
             logger.error(f"[search_by_embedding] Result parse failed: {e}")
             return []
 
-    # TODO
     def get_by_metadata(self, filters: list[dict[str, Any]]) -> list[str]:
         """
         1. ADD logic: "AND" vs "OR"(support logic combination);
@@ -698,37 +700,48 @@ class NebulaGraphDB(BaseGraphDB):
             - Can be used for faceted recall or prefiltering before embedding rerank.
         """
         where_clauses = []
+
+        def _escape_value(value):
+            if isinstance(value, str):
+                return f'"{value}"'
+            elif isinstance(value, list):
+                return "[" + ", ".join(_escape_value(v) for v in value) + "]"
+            else:
+                return str(value)
+
         for _i, f in enumerate(filters):
             field = f["field"]
             op = f.get("op", "=")
             value = f["value"]
 
+            escaped_value = _escape_value(value)
+
             # Build WHERE clause
             if op == "=":
-                where_clauses.append(f"n.{field} = {value}")
+                where_clauses.append(f"n.{field} = {escaped_value}")
             elif op == "in":
-                where_clauses.append(f"n.{field} IN {value}")
+                where_clauses.append(f"n.{field} IN {escaped_value}")
             elif op == "contains":
-                where_clauses.append(f"ANY(x IN {value} WHERE x IN n.{field})")
+                where_clauses.append(f"ANY(x IN n.{field} WHERE x = {escaped_value})")
             elif op == "starts_with":
-                where_clauses.append(f"n.{field} STARTS WITH {value}")
+                where_clauses.append(f"n.{field} STARTS WITH {escaped_value}")
             elif op == "ends_with":
-                where_clauses.append(f"n.{field} ENDS WITH {value}")
+                where_clauses.append(f"n.{field} ENDS WITH {escaped_value}")
             elif op in [">", ">=", "<", "<="]:
-                where_clauses.append(f"n.{field} {op} {value}")
+                where_clauses.append(f"n.{field} {op} {escaped_value}")
             else:
                 raise ValueError(f"Unsupported operator: {op}")
 
-        if not self.config.use_multi_db and self.config.user_name:
-            where_clauses.append(f"n.user_name = '{self.config.user_name}'")
+        if not self.config.use_multi_db and self.user_name:
+            where_clauses.append(f'n.user_name = "{self.config.user_name}"')
 
         where_str = " AND ".join(where_clauses)
         query = f"MATCH (n@Memory) WHERE {where_str} RETURN n.id AS id"
 
         try:
-            print("\n==========>   query:\n", query)
             result = self.client.execute(query)
-            return [record["id"].value for record in result]
+            ids = [record["id"].value for record in result]
+            return ids
         except Exception as e:
             logger.error(f"Failed to get metadata: {e}")
 
@@ -844,9 +857,13 @@ class NebulaGraphDB(BaseGraphDB):
 
                 metadata = {key: self._parse_node(val) for key, val in props.items()}
 
-                memory = metadata.get("memory", "")
-
-                nodes.append({"id": node_wrapper.get_id(), "memory": memory, "metadata": metadata})
+                nodes.append(
+                    {
+                        "id": metadata.pop("id"),
+                        "memory": metadata.pop("memory"),
+                        "metadata": metadata,
+                    }
+                )
         except Exception as e:
             raise RuntimeError(f"[EXPORT GRAPH - NODES] Exception: {e}") from e
 
@@ -880,6 +897,7 @@ class NebulaGraphDB(BaseGraphDB):
                 metadata["user_name"] = self.config.user_name
 
             metadata = _prepare_node_metadata(metadata)
+            metadata.update({"id": id, "memory": memory})
             properties = ", ".join(f"{k}: {_format_value(v, k)}" for k, v in metadata.items())
             node_gql = f"INSERT OR IGNORE (n@Memory {{{properties}}})"
             self.client.execute(node_gql)
@@ -906,7 +924,7 @@ class NebulaGraphDB(BaseGraphDB):
         Returns:
             list[dict]: Full list of memory items under this scope.
         """
-        if scope not in {"WorkingMemory", "LongTermMemory", "UserMemory"}:
+        if scope not in {"WorkingMemory", "LongTermMemory", "UserMemory", "OuterMemory"}:
             raise ValueError(f"Unsupported memory type scope: {scope}")
 
         where_clause = f"WHERE n.memory_type = '{scope}'"

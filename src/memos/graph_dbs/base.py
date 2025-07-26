@@ -146,7 +146,7 @@ class BaseGraphDB(ABC):
         """
 
     @abstractmethod
-    def get_by_metadata(self, filters: dict[str, Any]) -> list[str]:
+    def get_by_metadata(self, filters: list[dict[str, Any]]) -> list[str]:
         """
         Retrieve node IDs that match given metadata filters.
 

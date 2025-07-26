@@ -345,6 +345,30 @@ def run_user_session(
     graph.import_graph(exported)
     print("📦 Graph exported and re-imported, total nodes:", len(exported["nodes"]))
 
+    # ====================================
+    # 🔍 Step 10: extra function
+    # ====================================
+    print(f"\n=== 🔍 Extra Tests for user: {user_name} ===")
+
+    print(" - Memory count:", graph.get_memory_count("LongTermMemory"))
+    print(" - Node count:", graph.count_nodes("LongTermMemory"))
+    print(" - All LongTermMemory items:", graph.get_all_memory_items("LongTermMemory"))
+
+    if len(exported["edges"]) > 0:
+        n1, n2 = exported["edges"][0]["source"], exported["edges"][0]["target"]
+        print(" - Edge exists?", graph.edge_exists(n1, n2, exported["edges"][0]["type"]))
+        print(" - Edges for node:", graph.get_edges(n1))
+
+    filters = [{"field": "memory_type", "op": "=", "value": "LongTermMemory"}]
+    print(" - Metadata query result:", graph.get_by_metadata(filters))
+    print(
+        " - Optimization candidates:", graph.get_structure_optimization_candidates("LongTermMemory")
+    )
+    try:
+        graph.drop_database()
+    except ValueError as e:
+        print(" - drop_database raised ValueError as expected:", e)
+
 
 def example_complex_shared_db(db_name: str = "shared-traval-group-complex"):
     # User 1: Alice explores structured memory for LLMs
