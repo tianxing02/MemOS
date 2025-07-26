@@ -1182,7 +1182,7 @@ class NebulaGraphDB(BaseGraphDB):
             }),
             EDGE RELATE_TO (Memory) -[{user_name STRING}]-> (Memory),
             EDGE PARENT (Memory) -[{user_name STRING}]-> (Memory),
-            EDGE AGGREGATES (Memory) -[{user_name STRING}]-> (Memory),
+            EDGE AGGREGATE_TO (Memory) -[{user_name STRING}]-> (Memory),
             EDGE MERGED_TO (Memory) -[{user_name STRING}]-> (Memory),
             EDGE INFERS (Memory) -[{user_name STRING}]-> (Memory),
             EDGE FOLLOWS (Memory) -[{user_name STRING}]-> (Memory)
