@@ -109,8 +109,8 @@ class NebulaGraphDB(BaseGraphDB):
 
         self.config = config
         self.client = NebulaClient(
-            hosts=config.get("hosts"),
-            username=config.get("user_name"),
+            hosts=config.get("uri"),
+            username=config.get("user"),
             password=config.get("password"),
         )
         self.db_name = config.space
@@ -132,19 +132,11 @@ class NebulaGraphDB(BaseGraphDB):
         dimensions: int = 3072,
         index_name: str = "memory_vector_index",
     ) -> None:
-        create_vector_index = f"""
-                CREATE VECTOR INDEX IF NOT EXISTS {index_name}
-                ON NODE Memory::{vector_property}
-                OPTIONS {{
-                    DIM: {dimensions},
-                    METRIC: L2,
-                    TYPE: IVF,
-                    NLIST: 100,
-                    TRAINSIZE: 1000
-                }}
-                FOR memory_graph
-            """
-        self.client.execute(create_vector_index)
+        # Create vector index if it doesn't exist
+        if not self._vector_index_exists(index_name):
+            self._create_vector_index(label, vector_property, dimensions, index_name)
+        # Create indexes
+        self._create_basic_property_indexes()
 
     def remove_oldest_memory(self, memory_type: str, keep_latest: int) -> None:
         """
@@ -468,27 +460,54 @@ class NebulaGraphDB(BaseGraphDB):
         Returns:
             List of dicts with node details and overlap count.
         """
-        where_user = ""
+        if not tags:
+            return []
+
+        where_clauses = [
+            'n.status = "activated"',
+            'NOT (n.node_type = "reasoning")',
+            'NOT (n.memory_type = "WorkingMemory")',
+        ]
+        if exclude_ids:
+            where_clauses.append(f"NOT (n.id IN {exclude_ids})")
+
         if not self.config.use_multi_db and self.config.user_name:
-            user_name = self.config.user_name
-            where_user = f"AND n.user_name = {user_name}"
+            where_clauses.append(f'n.user_name = "{self.config.user_name}"')
+
+        where_clause = " AND ".join(where_clauses)
+        tag_list_literal = "[" + ", ".join(f'"{_escape_str(t)}"' for t in tags) + "]"
 
         query = f"""
-                       MATCH (n@Memory)
-                       LET overlap_tags = [tag IN n.tags WHERE tag IN {tags}]
-                       WHERE NOT n.id IN {exclude_ids}
-                         AND n.status = 'activated'
-                         AND n.node_type <> 'reasoning'
-                         AND n.memory_type <> 'WorkingMemory'
-                         {where_user}
-                         AND size(overlap_tags) >= {min_overlap}
-                       RETURN n, size(overlap_tags) AS overlap_count
-                       ORDER BY overlap_count DESC
-                       LIMIT {top_k}
-                   """
-        print(query)
+            LET tag_list = {tag_list_literal}
+
+            MATCH (n@Memory)
+            WHERE {where_clause}
+            RETURN n.id AS id,
+               n.tags AS tags,
+               n.user_name AS user_name,
+               n.memory AS memory,
+               n.status AS status,
+               n.node_type AS node_type,
+               n.memory_type AS memory_type,
+               size( filter( n.tags, t -> t IN tag_list ) ) AS overlap_count
+            ORDER BY overlap_count DESC
+            LIMIT {top_k}
+            """
+
         result = self.client.execute(query)
-        return [self._parse_node(dict(record)) for record in result]
+        neighbors = []
+        for row in result:
+            props = {col: self._parse_node(row[col]) for col in result.column_names}
+
+            node_tags = props.get("tags", [])
+            overlap_tags = list(set(node_tags) & set(tags))
+
+            if len(overlap_tags) >= min_overlap:
+                props["overlap_count"] = len(overlap_tags)
+                neighbors.append(props)
+
+        neighbors.sort(key=lambda x: x["overlap_count"], reverse=True)
+        return neighbors[:top_k]
 
     def get_children_with_embeddings(self, id: str) -> list[dict[str, Any]]:
         where_user = ""
@@ -503,10 +522,16 @@ class NebulaGraphDB(BaseGraphDB):
                         RETURN c.id AS id, c.embedding AS embedding, c.memory AS memory
                     """
         result = self.client.execute(query)
-        return [
-            {"id": r["id"].value, "embedding": r["embedding"].value, "memory": r["memory"].value}
-            for r in result
-        ]
+        children = []
+        for r in result:
+            children.append(
+                {
+                    "id": self._parse_node(r["id"]),
+                    "embedding": self._parse_node(r["embedding"]),
+                    "memory": self._parse_node(r["memory"]),
+                }
+            )
+        return children
 
     def get_subgraph(
         self, center_id: str, depth: int = 2, center_status: str = "activated"
@@ -1038,26 +1063,50 @@ class NebulaGraphDB(BaseGraphDB):
 
     # TODO
     def _vector_index_exists(self, index_name: str = "memory_vector_index") -> bool:
-        raise NotImplementedError
+        return False
 
-    # TODO
     def _create_vector_index(
         self, label: str, vector_property: str, dimensions: int, index_name: str
     ) -> None:
         """
         Create a vector index for the specified property in the label.
         """
-        raise NotImplementedError
+        create_vector_index = f"""
+                        CREATE VECTOR INDEX IF NOT EXISTS {index_name}
+                        ON NODE Memory::{vector_property}
+                        OPTIONS {{
+                            DIM: {dimensions},
+                            METRIC: L2,
+                            TYPE: IVF,
+                            NLIST: 100,
+                            TRAINSIZE: 1000
+                        }}
+                        FOR memory_graph
+                    """
+        self.client.execute(create_vector_index)
 
-    # TODO
     def _create_basic_property_indexes(self) -> None:
         """
-        Create standard B-tree indexes on memory_type, created_at,
+        Create standard B-tree indexes on status, memory_type, created_at
         and updated_at fields.
         Create standard B-tree indexes on user_name when use Shared Database
-        Multi-Tenant Mode
+        Multi-Tenant Mode.
         """
-        raise NotImplementedError
+        fields = ["status", "memory_type", "created_at", "updated_at"]
+        if not self.config.use_multi_db:
+            fields.append("user_name")
+
+        for field in fields:
+            index_name = f"idx_memory_{field}"
+            gql = f"""
+                CREATE INDEX IF NOT EXISTS {index_name} ON NODE Memory({field})
+                FOR memory_graph
+                """
+            try:
+                self.client.execute(gql)
+                logger.info(f"✅ Created index: {index_name} on field {field}")
+            except Exception as e:
+                logger.error(f"❌ Failed to create index {index_name}: {e}")
 
     def _index_exists(self, index_name: str) -> bool:
         """
@@ -1085,5 +1134,12 @@ class NebulaGraphDB(BaseGraphDB):
             return [
                 self._parse_node(v) if isinstance(v, ValueWrapper) else v for v in primitive_value
             ]
+
+        if type(primitive_value).__name__ == "NVector":
+            try:
+                return list(primitive_value.values)
+            except Exception as e3:
+                logger.warning(f"Failed to convert NVector: {primitive_value}, error: {e3}")
+                return str(primitive_value)
 
         return primitive_value

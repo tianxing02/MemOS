@@ -16,6 +16,21 @@ from memos.memories.textual.item import TextualMemoryItem, TreeNodeTextualMemory
 
 load_dotenv()
 
+
+def show(nebular_data):
+    from memos.configs.graph_db import Neo4jGraphDBConfig
+    from memos.graph_dbs.neo4j import Neo4jGraphDB
+
+    tree_config = Neo4jGraphDBConfig.from_json_file("../../examples/data/config/neo4j_config.json")
+    tree_config.use_multi_db = False
+    tree_config.db_name = "nebular-show"
+    tree_config.user_name = "nebular-show"
+
+    neo4j_db = Neo4jGraphDB(tree_config)
+    neo4j_db.clear()
+    neo4j_db.import_graph(nebular_data)
+
+
 embedder_config = EmbedderConfigFactory.model_validate(
     {
         "backend": "universal_api",
@@ -42,13 +57,13 @@ def example_multi_db(db_name: str = "paper"):
     config = GraphDBConfigFactory(
         backend="nebular",
         config={
-            "hosts": json.loads(os.getenv("NEBULAR_HOSTS", "localhost")),
-            "user_name": os.getenv("NEBULAR_USER", "root"),
+            "uri": json.loads(os.getenv("NEBULAR_HOSTS", "localhost")),
+            "user": os.getenv("NEBULAR_USER", "root"),
             "password": os.getenv("NEBULAR_PASSWORD", "xxxxxx"),
             "space": db_name,
+            "use_multi_db": True,
             "auto_create": True,
             "embedding_dimension": 3072,
-            "use_multi_db": True,
         },
     )
 
@@ -100,13 +115,14 @@ def example_shared_db(db_name: str = "shared-traval-group"):
         config = GraphDBConfigFactory(
             backend="nebular",
             config={
-                "hosts": json.loads(os.getenv("NEBULAR_HOSTS", "localhost")),
-                "user_name": os.getenv("NEBULAR_USER", "root"),
+                "uri": json.loads(os.getenv("NEBULAR_HOSTS", "localhost")),
+                "user": os.getenv("NEBULAR_USER", "root"),
                 "password": os.getenv("NEBULAR_PASSWORD", "xxxxxx"),
                 "space": db_name,
+                "user_name": user_name,
+                "use_multi_db": False,
                 "auto_create": True,
                 "embedding_dimension": 3072,
-                "use_multi_db": False,
             },
         )
 
@@ -215,13 +231,14 @@ def run_user_session(
     config = GraphDBConfigFactory(
         backend="nebular",
         config={
-            "hosts": json.loads(os.getenv("NEBULAR_HOSTS", "localhost")),
-            "user_name": os.getenv("NEBULAR_USER", "root"),
+            "uri": json.loads(os.getenv("NEBULAR_HOSTS", "localhost")),
+            "user": os.getenv("NEBULAR_USER", "root"),
             "password": os.getenv("NEBULAR_PASSWORD", "xxxxxx"),
             "space": db_name,
+            "user_name": user_name,
+            "use_multi_db": False,
             "auto_create": True,
             "embedding_dimension": 3072,
-            "use_multi_db": False,
         },
     )
     graph = GraphStoreFactory.from_config(config)
@@ -242,6 +259,7 @@ def run_user_session(
             memory_time="2024-01-01",
             status="activated",
             visibility="public",
+            tags=["research", "rl"],
             updated_at=now,
             embedding=embed_memory_item(topic_text),
         ),
@@ -299,8 +317,10 @@ def run_user_session(
         node = graph.get_node(r["id"])
         print("🔍 Search result:", node["memory"])
 
+    all_nodes = graph.export_graph()
+    show(all_nodes)
+
     # === Step 5: Tag-based neighborhood discovery ===
-    # TODO
     neighbors = graph.get_neighbors_by_tag(["concept"], exclude_ids=[], top_k=2)
     print("📎 Tag-related nodes:", [neighbor["memory"] for neighbor in neighbors])
 

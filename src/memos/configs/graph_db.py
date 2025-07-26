@@ -9,7 +9,7 @@ from memos.configs.vec_db import VectorDBConfigFactory
 class BaseGraphDBConfig(BaseConfig):
     """Base class for all graph database configurations."""
 
-    uri: str
+    uri: str | list
     user: str
     password: str
 
@@ -103,7 +103,7 @@ class Neo4jCommunityGraphDBConfig(Neo4jGraphDBConfig):
         return self
 
 
-class NebulaGraphDBConfig(BaseConfig):
+class NebulaGraphDBConfig(BaseGraphDBConfig):
     """
     NebulaGraph-specific configuration.
 
@@ -121,8 +121,6 @@ class NebulaGraphDBConfig(BaseConfig):
     user_name = "alice"
     """
 
-    password: str
-    hosts: list[str] = Field(..., description="List of host:port strings for NebulaGraph servers")
     space: str = Field(
         ..., description="The name of the target NebulaGraph space (like a database)"
     )
