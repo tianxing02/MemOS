@@ -220,9 +220,11 @@ class NebulaGraphDB(BaseGraphDB):
 
         logger.info("Connected to NebulaGraph successfully.")
 
-    def execute_query(self, gql: str):
+    def execute_query(self, gql: str, timeout: float = 5.0):
         with self.pool.get() as client:
-            return client.execute(gql)
+            if self.db_name:
+                client.execute(f"SESSION SET GRAPH `{self.db_name}`")
+            return client.execute(gql, timeout=timeout)
 
     def close(self):
         self.pool.close()
@@ -286,7 +288,9 @@ class NebulaGraphDB(BaseGraphDB):
             self.execute_query(gql)
             logger.info("insert success")
         except Exception as e:
-            logger.error(f"Failed to insert vertex {id}: {e}\ntrace: {traceback.format_exc()}")
+            logger.error(
+                f"Failed to insert vertex {id}: gql: {gql}, {e}\ntrace: {traceback.format_exc()}"
+            )
 
     def update_node(self, id: str, fields: dict[str, Any]) -> None:
         """
