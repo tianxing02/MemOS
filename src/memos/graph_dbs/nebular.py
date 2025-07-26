@@ -1,6 +1,9 @@
 import traceback
 
+from contextlib import suppress
 from datetime import datetime
+from queue import Empty, Queue
+from threading import Lock
 from typing import Any, Literal
 
 import numpy as np
@@ -86,6 +89,86 @@ def _format_datetime(value: str | datetime) -> str:
     return str(value)
 
 
+class SessionPoolError(Exception):
+    pass
+
+
+class SessionPool:
+    @require_python_package(
+        import_name="nebulagraph_python",
+        install_command="pip install ... @Tianxing",
+        install_link=".....",
+    )
+    def __init__(
+        self,
+        hosts: list[str],
+        user: str,
+        password: str,
+        minsize: int = 1,
+        maxsize: int = 10000,
+    ):
+        self.hosts = hosts
+        self.user = user
+        self.password = password
+        self.maxsize = maxsize
+        self.pool = Queue(maxsize)
+        self.lock = Lock()
+
+        self.clients = []
+
+        for _ in range(minsize):
+            self._create_and_add_client()
+
+    def _create_and_add_client(self):
+        from nebulagraph_python import NebulaClient
+
+        client = NebulaClient(self.hosts, self.user, self.password)
+        self.pool.put(client)
+        self.clients.append(client)
+
+    def get_client(self, timeout: float = 5.0):
+        from nebulagraph_python import NebulaClient
+
+        try:
+            return self.pool.get(timeout=timeout)
+        except Empty:
+            with self.lock:
+                if len(self.clients) < self.maxsize:
+                    client = NebulaClient(self.hosts, self.user, self.password)
+                    self.clients.append(client)
+                    return client
+            raise RuntimeError("NebulaClientPool exhausted") from None
+
+    def return_client(self, client):
+        self.pool.put(client)
+
+    def close(self):
+        for client in self.clients:
+            with suppress(Exception):
+                client.close()
+        self.clients.clear()
+
+    def get(self):
+        """
+        Context manager: with pool.get() as client:
+        """
+
+        class _ClientContext:
+            def __init__(self, outer):
+                self.outer = outer
+                self.client = None
+
+            def __enter__(self):
+                self.client = self.outer.get_client()
+                return self.client
+
+            def __exit__(self, exc_type, exc_val, exc_tb):
+                if self.client:
+                    self.outer.return_client(self.client)
+
+        return _ClientContext(self)
+
+
 class NebulaGraphDB(BaseGraphDB):
     """
     NebulaGraph-based implementation of a graph memory store.
@@ -114,26 +197,35 @@ class NebulaGraphDB(BaseGraphDB):
                 "space": "test"
             }
         """
-        from nebulagraph_python.client import NebulaClient
 
         self.config = config
-        self.client = NebulaClient(
-            hosts=config.get("uri"),
-            username=config.get("user"),
-            password=config.get("password"),
-        )
         self.db_name = config.space
         self.user_name = config.user_name
         self.system_db_name = "system" if config.use_multi_db else config.space
+        self.pool = SessionPool(
+            hosts=config.get("uri"),
+            user=config.get("user"),
+            password=config.get("password"),
+            minsize=1,
+            maxsize=config.get("max_client", 1000),
+        )
+
         if config.auto_create:
             self._ensure_database_exists()
 
-        self.client.execute(f"SESSION SET GRAPH `{self.db_name}`")
+        self.execute_query(f"SESSION SET GRAPH `{self.db_name}`")
 
         # Create only if not exists
         self.create_index(dimensions=config.embedding_dimension)
 
         logger.info("Connected to NebulaGraph successfully.")
+
+    def execute_query(self, gql: str):
+        with self.pool.get() as client:
+            return client.execute(gql)
+
+    def close(self):
+        self.pool.close()
 
     def create_index(
         self,
@@ -167,7 +259,7 @@ class NebulaGraphDB(BaseGraphDB):
             OFFSET {keep_latest}
             DETACH DELETE n
         """
-        self.client.execute(query)
+        self.execute_query(query)
 
     def add_node(self, id: str, memory: str, metadata: dict[str, Any]) -> None:
         """
@@ -191,7 +283,7 @@ class NebulaGraphDB(BaseGraphDB):
         gql = f"INSERT OR IGNORE (n@Memory {{{properties}}})"
 
         try:
-            self.client.execute(gql)
+            self.execute_query(gql)
             logger.info("insert success")
         except Exception as e:
             logger.error(f"Failed to insert vertex {id}: {e}\ntrace: {traceback.format_exc()}")
@@ -215,7 +307,7 @@ class NebulaGraphDB(BaseGraphDB):
             query += f'WHERE n.user_name = "{self.config.user_name}"'
 
         query += f"\nSET {set_clause_str}"
-        self.client.execute(query)
+        self.execute_query(query)
 
     def delete_node(self, id: str) -> None:
         """
@@ -230,7 +322,7 @@ class NebulaGraphDB(BaseGraphDB):
             user_name = self.config.user_name
             query += f" WHERE n.user_name = {_format_value(user_name)}"
         query += "\n DETACH DELETE n"
-        self.client.execute(query)
+        self.execute_query(query)
 
     def add_edge(self, source_id: str, target_id: str, type: str):
         """
@@ -252,7 +344,7 @@ class NebulaGraphDB(BaseGraphDB):
                INSERT (a) -[e@{type} {props}]-> (b)
            '''
         try:
-            self.client.execute(insert_stmt)
+            self.execute_query(insert_stmt)
         except Exception as e:
             logger.error(f"Failed to insert edge: {e}", exc_info=True)
 
@@ -274,7 +366,7 @@ class NebulaGraphDB(BaseGraphDB):
             query += f" AND a.user_name = {_format_value(user_name)} AND b.user_name = {_format_value(user_name)}"
 
         query += "\nDELETE r"
-        self.client.execute(query)
+        self.execute_query(query)
 
     def get_memory_count(self, memory_type: str) -> int:
         query = f"""
@@ -287,7 +379,7 @@ class NebulaGraphDB(BaseGraphDB):
         query += "\nRETURN COUNT(n) AS count"
 
         try:
-            result = self.client.execute(query)
+            result = self.execute_query(query)
             return result.one_or_none()["count"].value
         except Exception as e:
             logger.error(f"[get_memory_count] Failed: {e}")
@@ -303,7 +395,7 @@ class NebulaGraphDB(BaseGraphDB):
             query += f"\nAND n.user_name = '{user_name}'"
         query += "\nRETURN count(n) AS count"
 
-        result = self.client.execute(query)
+        result = self.execute_query(query)
         return result.one_or_none()["count"].value
 
     def edge_exists(
@@ -341,7 +433,7 @@ class NebulaGraphDB(BaseGraphDB):
         query += "\nRETURN r"
 
         # Run the Cypher query
-        result = self.client.execute(query)
+        result = self.execute_query(query)
         record = result.one_or_none()
         if record is None:
             return False
@@ -365,7 +457,7 @@ class NebulaGraphDB(BaseGraphDB):
            """
 
         try:
-            result = self.client.execute(gql)
+            result = self.execute_query(gql)
             record = result.one_or_none()
             if record is None:
                 return None
@@ -400,7 +492,7 @@ class NebulaGraphDB(BaseGraphDB):
 
         query = f"MATCH (n@Memory) WHERE n.id IN {ids} {where_user} RETURN n"
 
-        results = self.client.execute(query)
+        results = self.execute_query(query)
         nodes = []
         for rec in results:
             node_props = rec["n"].as_node().get_properties()
@@ -449,7 +541,7 @@ class NebulaGraphDB(BaseGraphDB):
                     RETURN a.id AS from_id, b.id AS to_id, type(r) AS edge_type
                 """
 
-        result = self.client.execute(query)
+        result = self.execute_query(query)
         edges = []
         for record in result:
             edges.append(
@@ -508,7 +600,7 @@ class NebulaGraphDB(BaseGraphDB):
             LIMIT {top_k}
             """
 
-        result = self.client.execute(query)
+        result = self.execute_query(query)
         neighbors: list[dict[str, Any]] = []
         for r in result:
             node_props = r["n"].as_node().get_properties()
@@ -532,7 +624,7 @@ class NebulaGraphDB(BaseGraphDB):
                         WHERE p.id = "{id}" {where_user}
                         RETURN c.id AS id, c.embedding AS embedding, c.memory AS memory
                     """
-        result = self.client.execute(query)
+        result = self.execute_query(query)
         children = []
         for row in result:
             eid = row["id"].value  # STRING
@@ -575,7 +667,7 @@ class NebulaGraphDB(BaseGraphDB):
                    collect(EDGES(p)) AS edge_chains
             """
 
-        result = self.client.execute(gql).one_or_none()
+        result = self.execute_query(gql).one_or_none()
         if not result or result.size == 0:
             return {"core_node": None, "neighbors": [], "edges": []}
 
@@ -662,7 +754,7 @@ class NebulaGraphDB(BaseGraphDB):
            """
 
         try:
-            result = self.client.execute(gql)
+            result = self.execute_query(gql)
         except Exception as e:
             logger.error(f"[search_by_embedding] Query failed: {e}")
             return []
@@ -745,7 +837,7 @@ class NebulaGraphDB(BaseGraphDB):
         query = f"MATCH (n@Memory) WHERE {where_str} RETURN n.id AS id"
 
         try:
-            result = self.client.execute(query)
+            result = self.execute_query(query)
             ids = [record["id"].value for record in result]
             return ids
         except Exception as e:
@@ -806,7 +898,7 @@ class NebulaGraphDB(BaseGraphDB):
             RETURN {", ".join(return_fields)}, COUNT(n) AS count
             GROUP BY {", ".join(group_by_fields)}
             """
-        result = self.client.execute(gql)  # Pure GQL string execution
+        result = self.execute_query(gql)  # Pure GQL string execution
 
         output = []
         for record in result:
@@ -829,7 +921,7 @@ class NebulaGraphDB(BaseGraphDB):
             else:
                 query = "MATCH (n) DETACH DELETE n"
 
-            self.client.execute(query)
+            self.execute_query(query)
             logger.info("Cleared all nodes from database.")
 
         except Exception as e:
@@ -855,7 +947,7 @@ class NebulaGraphDB(BaseGraphDB):
 
         try:
             full_node_query = f"{node_query} RETURN n"
-            node_result = self.client.execute(full_node_query)
+            node_result = self.execute_query(full_node_query)
             nodes = []
             for row in node_result:
                 node_wrapper = row.values()[0].as_node()
@@ -868,7 +960,7 @@ class NebulaGraphDB(BaseGraphDB):
 
         try:
             full_edge_query = f"{edge_query} RETURN a.id AS source, b.id AS target, type(r) as edge"
-            edge_result = self.client.execute(full_edge_query)
+            edge_result = self.execute_query(full_edge_query)
             edges = [
                 {
                     "source": row.values()[0].value,
@@ -899,7 +991,7 @@ class NebulaGraphDB(BaseGraphDB):
             metadata.update({"id": id, "memory": memory})
             properties = ", ".join(f"{k}: {_format_value(v, k)}" for k, v in metadata.items())
             node_gql = f"INSERT OR IGNORE (n@Memory {{{properties}}})"
-            self.client.execute(node_gql)
+            self.execute_query(node_gql)
 
         for edge in data.get("edges", []):
             source_id, target_id = edge["source"], edge["target"]
@@ -911,7 +1003,7 @@ class NebulaGraphDB(BaseGraphDB):
                MATCH (a@Memory {{id: "{source_id}"}}), (b@Memory {{id: "{target_id}"}})
                INSERT OR IGNORE (a) -[e@{edge_type} {props}]-> (b)
            '''
-            self.client.execute(edge_gql)
+            self.execute_query(edge_gql)
 
     def get_all_memory_items(self, scope: str) -> list[dict]:
         """
@@ -938,7 +1030,7 @@ class NebulaGraphDB(BaseGraphDB):
                    """
         nodes = []
         try:
-            results = self.client.execute(query)
+            results = self.execute_query(query)
             for rec in results:
                 node_props = rec["n"].as_node().get_properties()
                 nodes.append(self._parse_node(node_props))
@@ -972,7 +1064,7 @@ class NebulaGraphDB(BaseGraphDB):
 
         candidates = []
         try:
-            results = self.client.execute(query)
+            results = self.execute_query(query)
             for rec in results:
                 node_props = rec["n"].as_node().get_properties()
                 candidates.append(self._parse_node(node_props))
@@ -986,7 +1078,7 @@ class NebulaGraphDB(BaseGraphDB):
         WARNING: This operation is destructive and cannot be undone.
         """
         if self.config.use_multi_db:
-            self.client.execute(f"DROP GRAPH `{self.db_name}`")
+            self.execute_query(f"DROP GRAPH `{self.db_name}`")
             logger.info(f"Database '`{self.db_name}`' has been dropped.")
         else:
             raise ValueError(
@@ -1091,9 +1183,9 @@ class NebulaGraphDB(BaseGraphDB):
         set_graph_working = f"SESSION SET GRAPH `{self.db_name}`"
 
         try:
-            self.client.execute(create_tag)
-            self.client.execute(create_graph)
-            self.client.execute(set_graph_working)
+            self.execute_query(create_tag)
+            self.execute_query(create_graph)
+            self.execute_query(set_graph_working)
             logger.info(f"✅ Graph ``{self.db_name}`` is now the working graph.")
         except Exception as e:
             logger.error(f"❌ Failed to create tag: {e}")
@@ -1116,7 +1208,7 @@ class NebulaGraphDB(BaseGraphDB):
                         }}
                         FOR `{self.db_name}`
                     """
-        self.client.execute(create_vector_index)
+        self.execute_query(create_vector_index)
 
     def _create_basic_property_indexes(self) -> None:
         """
@@ -1136,7 +1228,7 @@ class NebulaGraphDB(BaseGraphDB):
                 FOR `{self.db_name}`
                 """
             try:
-                self.client.execute(gql)
+                self.execute_query(gql)
                 logger.info(f"✅ Created index: {index_name} on field {field}")
             except Exception as e:
                 logger.error(f"❌ Failed to create index {index_name}: {e}")
@@ -1156,7 +1248,7 @@ class NebulaGraphDB(BaseGraphDB):
             """
         query = "SHOW VECTOR INDEXES"
         try:
-            result = self.client.execute(query)
+            result = self.execute_query(query)
             return any(row.values()[0].as_string() == index_name for row in result)
         except Exception as e:
             logger.error(f"[Nebula] Failed to check index existence: {e}")
