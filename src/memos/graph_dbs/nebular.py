@@ -536,10 +536,10 @@ class NebulaGraphDB(BaseGraphDB):
             where_clause += f" AND a.user_name = '{self.config.user_name}' AND b.user_name = '{self.config.user_name}'"
 
         query = f"""
-                    MATCH {pattern}
-                    WHERE {where_clause}
-                    RETURN a.id AS from_id, b.id AS to_id, type(r) AS edge_type
-                """
+            MATCH {pattern}
+            WHERE {where_clause}
+            RETURN a.id AS from_id, b.id AS to_id, type(r) AS edge_type
+        """
 
         result = self.execute_query(query)
         edges = []
@@ -610,7 +610,12 @@ class NebulaGraphDB(BaseGraphDB):
             neighbors.append(parsed)
 
         neighbors.sort(key=lambda x: x["overlap_count"], reverse=True)
-        return neighbors[:top_k]
+        neighbors = neighbors[:top_k]
+        result = []
+        for neighbor in neighbors[:top_k]:
+            neighbor.pop("overlap_count")
+            result.append(neighbor)
+        return result
 
     def get_children_with_embeddings(self, id: str) -> list[dict[str, Any]]:
         where_user = ""
@@ -620,10 +625,10 @@ class NebulaGraphDB(BaseGraphDB):
             where_user = f"AND p.user_name = '{user_name}' AND c.user_name = '{user_name}'"
 
         query = f"""
-                        MATCH (p@Memory)-[@PARENT]->(c@Memory)
-                        WHERE p.id = "{id}" {where_user}
-                        RETURN c.id AS id, c.embedding AS embedding, c.memory AS memory
-                    """
+            MATCH (p@Memory)-[@PARENT]->(c@Memory)
+            WHERE p.id = "{id}" {where_user}
+            RETURN c.id AS id, c.embedding AS embedding, c.memory AS memory
+        """
         result = self.execute_query(query)
         children = []
         for row in result:
@@ -888,7 +893,7 @@ class NebulaGraphDB(BaseGraphDB):
         group_by_fields = []
 
         for field in group_fields:
-            alias = field.replace(".", "_")  # 防止特殊字符
+            alias = field.replace(".", "_")
             return_fields.append(f"n.{field} AS {alias}")
             group_by_fields.append(alias)
         # Full GQL query construction
@@ -1284,7 +1289,8 @@ class NebulaGraphDB(BaseGraphDB):
 
         node_id = parsed.pop("id")
         memory = parsed.pop("memory", "")
-        parsed.pop("user_name", None)  # 移除租户字段等
+        parsed.pop("user_name", None)
         metadata = parsed
+        metadata["type"] = metadata.pop("node_type")
 
         return {"id": node_id, "memory": memory, "metadata": metadata}

@@ -251,7 +251,10 @@ class GraphStructureReorganizer:
                     try:
                         f.result()
                     except Exception as e:
-                        logger.warning(f"[Reorganize] Cluster processing failed: {e}")
+                        logger.warning(
+                            f"[Reorganize] Cluster processing "
+                            f"failed: {e}, trace: {traceback.format_exc()}"
+                        )
                 logger.info("[GraphStructure Reorganize] Structure optimization finished.")
 
         finally:
