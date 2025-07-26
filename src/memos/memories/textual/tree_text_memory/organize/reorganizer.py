@@ -125,8 +125,8 @@ class GraphStructureReorganizer:
         """
         import schedule
 
-        schedule.every(20).seconds.do(self.optimize_structure, scope="LongTermMemory")
-        schedule.every(20).seconds.do(self.optimize_structure, scope="UserMemory")
+        schedule.every(600).seconds.do(self.optimize_structure, scope="LongTermMemory")
+        schedule.every(600).seconds.do(self.optimize_structure, scope="UserMemory")
 
         logger.info("Structure optimizer schedule started.")
         while not getattr(self, "_stop_scheduler", False):
@@ -198,7 +198,7 @@ class GraphStructureReorganizer:
             logger.info(f"Already optimizing for {scope}. Skipping.")
             return
 
-        if self.graph_store.count_nodes(scope) == 0:
+        if self.graph_store.node_not_exist(scope):
             logger.debug(f"[GraphStructureReorganize] No nodes for scope={scope}. Skip.")
             return
 
