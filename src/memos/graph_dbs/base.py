@@ -162,6 +162,14 @@ class BaseGraphDB(ABC):
             - Can be used for faceted recall or prefiltering before embedding rerank.
         """
 
+    @abstractmethod
+    def get_structure_optimization_candidates(self, scope: str) -> list[dict]:
+        """
+        Find nodes that are likely candidates for structure optimization:
+        - Isolated nodes, nodes with empty background, or nodes with exactly one child.
+        - Plus: the child of any parent node that has exactly one child.
+        """
+
     # Structure Maintenance
     @abstractmethod
     def deduplicate_nodes(self) -> None:

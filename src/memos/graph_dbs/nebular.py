@@ -943,34 +943,43 @@ class NebulaGraphDB(BaseGraphDB):
         except Exception as e:
             logger.error(f"Failed to get memories: {e}")
 
-    # TODO
     def get_structure_optimization_candidates(self, scope: str) -> list[dict]:
         """
         Find nodes that are likely candidates for structure optimization:
         - Isolated nodes, nodes with empty background, or nodes with exactly one child.
         - Plus: the child of any parent node that has exactly one child.
         """
-        where_clause = f"""
-                        WHERE n.memory_type = '{scope}'
-                          AND n.status = 'activated'
-                          AND NOT ( (n)-[r@PARENT]->() OR ()-[r@PARENT]->(n) )
-                    """
 
+        where_clause = f'''
+            n.memory_type = "{scope}"
+            AND n.status = "activated"
+        '''
         if not self.config.use_multi_db and self.config.user_name:
-            where_clause += f" AND n.user_name = '{self.config.user_name}'"
+            where_clause += f' AND n.user_name = "{self.config.user_name}"'
 
         query = f"""
-                    MATCH (n@Memory)
-                    {where_clause}
-                    RETURN n.id AS id, n AS node
-                    """
+            USE `{self.db_name}`
+            MATCH (n@Memory)
+            WHERE {where_clause}
+            OPTIONAL MATCH (n)-[@PARENT]->(c@Memory)
+            OPTIONAL MATCH (p@Memory)-[@PARENT]->(n)
+            WHERE c IS NULL AND p IS NULL
+            RETURN n.id AS id, n AS node
+        """
+
+        candidates = []
         try:
             results = self.client.execute(query)
-            return [
-                self._parse_node({"id": record["id"], **dict(record["node"])}) for record in results
-            ]
+            for record in results:
+                node_id = record["id"].value
+                node_wrapper = record["node"].as_node()
+                props = node_wrapper.get_properties()
+                parsed_props = {key: self._parse_node(val) for key, val in props.items()}
+
+                candidates.append({"id": node_id, **parsed_props})
         except Exception as e:
             logger.error(f"Failed : {e}")
+        return candidates
 
     def drop_database(self) -> None:
         """
