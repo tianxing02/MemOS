@@ -1,6 +1,8 @@
 from datetime import datetime
 from typing import Any, Literal
 
+import numpy as np
+
 from nebulagraph_python.py_data_types import NVector
 from nebulagraph_python.value_wrapper import ValueWrapper
 
@@ -11,6 +13,12 @@ from memos.log import get_logger
 
 
 logger = get_logger(__name__)
+
+
+def _normalize(vec: list[float]) -> list[float]:
+    v = np.asarray(vec, dtype=np.float32)
+    norm = np.linalg.norm(v)
+    return (v / (norm if norm else 1.0)).tolist()
 
 
 def _compose_node(item: dict[str, Any]) -> tuple[str, str, dict[str, Any]]:
@@ -36,7 +44,7 @@ def _prepare_node_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
     # Normalize embedding type
     embedding = metadata.get("embedding")
     if embedding and isinstance(embedding, list):
-        metadata["embedding"] = [float(x) for x in embedding]
+        metadata["embedding"] = _normalize([float(x) for x in embedding])
 
     return metadata
 
@@ -174,6 +182,9 @@ class NebulaGraphDB(BaseGraphDB):
         metadata["node_type"] = metadata.pop("type")
         metadata["id"] = id
         metadata["memory"] = memory
+
+        if "embedding" in metadata and isinstance(metadata["embedding"], list):
+            metadata["embedding"] = _normalize(metadata["embedding"])
 
         properties = ", ".join(f"{k}: {_format_value(v, k)}" for k, v in metadata.items())
         gql = f"INSERT OR IGNORE (n@Memory {{{properties}}})"
@@ -616,6 +627,7 @@ class NebulaGraphDB(BaseGraphDB):
             - Typical use case: restrict to 'status = activated' to avoid
             matching archived or merged nodes.
         """
+        vector = _normalize(vector)
         dim = len(vector)
         vector_str = ",".join(f"{float(x)}" for x in vector)
         gql_vector = f"VECTOR<{dim}, FLOAT>([{vector_str}])"
@@ -634,11 +646,11 @@ class NebulaGraphDB(BaseGraphDB):
                USE memory_graph
                MATCH (n@Memory)
                {where_clause}
-               ORDER BY euclidean(n.embedding, {gql_vector}) ASC
+               ORDER BY inner_product(n.embedding, {gql_vector}) DESC
                APPROXIMATE
                LIMIT {top_k}
-               OPTIONS {{ METRIC: L2, TYPE: IVF, NPROBE: 8 }}
-               RETURN n.id AS id, euclidean(n.embedding, {gql_vector}) AS score
+               OPTIONS {{ METRIC: IP, TYPE: IVF, NPROBE: 8 }}
+               RETURN n.id AS id, inner_product(n.embedding, {gql_vector}) AS score
            """
 
         try:
@@ -653,6 +665,7 @@ class NebulaGraphDB(BaseGraphDB):
                 values = row.values()
                 id_val = values[0].as_string()
                 score_val = values[1].as_double()
+                score_val = (score_val + 1) / 2  # align to neo4j, Normalized Cosine Score
                 if threshold is None or score_val <= threshold:
                     output.append({"id": id_val, "score": score_val})
             return output
@@ -1076,7 +1089,7 @@ class NebulaGraphDB(BaseGraphDB):
                         ON NODE Memory::{vector_property}
                         OPTIONS {{
                             DIM: {dimensions},
-                            METRIC: L2,
+                            METRIC: IP,
                             TYPE: IVF,
                             NLIST: 100,
                             TRAINSIZE: 1000

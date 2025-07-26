@@ -22,9 +22,8 @@ def show(nebular_data):
     from memos.graph_dbs.neo4j import Neo4jGraphDB
 
     tree_config = Neo4jGraphDBConfig.from_json_file("../../examples/data/config/neo4j_config.json")
-    tree_config.use_multi_db = False
+    tree_config.use_multi_db = True
     tree_config.db_name = "nebular-show"
-    tree_config.user_name = "nebular-show"
 
     neo4j_db = Neo4jGraphDB(tree_config)
     neo4j_db.clear()
@@ -108,7 +107,7 @@ def example_shared_db(db_name: str = "shared-traval-group"):
     Multiple users' data in the same Neo4j DB with user_name as a tag.
     """
     # users
-    user_list = ["root"]
+    user_list = ["travel_member_alice", "travel_member_bob"]
 
     for user_name in user_list:
         # Step 1: Build factory config
@@ -198,15 +197,19 @@ def example_shared_db(db_name: str = "shared-traval-group"):
     all_graph_data = graph.export_graph()
     print(str(all_graph_data)[:1000])
 
+    all_nodes = graph.export_graph()
+    show(all_nodes)
+
     # Step 6: Search for alice's data only
     print("\n=== Search for travel_member_alice ===")
     config_alice = GraphDBConfigFactory(
         backend="nebular",
         config={
-            "hosts": json.loads(os.getenv("NEBULAR_HOSTS", "localhost")),
-            "user_name": os.getenv("NEBULAR_USER", "root"),
+            "uri": json.loads(os.getenv("NEBULAR_HOSTS", "localhost")),
+            "user": os.getenv("NEBULAR_USER", "root"),
             "password": os.getenv("NEBULAR_PASSWORD", "xxxxxx"),
             "space": db_name,
+            "user_name": user_list[0],
             "auto_create": True,
             "embedding_dimension": 3072,
             "use_multi_db": False,
@@ -339,7 +342,7 @@ def run_user_session(
     graph.update_node(
         concept_items[0].id, {"confidence": 99.0, "created_at": "2025-07-24T20:11:56.375687"}
     )
-    graph.remove_oldest_memory("LongTermMemory", keep_latest=3)
+    graph.remove_oldest_memory("WorkingMemory", keep_latest=1)
     graph.delete_edge(topic.id, concept_items[0].id, type="PARENT")
     graph.delete_node(concept_items[1].id)
 
