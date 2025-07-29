@@ -1,8 +1,12 @@
+import traceback
+
+from contextlib import suppress
 from datetime import datetime
+from queue import Empty, Queue
+from threading import Lock
 from typing import Any, Literal
 
-from nebulagraph_python.py_data_types import NVector
-from nebulagraph_python.value_wrapper import ValueWrapper
+import numpy as np
 
 from memos.configs.graph_db import NebulaGraphDBConfig
 from memos.dependency import require_python_package
@@ -11,6 +15,12 @@ from memos.log import get_logger
 
 
 logger = get_logger(__name__)
+
+
+def _normalize(vec: list[float]) -> list[float]:
+    v = np.asarray(vec, dtype=np.float32)
+    norm = np.linalg.norm(v)
+    return (v / (norm if norm else 1.0)).tolist()
 
 
 def _compose_node(item: dict[str, Any]) -> tuple[str, str, dict[str, Any]]:
@@ -28,6 +38,7 @@ def _prepare_node_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
     - Convert embedding to list of float if present.
     """
     now = datetime.utcnow().isoformat()
+    metadata["node_type"] = metadata.pop("type")
 
     # Fill timestamps if missing
     metadata.setdefault("created_at", now)
@@ -36,9 +47,47 @@ def _prepare_node_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
     # Normalize embedding type
     embedding = metadata.get("embedding")
     if embedding and isinstance(embedding, list):
-        metadata["embedding"] = [float(x) for x in embedding]
+        metadata["embedding"] = _normalize([float(x) for x in embedding])
 
     return metadata
+
+
+def _metadata_filter(metadata: dict[str, Any]) -> dict[str, Any]:
+    """
+    Filter and validate metadata dictionary against the Memory node schema.
+    - Removes keys not in schema.
+    - Warns if required fields are missing.
+    """
+
+    allowed_fields = {
+        "id",
+        "memory",
+        "user_name",
+        "user_id",
+        "session_id",
+        "status",
+        "key",
+        "confidence",
+        "tags",
+        "created_at",
+        "updated_at",
+        "memory_type",
+        "sources",
+        "source",
+        "node_type",
+        "visibility",
+        "usage",
+        "background",
+        "embedding",
+    }
+
+    missing_fields = allowed_fields - metadata.keys()
+    if missing_fields:
+        logger.warning(f"Metadata missing required fields: {sorted(missing_fields)}")
+
+    filtered_metadata = {k: v for k, v in metadata.items() if k in allowed_fields}
+
+    return filtered_metadata
 
 
 def _escape_str(value: str) -> str:
@@ -46,6 +95,8 @@ def _escape_str(value: str) -> str:
 
 
 def _format_value(val: Any, key: str = "") -> str:
+    from nebulagraph_python.py_data_types import NVector
+
     if isinstance(val, str):
         return f'"{_escape_str(val)}"'
     elif isinstance(val, (int | float)):
@@ -77,6 +128,86 @@ def _format_datetime(value: str | datetime) -> str:
     return str(value)
 
 
+class SessionPoolError(Exception):
+    pass
+
+
+class SessionPool:
+    @require_python_package(
+        import_name="nebulagraph_python",
+        install_command="pip install ... @Tianxing",
+        install_link=".....",
+    )
+    def __init__(
+        self,
+        hosts: list[str],
+        user: str,
+        password: str,
+        minsize: int = 1,
+        maxsize: int = 10000,
+    ):
+        self.hosts = hosts
+        self.user = user
+        self.password = password
+        self.maxsize = maxsize
+        self.pool = Queue(maxsize)
+        self.lock = Lock()
+
+        self.clients = []
+
+        for _ in range(minsize):
+            self._create_and_add_client()
+
+    def _create_and_add_client(self):
+        from nebulagraph_python import NebulaClient
+
+        client = NebulaClient(self.hosts, self.user, self.password)
+        self.pool.put(client)
+        self.clients.append(client)
+
+    def get_client(self, timeout: float = 5.0):
+        from nebulagraph_python import NebulaClient
+
+        try:
+            return self.pool.get(timeout=timeout)
+        except Empty:
+            with self.lock:
+                if len(self.clients) < self.maxsize:
+                    client = NebulaClient(self.hosts, self.user, self.password)
+                    self.clients.append(client)
+                    return client
+            raise RuntimeError("NebulaClientPool exhausted") from None
+
+    def return_client(self, client):
+        self.pool.put(client)
+
+    def close(self):
+        for client in self.clients:
+            with suppress(Exception):
+                client.close()
+        self.clients.clear()
+
+    def get(self):
+        """
+        Context manager: with pool.get() as client:
+        """
+
+        class _ClientContext:
+            def __init__(self, outer):
+                self.outer = outer
+                self.client = None
+
+            def __enter__(self):
+                self.client = self.outer.get_client()
+                return self.client
+
+            def __exit__(self, exc_type, exc_val, exc_tb):
+                if self.client:
+                    self.outer.return_client(self.client)
+
+        return _ClientContext(self)
+
+
 class NebulaGraphDB(BaseGraphDB):
     """
     NebulaGraph-based implementation of a graph memory store.
@@ -95,7 +226,7 @@ class NebulaGraphDB(BaseGraphDB):
         - hosts: list[str] like ["host1:port", "host2:port"]
         - user: str
         - password: str
-        - space: str (optional for basic commands)
+        - db_name: str (optional for basic commands)
 
         Example config:
             {
@@ -105,25 +236,37 @@ class NebulaGraphDB(BaseGraphDB):
                 "space": "test"
             }
         """
-        from nebulagraph_python.client import NebulaClient
 
         self.config = config
-        self.client = NebulaClient(
-            hosts=config.get("hosts"),
-            username=config.get("user_name"),
-            password=config.get("password"),
-        )
         self.db_name = config.space
-        self.space = config.get("space")
         self.user_name = config.user_name
         self.system_db_name = "system" if config.use_multi_db else config.space
+        self.pool = SessionPool(
+            hosts=config.get("uri"),
+            user=config.get("user"),
+            password=config.get("password"),
+            minsize=1,
+            maxsize=config.get("max_client", 1000),
+        )
+
         if config.auto_create:
             self._ensure_database_exists()
+
+        self.execute_query(f"SESSION SET GRAPH `{self.db_name}`")
 
         # Create only if not exists
         self.create_index(dimensions=config.embedding_dimension)
 
         logger.info("Connected to NebulaGraph successfully.")
+
+    def execute_query(self, gql: str, timeout: float = 5.0, auto_set_db: bool = True):
+        with self.pool.get() as client:
+            if auto_set_db and self.db_name:
+                client.execute(f"SESSION SET GRAPH `{self.db_name}`")
+            return client.execute(gql, timeout=timeout)
+
+    def close(self):
+        self.pool.close()
 
     def create_index(
         self,
@@ -132,19 +275,10 @@ class NebulaGraphDB(BaseGraphDB):
         dimensions: int = 3072,
         index_name: str = "memory_vector_index",
     ) -> None:
-        create_vector_index = f"""
-                CREATE VECTOR INDEX IF NOT EXISTS {index_name}
-                ON NODE Memory::{vector_property}
-                OPTIONS {{
-                    DIM: {dimensions},
-                    METRIC: L2,
-                    TYPE: IVF,
-                    NLIST: 100,
-                    TRAINSIZE: 1000
-                }}
-                FOR memory_graph
-            """
-        self.client.execute(create_vector_index)
+        # Create vector index
+        self._create_vector_index(label, vector_property, dimensions, index_name)
+        # Create indexes
+        self._create_basic_property_indexes()
 
     def remove_oldest_memory(self, memory_type: str, keep_latest: int) -> None:
         """
@@ -166,7 +300,7 @@ class NebulaGraphDB(BaseGraphDB):
             OFFSET {keep_latest}
             DETACH DELETE n
         """
-        self.client.execute(query)
+        self.execute_query(query)
 
     def add_node(self, id: str, memory: str, metadata: dict[str, Any]) -> None:
         """
@@ -183,13 +317,40 @@ class NebulaGraphDB(BaseGraphDB):
         metadata["id"] = id
         metadata["memory"] = memory
 
+        if "embedding" in metadata and isinstance(metadata["embedding"], list):
+            metadata["embedding"] = _normalize(metadata["embedding"])
+
+        metadata = _metadata_filter(metadata)
         properties = ", ".join(f"{k}: {_format_value(v, k)}" for k, v in metadata.items())
         gql = f"INSERT OR IGNORE (n@Memory {{{properties}}})"
 
         try:
-            self.client.execute(gql)
+            self.execute_query(gql)
+            logger.info("insert success")
         except Exception as e:
-            logger.error(f"Failed to insert vertex {id}: {e}")
+            logger.error(
+                f"Failed to insert vertex {id}: gql: {gql}, {e}\ntrace: {traceback.format_exc()}"
+            )
+
+    def node_not_exist(self, scope: str) -> int:
+        if not self.config.use_multi_db and self.config.user_name:
+            filter_clause = f'n.memory_type = "{scope}" AND n.user_name = "{self.config.user_name}"'
+        else:
+            filter_clause = f'n.memory_type = "{scope}"'
+
+        query = f"""
+        MATCH (n@Memory)
+        WHERE {filter_clause}
+        RETURN n
+        LIMIT 1
+        """
+
+        try:
+            result = self.execute_query(query)
+            return result.size == 0
+        except Exception as e:
+            logger.error(f"[node_not_exist] Query failed: {e}", exc_info=True)
+            raise
 
     def update_node(self, id: str, fields: dict[str, Any]) -> None:
         """
@@ -210,7 +371,7 @@ class NebulaGraphDB(BaseGraphDB):
             query += f'WHERE n.user_name = "{self.config.user_name}"'
 
         query += f"\nSET {set_clause_str}"
-        self.client.execute(query)
+        self.execute_query(query)
 
     def delete_node(self, id: str) -> None:
         """
@@ -225,7 +386,7 @@ class NebulaGraphDB(BaseGraphDB):
             user_name = self.config.user_name
             query += f" WHERE n.user_name = {_format_value(user_name)}"
         query += "\n DETACH DELETE n"
-        self.client.execute(query)
+        self.execute_query(query)
 
     def add_edge(self, source_id: str, target_id: str, type: str):
         """
@@ -247,7 +408,7 @@ class NebulaGraphDB(BaseGraphDB):
                INSERT (a) -[e@{type} {props}]-> (b)
            '''
         try:
-            self.client.execute(insert_stmt)
+            self.execute_query(insert_stmt)
         except Exception as e:
             logger.error(f"Failed to insert edge: {e}", exc_info=True)
 
@@ -269,12 +430,12 @@ class NebulaGraphDB(BaseGraphDB):
             query += f" AND a.user_name = {_format_value(user_name)} AND b.user_name = {_format_value(user_name)}"
 
         query += "\nDELETE r"
-        self.client.execute(query)
+        self.execute_query(query)
 
     def get_memory_count(self, memory_type: str) -> int:
         query = f"""
                 MATCH (n@Memory)
-                WHERE n.memory_type = {memory_type}
+                WHERE n.memory_type = "{memory_type}"
                 """
         if not self.config.use_multi_db and self.config.user_name:
             user_name = self.config.user_name
@@ -282,7 +443,7 @@ class NebulaGraphDB(BaseGraphDB):
         query += "\nRETURN COUNT(n) AS count"
 
         try:
-            result = self.client.execute(query)
+            result = self.execute_query(query)
             return result.one_or_none()["count"].value
         except Exception as e:
             logger.error(f"[get_memory_count] Failed: {e}")
@@ -291,14 +452,14 @@ class NebulaGraphDB(BaseGraphDB):
     def count_nodes(self, scope: str) -> int:
         query = f"""
                 MATCH (n@Memory)
-                WHERE n.memory_type = {scope}
+                WHERE n.memory_type = "{scope}"
                 """
         if not self.config.use_multi_db and self.config.user_name:
             user_name = self.config.user_name
             query += f"\nAND n.user_name = '{user_name}'"
         query += "\nRETURN count(n) AS count"
 
-        result = self.client.execute(query)
+        result = self.execute_query(query)
         return result.one_or_none()["count"].value
 
     def edge_exists(
@@ -336,8 +497,11 @@ class NebulaGraphDB(BaseGraphDB):
         query += "\nRETURN r"
 
         # Run the Cypher query
-        result = self.client.execute(query)
-        return result.one_or_none().values() is not None
+        result = self.execute_query(query)
+        record = result.one_or_none()
+        if record is None:
+            return False
+        return record.values() is not None
 
     # Graph Query & Reasoning
     def get_node(self, id: str) -> dict[str, Any] | None:
@@ -351,21 +515,21 @@ class NebulaGraphDB(BaseGraphDB):
             dict: Node properties as key-value pairs, or None if not found.
         """
         gql = f"""
-               USE memory_graph
+               USE `{self.db_name}`
                MATCH (v {{id: '{id}'}})
                RETURN v
            """
 
         try:
-            result = self.client.execute(gql)
+            result = self.execute_query(gql)
             record = result.one_or_none()
             if record is None:
                 return None
 
             node_wrapper = record["v"].as_node()
             props = node_wrapper.get_properties()
-
-            return {key: self._parse_node(val) for key, val in props.items()}
+            node = self._parse_node(props)
+            return node
 
         except Exception as e:
             logger.error(f"[get_node] Failed to retrieve node '{id}': {e}")
@@ -392,8 +556,13 @@ class NebulaGraphDB(BaseGraphDB):
 
         query = f"MATCH (n@Memory) WHERE n.id IN {ids} {where_user} RETURN n"
 
-        results = self.client.execute(query)
-        return [self._parse_node(record["n"]) for record in results]
+        results = self.execute_query(query)
+        nodes = []
+        for rec in results:
+            node_props = rec["n"].as_node().get_properties()
+            nodes.append(self._parse_node(node_props))
+
+        return nodes
 
     def get_edges(self, id: str, type: str = "ANY", direction: str = "ANY") -> list[dict[str, str]]:
         """
@@ -423,7 +592,7 @@ class NebulaGraphDB(BaseGraphDB):
             where_clause = f"a.id = '{id}'"
         elif direction == "ANY":
             pattern = f"(a@Memory)-[r{rel_type}]-(b@Memory)"
-            where_clause = f"a.id = {id} OR b.id = {id}"
+            where_clause = f"a.id = '{id}' OR b.id = '{id}'"
         else:
             raise ValueError("Invalid direction. Must be 'OUTGOING', 'INCOMING', or 'ANY'.")
 
@@ -431,12 +600,12 @@ class NebulaGraphDB(BaseGraphDB):
             where_clause += f" AND a.user_name = '{self.config.user_name}' AND b.user_name = '{self.config.user_name}'"
 
         query = f"""
-                    MATCH {pattern}
-                    WHERE {where_clause}
-                    RETURN a.id AS from_id, b.id AS to_id, type(r) AS edge_type
-                """
+            MATCH {pattern}
+            WHERE {where_clause}
+            RETURN a.id AS from_id, b.id AS to_id, type(r) AS edge_type
+        """
 
-        result = self.client.execute(query)
+        result = self.execute_query(query)
         edges = []
         for record in result:
             edges.append(
@@ -448,7 +617,6 @@ class NebulaGraphDB(BaseGraphDB):
             )
         return edges
 
-    # TODO
     def get_neighbors_by_tag(
         self,
         tags: list[str],
@@ -468,27 +636,50 @@ class NebulaGraphDB(BaseGraphDB):
         Returns:
             List of dicts with node details and overlap count.
         """
-        where_user = ""
+        if not tags:
+            return []
+
+        where_clauses = [
+            'n.status = "activated"',
+            'NOT (n.node_type = "reasoning")',
+            'NOT (n.memory_type = "WorkingMemory")',
+        ]
+        if exclude_ids:
+            where_clauses.append(f"NOT (n.id IN {exclude_ids})")
+
         if not self.config.use_multi_db and self.config.user_name:
-            user_name = self.config.user_name
-            where_user = f"AND n.user_name = {user_name}"
+            where_clauses.append(f'n.user_name = "{self.config.user_name}"')
+
+        where_clause = " AND ".join(where_clauses)
+        tag_list_literal = "[" + ", ".join(f'"{_escape_str(t)}"' for t in tags) + "]"
 
         query = f"""
-                       MATCH (n@Memory)
-                       LET overlap_tags = [tag IN n.tags WHERE tag IN {tags}]
-                       WHERE NOT n.id IN {exclude_ids}
-                         AND n.status = 'activated'
-                         AND n.node_type <> 'reasoning'
-                         AND n.memory_type <> 'WorkingMemory'
-                         {where_user}
-                         AND size(overlap_tags) >= {min_overlap}
-                       RETURN n, size(overlap_tags) AS overlap_count
-                       ORDER BY overlap_count DESC
-                       LIMIT {top_k}
-                   """
-        print(query)
-        result = self.client.execute(query)
-        return [self._parse_node(dict(record)) for record in result]
+            LET tag_list = {tag_list_literal}
+
+            MATCH (n@Memory)
+            WHERE {where_clause}
+            RETURN n,
+               size( filter( n.tags, t -> t IN tag_list ) ) AS overlap_count
+            ORDER BY overlap_count DESC
+            LIMIT {top_k}
+            """
+
+        result = self.execute_query(query)
+        neighbors: list[dict[str, Any]] = []
+        for r in result:
+            node_props = r["n"].as_node().get_properties()
+            parsed = self._parse_node(node_props)  # --> {id, memory, metadata}
+
+            parsed["overlap_count"] = r["overlap_count"].value
+            neighbors.append(parsed)
+
+        neighbors.sort(key=lambda x: x["overlap_count"], reverse=True)
+        neighbors = neighbors[:top_k]
+        result = []
+        for neighbor in neighbors[:top_k]:
+            neighbor.pop("overlap_count")
+            result.append(neighbor)
+        return result
 
     def get_children_with_embeddings(self, id: str) -> list[dict[str, Any]]:
         where_user = ""
@@ -498,15 +689,20 @@ class NebulaGraphDB(BaseGraphDB):
             where_user = f"AND p.user_name = '{user_name}' AND c.user_name = '{user_name}'"
 
         query = f"""
-                        MATCH (p@Memory)-[@PARENT]->(c@Memory)
-                        WHERE p.id = "{id}" {where_user}
-                        RETURN c.id AS id, c.embedding AS embedding, c.memory AS memory
-                    """
-        result = self.client.execute(query)
-        return [
-            {"id": r["id"].value, "embedding": r["embedding"].value, "memory": r["memory"].value}
-            for r in result
-        ]
+            MATCH (p@Memory)-[@PARENT]->(c@Memory)
+            WHERE p.id = "{id}" {where_user}
+            RETURN c.id AS id, c.embedding AS embedding, c.memory AS memory
+        """
+        result = self.execute_query(query)
+        children = []
+        for row in result:
+            eid = row["id"].value  # STRING
+            emb_v = row["embedding"].value  # NVector
+            emb = list(emb_v.values) if emb_v else []
+            mem = row["memory"].value  # STRING
+
+            children.append({"id": eid, "embedding": emb, "memory": mem})
+        return children
 
     def get_subgraph(
         self, center_id: str, depth: int = 2, center_status: str = "activated"
@@ -540,21 +736,30 @@ class NebulaGraphDB(BaseGraphDB):
                    collect(EDGES(p)) AS edge_chains
             """
 
-        result = self.client.execute(gql).one_or_none()
+        result = self.execute_query(gql).one_or_none()
         if not result or result.size == 0:
             return {"core_node": None, "neighbors": [], "edges": []}
 
-        core_node = self._parse_node(result["center"])
-        neighbors = [self._parse_node(n) for n in result["neighbors"].value]
+        core_node_props = result["center"].as_node().get_properties()
+        core_node = self._parse_node(core_node_props)
+        neighbors = []
+        vid_to_id_map = {result["center"].as_node().node_id: core_node["id"]}
+        for n in result["neighbors"].value:
+            n_node = n.as_node()
+            n_props = n_node.get_properties()
+            node_parsed = self._parse_node(n_props)
+            neighbors.append(node_parsed)
+            vid_to_id_map[n_node.node_id] = node_parsed["id"]
+
         edges = []
-        for rel_chains in result["edge_chains"].value:
-            for chain in rel_chains.value:
-                edge = chain.value
+        for chain_group in result["edge_chains"].value:
+            for edge_wr in chain_group.value:
+                edge = edge_wr.value
                 edges.append(
                     {
                         "type": edge.get_type(),
-                        "source": edge.get_src_id(),
-                        "target": edge.get_dst_id(),
+                        "source": vid_to_id_map.get(edge.get_src_id()),
+                        "target": vid_to_id_map.get(edge.get_dst_id()),
                     }
                 )
 
@@ -591,6 +796,7 @@ class NebulaGraphDB(BaseGraphDB):
             - Typical use case: restrict to 'status = activated' to avoid
             matching archived or merged nodes.
         """
+        vector = _normalize(vector)
         dim = len(vector)
         vector_str = ",".join(f"{float(x)}" for x in vector)
         gql_vector = f"VECTOR<{dim}, FLOAT>([{vector_str}])"
@@ -606,18 +812,18 @@ class NebulaGraphDB(BaseGraphDB):
         where_clause = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
 
         gql = f"""
-               USE memory_graph
+               USE `{self.db_name}`
                MATCH (n@Memory)
                {where_clause}
-               ORDER BY euclidean(n.embedding, {gql_vector}) ASC
+               ORDER BY inner_product(n.embedding, {gql_vector}) DESC
                APPROXIMATE
                LIMIT {top_k}
-               OPTIONS {{ METRIC: L2, TYPE: IVF, NPROBE: 8 }}
-               RETURN n.id AS id, euclidean(n.embedding, {gql_vector}) AS score
+               OPTIONS {{ METRIC: IP, TYPE: IVF, NPROBE: 8 }}
+               RETURN n.id AS id, inner_product(n.embedding, {gql_vector}) AS score
            """
 
         try:
-            result = self.client.execute(gql)
+            result = self.execute_query(gql)
         except Exception as e:
             logger.error(f"[search_by_embedding] Query failed: {e}")
             return []
@@ -628,6 +834,7 @@ class NebulaGraphDB(BaseGraphDB):
                 values = row.values()
                 id_val = values[0].as_string()
                 score_val = values[1].as_double()
+                score_val = (score_val + 1) / 2  # align to neo4j, Normalized Cosine Score
                 if threshold is None or score_val <= threshold:
                     output.append({"id": id_val, "score": score_val})
             return output
@@ -635,7 +842,6 @@ class NebulaGraphDB(BaseGraphDB):
             logger.error(f"[search_by_embedding] Result parse failed: {e}")
             return []
 
-    # TODO
     def get_by_metadata(self, filters: list[dict[str, Any]]) -> list[str]:
         """
         1. ADD logic: "AND" vs "OR"(support logic combination);
@@ -661,37 +867,48 @@ class NebulaGraphDB(BaseGraphDB):
             - Can be used for faceted recall or prefiltering before embedding rerank.
         """
         where_clauses = []
+
+        def _escape_value(value):
+            if isinstance(value, str):
+                return f'"{value}"'
+            elif isinstance(value, list):
+                return "[" + ", ".join(_escape_value(v) for v in value) + "]"
+            else:
+                return str(value)
+
         for _i, f in enumerate(filters):
             field = f["field"]
             op = f.get("op", "=")
             value = f["value"]
 
+            escaped_value = _escape_value(value)
+
             # Build WHERE clause
             if op == "=":
-                where_clauses.append(f"n.{field} = {value}")
+                where_clauses.append(f"n.{field} = {escaped_value}")
             elif op == "in":
-                where_clauses.append(f"n.{field} IN {value}")
+                where_clauses.append(f"n.{field} IN {escaped_value}")
             elif op == "contains":
-                where_clauses.append(f"ANY(x IN {value} WHERE x IN n.{field})")
+                where_clauses.append(f"size(filter(n.{field}, t -> t IN {escaped_value})) > 0")
             elif op == "starts_with":
-                where_clauses.append(f"n.{field} STARTS WITH {value}")
+                where_clauses.append(f"n.{field} STARTS WITH {escaped_value}")
             elif op == "ends_with":
-                where_clauses.append(f"n.{field} ENDS WITH {value}")
+                where_clauses.append(f"n.{field} ENDS WITH {escaped_value}")
             elif op in [">", ">=", "<", "<="]:
-                where_clauses.append(f"n.{field} {op} {value}")
+                where_clauses.append(f"n.{field} {op} {escaped_value}")
             else:
                 raise ValueError(f"Unsupported operator: {op}")
 
-        if not self.config.use_multi_db and self.config.user_name:
-            where_clauses.append(f"n.user_name = '{self.config.user_name}'")
+        if not self.config.use_multi_db and self.user_name:
+            where_clauses.append(f'n.user_name = "{self.config.user_name}"')
 
         where_str = " AND ".join(where_clauses)
         query = f"MATCH (n@Memory) WHERE {where_str} RETURN n.id AS id"
 
         try:
-            print("\n==========>   query:\n", query)
-            result = self.client.execute(query)
-            return [record["id"].value for record in result]
+            result = self.execute_query(query)
+            ids = [record["id"].value for record in result]
+            return ids
         except Exception as e:
             logger.error(f"Failed to get metadata: {e}")
 
@@ -740,7 +957,7 @@ class NebulaGraphDB(BaseGraphDB):
         group_by_fields = []
 
         for field in group_fields:
-            alias = field.replace(".", "_")  # 防止特殊字符
+            alias = field.replace(".", "_")
             return_fields.append(f"n.{field} AS {alias}")
             group_by_fields.append(alias)
         # Full GQL query construction
@@ -750,7 +967,7 @@ class NebulaGraphDB(BaseGraphDB):
             RETURN {", ".join(return_fields)}, COUNT(n) AS count
             GROUP BY {", ".join(group_by_fields)}
             """
-        result = self.client.execute(gql)  # Pure GQL string execution
+        result = self.execute_query(gql)  # Pure GQL string execution
 
         output = []
         for record in result:
@@ -773,7 +990,7 @@ class NebulaGraphDB(BaseGraphDB):
             else:
                 query = "MATCH (n) DETACH DELETE n"
 
-            self.client.execute(query)
+            self.execute_query(query)
             logger.info("Cleared all nodes from database.")
 
         except Exception as e:
@@ -799,23 +1016,20 @@ class NebulaGraphDB(BaseGraphDB):
 
         try:
             full_node_query = f"{node_query} RETURN n"
-            node_result = self.client.execute(full_node_query)
+            node_result = self.execute_query(full_node_query)
             nodes = []
             for row in node_result:
                 node_wrapper = row.values()[0].as_node()
                 props = node_wrapper.get_properties()
 
-                metadata = {key: self._parse_node(val) for key, val in props.items()}
-
-                memory = metadata.get("memory", "")
-
-                nodes.append({"id": node_wrapper.get_id(), "memory": memory, "metadata": metadata})
+                node = self._parse_node(props)
+                nodes.append(node)
         except Exception as e:
             raise RuntimeError(f"[EXPORT GRAPH - NODES] Exception: {e}") from e
 
         try:
             full_edge_query = f"{edge_query} RETURN a.id AS source, b.id AS target, type(r) as edge"
-            edge_result = self.client.execute(full_edge_query)
+            edge_result = self.execute_query(full_edge_query)
             edges = [
                 {
                     "source": row.values()[0].value,
@@ -843,9 +1057,10 @@ class NebulaGraphDB(BaseGraphDB):
                 metadata["user_name"] = self.config.user_name
 
             metadata = _prepare_node_metadata(metadata)
+            metadata.update({"id": id, "memory": memory})
             properties = ", ".join(f"{k}: {_format_value(v, k)}" for k, v in metadata.items())
             node_gql = f"INSERT OR IGNORE (n@Memory {{{properties}}})"
-            self.client.execute(node_gql)
+            self.execute_query(node_gql)
 
         for edge in data.get("edges", []):
             source_id, target_id = edge["source"], edge["target"]
@@ -857,7 +1072,7 @@ class NebulaGraphDB(BaseGraphDB):
                MATCH (a@Memory {{id: "{source_id}"}}), (b@Memory {{id: "{target_id}"}})
                INSERT OR IGNORE (a) -[e@{edge_type} {props}]-> (b)
            '''
-            self.client.execute(edge_gql)
+            self.execute_query(edge_gql)
 
     def get_all_memory_items(self, scope: str) -> list[dict]:
         """
@@ -869,7 +1084,7 @@ class NebulaGraphDB(BaseGraphDB):
         Returns:
             list[dict]: Full list of memory items under this scope.
         """
-        if scope not in {"WorkingMemory", "LongTermMemory", "UserMemory"}:
+        if scope not in {"WorkingMemory", "LongTermMemory", "UserMemory", "OuterMemory"}:
             raise ValueError(f"Unsupported memory type scope: {scope}")
 
         where_clause = f"WHERE n.memory_type = '{scope}'"
@@ -882,40 +1097,49 @@ class NebulaGraphDB(BaseGraphDB):
                    {where_clause}
                    RETURN n
                    """
+        nodes = []
         try:
-            results = self.client.execute(query)
-            return [self._parse_node(record["n"]) for record in results]
+            results = self.execute_query(query)
+            for rec in results:
+                node_props = rec["n"].as_node().get_properties()
+                nodes.append(self._parse_node(node_props))
         except Exception as e:
             logger.error(f"Failed to get memories: {e}")
+        return nodes
 
-    # TODO
     def get_structure_optimization_candidates(self, scope: str) -> list[dict]:
         """
         Find nodes that are likely candidates for structure optimization:
         - Isolated nodes, nodes with empty background, or nodes with exactly one child.
         - Plus: the child of any parent node that has exactly one child.
         """
-        where_clause = f"""
-                        WHERE n.memory_type = '{scope}'
-                          AND n.status = 'activated'
-                          AND NOT ( (n)-[r@PARENT]->() OR ()-[r@PARENT]->(n) )
-                    """
 
+        where_clause = f'''
+            n.memory_type = "{scope}"
+            AND n.status = "activated"
+        '''
         if not self.config.use_multi_db and self.config.user_name:
-            where_clause += f" AND n.user_name = '{self.config.user_name}'"
+            where_clause += f' AND n.user_name = "{self.config.user_name}"'
 
         query = f"""
-                    MATCH (n@Memory)
-                    {where_clause}
-                    RETURN n.id AS id, n AS node
-                    """
+            USE `{self.db_name}`
+            MATCH (n@Memory)
+            WHERE {where_clause}
+            OPTIONAL MATCH (n)-[@PARENT]->(c@Memory)
+            OPTIONAL MATCH (p@Memory)-[@PARENT]->(n)
+            WHERE c IS NULL AND p IS NULL
+            RETURN n
+        """
+
+        candidates = []
         try:
-            results = self.client.execute(query)
-            return [
-                self._parse_node({"id": record["id"], **dict(record["node"])}) for record in results
-            ]
+            results = self.execute_query(query)
+            for rec in results:
+                node_props = rec["n"].as_node().get_properties()
+                candidates.append(self._parse_node(node_props))
         except Exception as e:
             logger.error(f"Failed : {e}")
+        return candidates
 
     def drop_database(self) -> None:
         """
@@ -923,11 +1147,11 @@ class NebulaGraphDB(BaseGraphDB):
         WARNING: This operation is destructive and cannot be undone.
         """
         if self.config.use_multi_db:
-            self.client.execute(f"DROP GRAPH {self.db_name}")
-            logger.info(f"Database '{self.db_name}' has been dropped.")
+            self.execute_query(f"DROP GRAPH `{self.db_name}`")
+            logger.info(f"Database '`{self.db_name}`' has been dropped.")
         else:
             raise ValueError(
-                f"Refusing to drop protected database: {self.db_name} in "
+                f"Refusing to drop protected database: `{self.db_name}` in "
                 f"Shared Database Multi-Tenant mode"
             )
 
@@ -997,93 +1221,144 @@ class NebulaGraphDB(BaseGraphDB):
 
     def _ensure_database_exists(self):
         create_tag = """
-            CREATE GRAPH TYPE IF NOT EXISTS MemoryGraphType AS {
+            CREATE GRAPH TYPE IF NOT EXISTS MemOSType AS {
             NODE Memory (:MemoryTag {
                 id STRING,
                 memory STRING,
                 user_name STRING,
+                user_id STRING,
+                session_id STRING,
+                status STRING,
+                key STRING,
+                confidence FLOAT,
+                tags LIST<STRING>,
                 created_at STRING,
                 updated_at STRING,
-                status STRING,
-                node_type STRING,
-                memory_time STRING,
-                source STRING,
-                confidence FLOAT,
-                entities LIST<STRING>,
-                tags LIST<STRING>,
-                visibility STRING,
                 memory_type STRING,
-                key STRING,
                 sources LIST<STRING>,
+                source STRING,
+                node_type STRING,
+                visibility STRING,
                 usage LIST<STRING>,
                 background STRING,
-                hierarchy_level STRING,
                 embedding VECTOR<3072, FLOAT>,
                 PRIMARY KEY(id)
             }),
             EDGE RELATE_TO (Memory) -[{user_name STRING}]-> (Memory),
-            EDGE PARENT (Memory) -[{user_name STRING}]-> (Memory)
+            EDGE PARENT (Memory) -[{user_name STRING}]-> (Memory),
+            EDGE AGGREGATE_TO (Memory) -[{user_name STRING}]-> (Memory),
+            EDGE MERGED_TO (Memory) -[{user_name STRING}]-> (Memory),
+            EDGE INFERS (Memory) -[{user_name STRING}]-> (Memory),
+            EDGE FOLLOWS (Memory) -[{user_name STRING}]-> (Memory)
         }
         """
-        create_graph = "CREATE GRAPH IF NOT EXISTS memory_graph TYPED MemoryGraphType"
-        set_graph_working = "SESSION SET GRAPH memory_graph"
+        create_graph = f"CREATE GRAPH IF NOT EXISTS `{self.db_name}` TYPED MemOSType"
+        set_graph_working = f"SESSION SET GRAPH `{self.db_name}`"
 
         try:
-            self.client.execute(create_tag)
-            self.client.execute(create_graph)
-            self.client.execute(set_graph_working)
-            logger.info("✅ Graph `memory_graph` is now the working graph.")
+            self.execute_query(create_tag, auto_set_db=False)
+            self.execute_query(create_graph, auto_set_db=False)
+            self.execute_query(set_graph_working)
+            logger.info(f"✅ Graph ``{self.db_name}`` is now the working graph.")
         except Exception as e:
-            logger.error(f"❌ Failed to create tag: {e}")
+            logger.error(f"❌ Failed to create tag: {e} trace: {traceback.format_exc()}")
 
-    # TODO
-    def _vector_index_exists(self, index_name: str = "memory_vector_index") -> bool:
-        raise NotImplementedError
-
-    # TODO
     def _create_vector_index(
         self, label: str, vector_property: str, dimensions: int, index_name: str
     ) -> None:
         """
         Create a vector index for the specified property in the label.
         """
-        raise NotImplementedError
+        create_vector_index = f"""
+                        CREATE VECTOR INDEX IF NOT EXISTS {index_name}
+                        ON NODE Memory::{vector_property}
+                        OPTIONS {{
+                            DIM: {dimensions},
+                            METRIC: IP,
+                            TYPE: IVF,
+                            NLIST: 100,
+                            TRAINSIZE: 1000
+                        }}
+                        FOR `{self.db_name}`
+                    """
+        self.execute_query(create_vector_index)
 
-    # TODO
     def _create_basic_property_indexes(self) -> None:
         """
-        Create standard B-tree indexes on memory_type, created_at,
+        Create standard B-tree indexes on status, memory_type, created_at
         and updated_at fields.
         Create standard B-tree indexes on user_name when use Shared Database
-        Multi-Tenant Mode
+        Multi-Tenant Mode.
         """
-        raise NotImplementedError
+        fields = ["status", "memory_type", "created_at", "updated_at"]
+        if not self.config.use_multi_db:
+            fields.append("user_name")
+
+        for field in fields:
+            index_name = f"idx_memory_{field}"
+            gql = f"""
+                CREATE INDEX IF NOT EXISTS {index_name} ON NODE Memory({field})
+                FOR `{self.db_name}`
+                """
+            try:
+                self.execute_query(gql)
+                logger.info(f"✅ Created index: {index_name} on field {field}")
+            except Exception as e:
+                logger.error(f"❌ Failed to create index {index_name}: {e}")
 
     def _index_exists(self, index_name: str) -> bool:
         """
         Check if an index with the given name exists.
         """
-        raise NotImplementedError
+        """
+            Check if a vector index with the given name exists in NebulaGraph.
 
-    def _parse_node(self, value: ValueWrapper) -> Any:
-        if value is None or value.is_null():
+            Args:
+                index_name (str): The name of the index to check.
+
+            Returns:
+                bool: True if the index exists, False otherwise.
+            """
+        query = "SHOW VECTOR INDEXES"
+        try:
+            result = self.execute_query(query)
+            return any(row.values()[0].as_string() == index_name for row in result)
+        except Exception as e:
+            logger.error(f"[Nebula] Failed to check index existence: {e}")
+            return False
+
+    def _parse_value(self, value: Any) -> Any:
+        """turn Nebula ValueWrapper to Python type"""
+        from nebulagraph_python.value_wrapper import ValueWrapper
+
+        if value is None or (hasattr(value, "is_null") and value.is_null()):
             return None
         try:
-            primitive_value = value.cast_primitive()
+            prim = value.cast_primitive() if isinstance(value, ValueWrapper) else value
         except Exception as e:
-            logger.warning(f"cast_primitive failed for value: {value}, error: {e}")
-            try:
-                primitive_value = value.cast()
-            except Exception as e2:
-                logger.warning(f"cast failed for value: {value}, error: {e2}")
-                return str(value)
+            logger.warning(f"Error when decode Nebula ValueWrapper: {e}")
+            prim = value.cast() if isinstance(value, ValueWrapper) else value
 
-        if isinstance(primitive_value, ValueWrapper):
-            return self._parse_node(primitive_value)
+        if isinstance(prim, ValueWrapper):
+            return self._parse_value(prim)
+        if isinstance(prim, list):
+            return [self._parse_value(v) for v in prim]
+        if type(prim).__name__ == "NVector":
+            return list(prim.values)
 
-        if isinstance(primitive_value, list):
-            return [
-                self._parse_node(v) if isinstance(v, ValueWrapper) else v for v in primitive_value
-            ]
+        return prim  # already a Python primitive
 
-        return primitive_value
+    def _parse_node(self, props: dict[str, Any]) -> dict[str, Any]:
+        parsed = {k: self._parse_value(v) for k, v in props.items()}
+
+        for tf in ("created_at", "updated_at"):
+            if tf in parsed and hasattr(parsed[tf], "isoformat"):
+                parsed[tf] = parsed[tf].isoformat()
+
+        node_id = parsed.pop("id")
+        memory = parsed.pop("memory", "")
+        parsed.pop("user_name", None)
+        metadata = parsed
+        metadata["type"] = metadata.pop("node_type")
+
+        return {"id": node_id, "memory": memory, "metadata": metadata}
