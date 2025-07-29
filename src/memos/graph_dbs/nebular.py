@@ -746,7 +746,7 @@ class NebulaGraphDB(BaseGraphDB):
             threshold (float, optional): Minimum similarity score threshold (0 ~ 1).
 
         Returns:
-            list[dict]: A list of dicts with 'id' and 'score', ordered by similarity.
+            list[dict]: A list of dicts with 'id' and 'score', ordered by similarity..
 
         Notes:
             - This method uses Neo4j native vector indexing to search for similar nodes.
