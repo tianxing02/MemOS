@@ -12,6 +12,7 @@ from memos.configs.graph_db import NebulaGraphDBConfig
 from memos.dependency import require_python_package
 from memos.graph_dbs.base import BaseGraphDB
 from memos.log import get_logger
+from memos.memories.textual.item import TreeNodeTextualMemoryMetadata
 
 
 logger = get_logger(__name__)
@@ -54,32 +55,11 @@ def _prepare_node_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
 
 def _metadata_filter(metadata: dict[str, Any]) -> dict[str, Any]:
     """
-    Filter and validate metadata dictionary against the Memory node schema.
+    Filter and validate metadata dictionary against TreeNodeTextualMemoryMetadata schema.
     - Removes keys not in schema.
     - Warns if required fields are missing.
     """
-
-    allowed_fields = {
-        "id",
-        "memory",
-        "user_name",
-        "user_id",
-        "session_id",
-        "status",
-        "key",
-        "confidence",
-        "tags",
-        "created_at",
-        "updated_at",
-        "memory_type",
-        "sources",
-        "source",
-        "node_type",
-        "visibility",
-        "usage",
-        "background",
-        "embedding",
-    }
+    allowed_fields = set(TreeNodeTextualMemoryMetadata.__fields__.keys())
 
     missing_fields = allowed_fields - metadata.keys()
     if missing_fields:
@@ -313,14 +293,15 @@ class NebulaGraphDB(BaseGraphDB):
         metadata = metadata.copy()
         metadata.setdefault("created_at", now)
         metadata.setdefault("updated_at", now)
-        metadata["node_type"] = metadata.pop("type")
+        metadata = _metadata_filter(metadata)
+
         metadata["id"] = id
         metadata["memory"] = memory
+        metadata["node_type"] = metadata.pop("type")
 
         if "embedding" in metadata and isinstance(metadata["embedding"], list):
             metadata["embedding"] = _normalize(metadata["embedding"])
 
-        metadata = _metadata_filter(metadata)
         properties = ", ".join(f"{k}: {_format_value(v, k)}" for k, v in metadata.items())
         gql = f"INSERT OR IGNORE (n@Memory {{{properties}}})"
 
