@@ -7,7 +7,7 @@ services:
       context: ..
       dockerfile: docker/Dockerfile
     ports:
-      - "8000:8000"
+      - "9002:9002"
     env_file:
       - /root/workspace/MemOS/.env
     depends_on:

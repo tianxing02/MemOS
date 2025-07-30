@@ -15,7 +15,7 @@ RUN mkdir -p /app/logs
 ENV PYTHONPATH=/app/src
 
 # Expose port
-EXPOSE 8000
+EXPOSE 9002
 
 # Start the docker
-CMD ["uvicorn", "memos.api.product_api:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+CMD ["uvicorn", "memos.api.product_api:app", "--host", "0.0.0.0", "--port", "9002", "--reload"]
