@@ -1,29 +1,15 @@
 # Base image
-FROM python:3.11-slim
+FROM registry.cn-shanghai.aliyuncs.com/memtensor/memos:amd-base
 
-# Install dependencies
-RUN apt-get update && apt-get install -y \
-    gcc \
-    g++ \
-    build-essential \
-    libffi-dev \
-    python3-dev \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
+RUN rm -rf /app/
 
-# Set working directory
-WORKDIR /app
+WORKDIR /app/
 
-# Set Hugging Face mirror
-ENV HF_ENDPOINT=https://hf-mirror.com
+COPY . /app/
 
-# Install Python packages
-COPY docker/requirements.txt .
-RUN pip install --upgrade pip && pip install --no-cache-dir -r requirements.txt
+RUN pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 
-# Copy application code
-COPY docker/ ./docker/
-COPY src/ ./src/
+RUN mkdir -p /app/logs
 
 # Set Python import path
 ENV PYTHONPATH=/app/src
