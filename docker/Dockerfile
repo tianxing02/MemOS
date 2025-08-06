@@ -5,7 +5,7 @@ FROM registry.cn-shanghai.aliyuncs.com/memtensor/memos:amd-base
 ENV HF_ENDPOINT=https://hf-mirror.com
 
 WORKDIR /app
-COPY src/ ./src/
+COPY ../src/ ./src/
 
 # Set Python import path
 ENV PYTHONPATH=/app/src
