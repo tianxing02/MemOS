@@ -2,7 +2,7 @@
 FROM registry.cn-shanghai.aliyuncs.com/memtensor/memos:amd-base
 
 # Set working directory
-WORKDIR /app
+WORKDIR /app/
 
 # Set Hugging Face mirror
 ENV HF_ENDPOINT=https://hf-mirror.com
