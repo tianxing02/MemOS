@@ -6,8 +6,6 @@ ENV HF_ENDPOINT=https://hf-mirror.com
 
 WORKDIR /app
 COPY src/ ./src/
-WORKDIR /app
-COPY docker/ ./docker/
 
 # Set Python import path
 ENV PYTHONPATH=/app/src
