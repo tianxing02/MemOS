@@ -8,8 +8,8 @@ WORKDIR /app/
 ENV HF_ENDPOINT=https://hf-mirror.com
 
 # Copy application code
-COPY docker/ ./docker/
 COPY src/ ./src/
+COPY docker/ ./docker/
 
 # Set Python import path
 ENV PYTHONPATH=/app/src
