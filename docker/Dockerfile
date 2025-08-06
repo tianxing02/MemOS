@@ -1,15 +1,14 @@
 # Base image
 FROM registry.cn-shanghai.aliyuncs.com/memtensor/memos:amd-base
 
-# Set working directory
-WORKDIR /app/
-
 # Set Hugging Face mirror
 ENV HF_ENDPOINT=https://hf-mirror.com
 
+# Set working directory
+WORKDIR /app
+
 # Copy application code
-COPY src/ ./src/
-COPY docker/ ./docker/
+COPY . /app/
 
 # Set Python import path
 ENV PYTHONPATH=/app/src
