@@ -352,6 +352,7 @@ class MOSCore:
         self,
         memories: list[TextualMemoryItem] | list[str] | None = None,
         base_prompt: str | None = None,
+        **kwargs,
     ) -> str:
         """Build system prompt with optional memories context."""
         if base_prompt is None:
@@ -971,7 +972,7 @@ class MOSCore:
         return {
             "user_id": user.user_id,
             "user_name": user.user_name,
-            "role": user.role.value,
+            "role": user.role.value if hasattr(user.role, "value") else user.role,
             "created_at": user.created_at.isoformat(),
             "accessible_cubes": [
                 {
