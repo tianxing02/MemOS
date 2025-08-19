@@ -2,10 +2,7 @@ import argparse
 import json
 import os
 import re
-import time
 import uuid
-
-from datetime import datetime
 
 from dotenv import load_dotenv
 from eval.eval_score import eval_acc_and_f1, eval_score, show_results
@@ -19,15 +16,6 @@ from memos.mem_os.main import MOS
 
 
 load_dotenv()
-
-# 1. Create MOS Config and set openai config
-print(f"🚀 [{datetime.now().strftime('%H:%M:%S')}] Starting to create MOS configuration...")
-start_time = time.time()
-
-user_name = str(uuid.uuid4())
-print(user_name)
-
-# 1.1 Set openai config
 openapi_config = {
     "model_name_or_path": "gpt-4o-mini",
     "temperature": 0.8,
@@ -38,86 +26,25 @@ openapi_config = {
     "api_key": os.getenv("OPENAI_API_KEY", "sk-xxxxx"),
     "api_base": os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1"),
 }
-# 1.2 Set neo4j config
 neo4j_uri = os.getenv("NEO4J_URI", "bolt://47.117.41.207:7687")
 
-# 1.3  Create MOS Config
-config = {
-    "user_id": user_name,
-    "chat_model": {
-        "backend": "openai",
-        "config": openapi_config,
-    },
-    "mem_reader": {
-        "backend": "simple_struct",
-        "config": {
-            "llm": {
-                "backend": "openai",
-                "config": openapi_config,
-            },
-            "embedder": {
-                "backend": "universal_api",
-                "config": {
-                    "provider": "openai",
-                    "api_key": os.getenv("OPENAI_API_KEY", "sk-xxxxx"),
-                    "model_name_or_path": "text-embedding-3-large",
-                    "base_url": os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1"),
-                },
-            },
-            "chunker": {
-                "backend": "sentence",
-                "config": {
-                    "tokenizer_or_token_counter": "gpt2",
-                    "chunk_size": 512,
-                    "chunk_overlap": 128,
-                    "min_sentences_per_chunk": 1,
-                },
-            },
-        },
-    },
-    "max_turns_window": 20,
-    "top_k": 5,
-    "enable_textual_memory": True,
-    "enable_activation_memory": False,
-    "enable_parametric_memory": False,
-}
 
-mos_config = MOSConfig(**config)
-# you can set PRO_MODE to True to enable CoT enhancement mos_config.PRO_MODE = True
-mos = MOS(mos_config)
-
-print(
-    f"✅ [{datetime.now().strftime('%H:%M:%S')}] MOS configuration created successfully, time elapsed: {time.time() - start_time:.2f}s\n"
-)
-
-# 2. Initialize memory cube
-print(f"🚀 [{datetime.now().strftime('%H:%M:%S')}] Starting to initialize MemCube configuration...")
-start_time = time.time()
-
-config = GeneralMemCubeConfig.model_validate(
-    {
+def process_document(doc_path):
+    """Process a single document by creating MOS and MemCube with unique user ID"""
+    # Create MOS Config with unique user_id
+    user_name = str(uuid.uuid4())
+    config = {
         "user_id": user_name,
-        "cube_id": f"{user_name}",
-        "text_mem": {
-            "backend": "tree_text",
+        "chat_model": {
+            "backend": "openai",
+            "config": openapi_config,
+        },
+        "mem_reader": {
+            "backend": "simple_struct",
             "config": {
-                "extractor_llm": {
+                "llm": {
                     "backend": "openai",
                     "config": openapi_config,
-                },
-                "dispatcher_llm": {
-                    "backend": "openai",
-                    "config": openapi_config,
-                },
-                "graph_db": {
-                    "backend": "neo4j",
-                    "config": {
-                        "uri": neo4j_uri,
-                        "user": "neo4j",
-                        "password": "iaarlichunyu",
-                        "db_name": "mm-long-bench-doc-eval",
-                        "auto_create": True,
-                    },
                 },
                 "embedder": {
                     "backend": "universal_api",
@@ -128,44 +55,79 @@ config = GeneralMemCubeConfig.model_validate(
                         "base_url": os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1"),
                     },
                 },
-                "reorganize": True,
+                "chunker": {
+                    "backend": "sentence",
+                    "config": {
+                        "tokenizer_or_token_counter": "gpt2",
+                        "chunk_size": 512,
+                        "chunk_overlap": 128,
+                        "min_sentences_per_chunk": 1,
+                    },
+                },
             },
         },
-        "act_mem": {},
-        "para_mem": {},
-    },
-)
+        "max_turns_window": 20,
+        "top_k": 5,
+        "enable_textual_memory": True,
+        "enable_activation_memory": False,
+        "enable_parametric_memory": False,
+    }
+    mos_config = MOSConfig(**config)
+    mos = MOS(mos_config)
 
-print(
-    f"✅ [{datetime.now().strftime('%H:%M:%S')}] MemCube configuration initialization completed, time elapsed: {time.time() - start_time:.2f}s\n"
-)
-
-# 3. Initialize the MemCube with the configuration
-print(f"🚀 [{datetime.now().strftime('%H:%M:%S')}] Starting to create MemCube instance...")
-start_time = time.time()
-
-mem_cube = GeneralMemCube(config)
-try:
-    mem_cube.dump(f"/tmp/{user_name}/")
-    print(
-        f"✅ [{datetime.now().strftime('%H:%M:%S')}] MemCube created and saved successfully, time elapsed: {time.time() - start_time:.2f}s\n"
+    # Create MemCube configuration with fixed database name
+    mem_cube_config = GeneralMemCubeConfig.model_validate(
+        {
+            "user_id": user_name,
+            "cube_id": user_name,
+            "text_mem": {
+                "backend": "tree_text",
+                "config": {
+                    "extractor_llm": {
+                        "backend": "openai",
+                        "config": openapi_config,
+                    },
+                    "dispatcher_llm": {
+                        "backend": "openai",
+                        "config": openapi_config,
+                    },
+                    "graph_db": {
+                        "backend": "neo4j",
+                        "config": {
+                            "uri": neo4j_uri,
+                            "user": "neo4j",
+                            "password": "iaarlichunyu",
+                            "db_name": "mm-long-bench-shared",
+                            "auto_create": True,
+                        },
+                    },
+                    "embedder": {
+                        "backend": "universal_api",
+                        "config": {
+                            "provider": "openai",
+                            "api_key": os.getenv("OPENAI_API_KEY", "sk-xxxxx"),
+                            "model_name_or_path": "text-embedding-3-large",
+                            "base_url": os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1"),
+                        },
+                    },
+                    "reorganize": True,
+                },
+            },
+            "act_mem": {},
+            "para_mem": {},
+        },
     )
-except Exception as e:
-    print(
-        f"❌ [{datetime.now().strftime('%H:%M:%S')}] MemCube save failed: {e}, time elapsed: {time.time() - start_time:.2f}s\n"
-    )
+    mem_cube = GeneralMemCube(mem_cube_config)
 
-# 4. Register the MemCube
-print(f"🚀 [{datetime.now().strftime('%H:%M:%S')}] Starting to register MemCube...")
-start_time = time.time()
+    # Save and register MemCube
+    temp_dir = f"/tmp/{user_name}"
+    os.makedirs(temp_dir, exist_ok=True)
+    mem_cube.dump(temp_dir)
+    mos.register_mem_cube(temp_dir, mem_cube_id=user_name)
 
-mos.register_mem_cube(f"/tmp/{user_name}", mem_cube_id=user_name)
-
-print(
-    f"✅ [{datetime.now().strftime('%H:%M:%S')}] MemCube registration completed, time elapsed: {time.time() - start_time:.2f}s\n"
-)
-
-mos.add(doc_path="evaluation/data/mmlongbench/documents/")
+    # Add the current document
+    mos.add(doc_path=[doc_path])
+    return mos
 
 
 if __name__ == "__main__":
@@ -188,57 +150,91 @@ if __name__ == "__main__":
         default="evaluation/scripts/mmlongbench/eval/prompt_for_answer_extraction.md",
     )
     args = parser.parse_args()
-
     args.output_path = "evaluation/data/mmlongbench/res.json"
 
     with open(args.extractor_prompt_path) as f:
         prompt = f.read()
-    if os.path.exists(args.output_path):
-        with open(args.output_path) as f:
-            samples = json.load(f)
-    else:
-        with open(args.input_path) as f:
-            samples = json.load(f)
 
-    for sample in tqdm(samples):
-        if sample["evidence_sources"] != "['Pure-text (Plain-text)']":
-            continue
+    # Load input samples
+    with open(args.input_path) as f:
+        samples = json.load(f)
 
-        messages = sample["question"]
+    # Get list of document files to process
+    doc_files = [
+        f
+        for f in os.listdir(args.document_path)
+        if os.path.isfile(os.path.join(args.document_path, f))
+    ]
 
-        try_cnt = 0
-        is_success = False
-        while True:
-            try:
-                mos.clear_messages()
-                response = mos.chat(messages)
-                is_success = True
-            except Exception:
-                try_cnt += 1
-                response = "Failed"
-            if is_success or try_cnt > args.max_try:
-                break
+    # Process each document separately
+    res_samples = []
+    for doc_file in tqdm(doc_files, desc="Processing documents"):
+        print(f"Processing {doc_file}")
+        doc_path = os.path.join(args.document_path, doc_file)
 
-        sample["response"] = response
-        extracted_res = extract_answer(sample["question"], response, prompt)
-        sample["extracted_res"] = extracted_res
-        print("llm res:", extracted_res)
-        pred_ans = extracted_res.split("Answer format:")[0].split("Extracted answer:")[1].strip()
-        score = eval_score(sample["answer"], pred_ans, sample["answer_format"])
-        sample["pred"] = pred_ans
-        sample["score"] = score
+        # Process current document and create MOS
+        mos = process_document(doc_path)
 
-        acc, f1 = eval_acc_and_f1(samples)
-        print("--------------------------------------")
-        print("Question: {}".format(sample["question"]))
-        print("Response: {}".format(sample["response"]))
-        print(
-            "Gt: {}\tPred: {}\tScore: {}".format(sample["answer"], sample["pred"], sample["score"])
-        )
-        print(f"Avg acc: {acc}")
-        print(f"Avg f1: {f1}")
+        # Filter samples for this document
+        doc_id = os.path.basename(doc_path)
+        doc_samples = [s for s in samples if s["doc_id"] == doc_id]
 
+        # Process samples for this document
+        for sample in doc_samples:
+            if sample["evidence_sources"] != "['Pure-text (Plain-text)']":
+                continue
+
+            try_cnt = 0
+            while try_cnt <= args.max_try:
+                try:
+                    mos.clear_messages()
+                    response = mos.chat(sample["question"])
+                    break
+                except Exception as e:
+                    try_cnt += 1
+                    response = f"Error: {e!s}"
+                    if try_cnt > args.max_try:
+                        break
+
+            sample["response"] = response
+            # Extract and evaluate response
+            if "Error:" not in response:
+                extracted_res = extract_answer(sample["question"], response, prompt)
+                sample["extracted_res"] = extracted_res
+                try:
+                    pred_ans = (
+                        extracted_res.split("Answer format:")[0]
+                        .split("Extracted answer:")[1]
+                        .strip()
+                    )
+                    score = eval_score(sample["answer"], pred_ans, sample["answer_format"])
+                except Exception:
+                    pred_ans = ""
+                    score = 0
+                sample["pred"] = pred_ans
+                sample["score"] = score
+            else:
+                sample["pred"] = ""
+                sample["score"] = 0
+
+            res_samples.append(sample)
+            print("--------------------------------------")
+            print("Question: {}".format(sample["question"]))
+            print("Response: {}".format(sample["response"]))
+            print(
+                "Gt: {}\tPred: {}\tScore: {}".format(
+                    sample["answer"], sample["pred"], sample["score"]
+                )
+            )
+
+        acc, f1 = eval_acc_and_f1(res_samples)
+        print(f"\nMetrics - Accuracy: {acc:.4f}, F1 Score: {f1:.4f}")
+
+        # Save progress after each sample
         with open(args.output_path, "w") as f:
-            json.dump(samples, f)
+            json.dump(res_samples, f)
 
-    show_results(samples, show_path=re.sub("\.json$", ".txt", args.output_path))
+    # Calculate and display final results
+    acc, f1 = eval_acc_and_f1(res_samples)
+    print(f"\nFinal Metrics - Accuracy: {acc:.4f}, F1 Score: {f1:.4f}")
+    show_results(res_samples, show_path=re.sub("\.json$", ".txt", args.output_path))
