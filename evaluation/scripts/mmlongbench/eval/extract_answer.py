@@ -2,7 +2,10 @@ import os
 
 import openai
 
+from dotenv import load_dotenv
 
+
+load_dotenv()
 client = openai.Client(
     api_key=os.getenv("OPENAI_API_KEY", "sk-xxxxx"),
     base_url=os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1"),
