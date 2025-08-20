@@ -617,7 +617,7 @@ class MOSCore:
         self,
         messages: MessageList | None = None,
         memory_content: str | None = None,
-        doc_path: str | None = None,
+        doc_path: list[str] | None = None,
         mem_cube_id: str | None = None,
         user_id: str | None = None,
     ) -> None:
@@ -745,7 +745,7 @@ class MOSCore:
             and self.config.enable_textual_memory
             and self.mem_cubes[mem_cube_id].text_mem
         ):
-            documents = self._get_all_documents(doc_path)
+            documents = doc_path
             doc_memories = self.mem_reader.get_memory(
                 documents,
                 type="doc",
@@ -755,6 +755,7 @@ class MOSCore:
             mem_ids = []
             for mem in doc_memories:
                 mem_id_list: list[str] = self.mem_cubes[mem_cube_id].text_mem.add(mem)
+                self.mem_cubes[mem_cube_id].text_mem.memory_manager.wait_reorganizer()
                 mem_ids.extend(mem_id_list)
 
             # submit messages for scheduler

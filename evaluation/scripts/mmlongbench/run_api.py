@@ -4,6 +4,8 @@ import os
 import re
 import uuid
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 from dotenv import load_dotenv
 from eval.eval_score import eval_acc_and_f1, eval_score, show_results
 from eval.extract_answer import extract_answer
@@ -27,11 +29,11 @@ openapi_config = {
     "api_base": os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1"),
 }
 neo4j_uri = os.getenv("NEO4J_URI", "bolt://47.117.41.207:7687")
+db_name = "mm-long-bench-shared"
 
 
 def process_document(doc_path):
-    """Process a single document by creating MOS and MemCube with unique user ID"""
-    # Create MOS Config with unique user_id
+    """Create MOS and MemCube for a single document"""
     user_name = str(uuid.uuid4())
     config = {
         "user_id": user_name,
@@ -42,10 +44,7 @@ def process_document(doc_path):
         "mem_reader": {
             "backend": "simple_struct",
             "config": {
-                "llm": {
-                    "backend": "openai",
-                    "config": openapi_config,
-                },
+                "llm": {"backend": "openai", "config": openapi_config},
                 "embedder": {
                     "backend": "universal_api",
                     "config": {
@@ -75,7 +74,6 @@ def process_document(doc_path):
     mos_config = MOSConfig(**config)
     mos = MOS(mos_config)
 
-    # Create MemCube configuration with fixed database name
     mem_cube_config = GeneralMemCubeConfig.model_validate(
         {
             "user_id": user_name,
@@ -83,21 +81,15 @@ def process_document(doc_path):
             "text_mem": {
                 "backend": "tree_text",
                 "config": {
-                    "extractor_llm": {
-                        "backend": "openai",
-                        "config": openapi_config,
-                    },
-                    "dispatcher_llm": {
-                        "backend": "openai",
-                        "config": openapi_config,
-                    },
+                    "extractor_llm": {"backend": "openai", "config": openapi_config},
+                    "dispatcher_llm": {"backend": "openai", "config": openapi_config},
                     "graph_db": {
                         "backend": "neo4j",
                         "config": {
                             "uri": neo4j_uri,
                             "user": "neo4j",
                             "password": "iaarlichunyu",
-                            "db_name": "mm-long-bench-shared",
+                            "db_name": db_name,
                             "auto_create": True,
                         },
                     },
@@ -115,19 +107,74 @@ def process_document(doc_path):
             },
             "act_mem": {},
             "para_mem": {},
-        },
+        }
     )
     mem_cube = GeneralMemCube(mem_cube_config)
-
-    # Save and register MemCube
     temp_dir = f"/tmp/{user_name}"
     os.makedirs(temp_dir, exist_ok=True)
     mem_cube.dump(temp_dir)
     mos.register_mem_cube(temp_dir, mem_cube_id=user_name)
-
-    # Add the current document
     mos.add(doc_path=[doc_path])
     return mos
+
+
+def process_sample(sample, mos, prompt, max_try):
+    """Process a single sample with retry and evaluation"""
+    if sample["evidence_sources"] != "['Pure-text (Plain-text)']":
+        return None
+
+    try_cnt = 0
+    while try_cnt <= max_try:
+        try:
+            mos.clear_messages()
+            response = mos.chat(sample["question"])
+            break
+        except Exception as e:
+            try_cnt += 1
+            response = f"Error: {e!s}"
+            if try_cnt > max_try:
+                break
+
+    sample["response"] = response
+    if "Error:" not in response:
+        extracted_res = extract_answer(sample["question"], response, prompt)
+        sample["extracted_res"] = extracted_res
+        pred_ans = extracted_res.split("Answer format:")[0].split("Extracted answer:")[1].strip()
+        score = eval_score(sample["answer"], pred_ans, sample["answer_format"])
+        sample["pred"] = pred_ans
+        sample["score"] = score
+    else:
+        sample["pred"] = ""
+        sample["score"] = 0
+
+    print("--------------------------------------")
+    print(f"Question: {sample['question']}")
+    print(f"Response: {sample['response']}")
+    print(f"Gt: {sample['answer']}\tPred: {sample['pred']}\tScore: {sample['score']}")
+    return sample
+
+
+def process_document_with_samples(doc_file, args, samples, prompt):
+    """Process one document and all its samples concurrently"""
+    doc_path = os.path.join(args.document_path, doc_file)
+    print(f"Processing {doc_file}")
+    mos = process_document(doc_path)
+
+    doc_id = os.path.basename(doc_path)
+    doc_samples = [s for s in samples if s["doc_id"] == doc_id]
+
+    results = []
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = [
+            executor.submit(process_sample, sample, mos, prompt, args.max_try)
+            for sample in doc_samples
+        ]
+        for future in as_completed(futures):
+            result = future.result()
+            if result:
+                results.append(result)
+
+    return results
 
 
 if __name__ == "__main__":
@@ -155,86 +202,40 @@ if __name__ == "__main__":
     with open(args.extractor_prompt_path) as f:
         prompt = f.read()
 
-    # Load input samples
     with open(args.input_path) as f:
         samples = json.load(f)
 
-    # Get list of document files to process
     doc_files = [
         f
         for f in os.listdir(args.document_path)
         if os.path.isfile(os.path.join(args.document_path, f))
     ]
 
-    # Process each document separately
     res_samples = []
-    for doc_file in tqdm(doc_files, desc="Processing documents"):
-        print(f"Processing {doc_file}")
-        doc_path = os.path.join(args.document_path, doc_file)
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        future_to_doc = {
+            executor.submit(
+                process_document_with_samples, doc_file, args, samples, prompt
+            ): doc_file
+            for doc_file in doc_files
+        }
+        for future in tqdm(
+            as_completed(future_to_doc), total=len(future_to_doc), desc="Processing documents"
+        ):
+            doc_file = future_to_doc[future]
+            try:
+                doc_results = future.result()
+                res_samples.extend(doc_results)
 
-        # Process current document and create MOS
-        mos = process_document(doc_path)
-
-        # Filter samples for this document
-        doc_id = os.path.basename(doc_path)
-        doc_samples = [s for s in samples if s["doc_id"] == doc_id]
-
-        # Process samples for this document
-        for sample in doc_samples:
-            if sample["evidence_sources"] != "['Pure-text (Plain-text)']":
-                continue
-
-            try_cnt = 0
-            while try_cnt <= args.max_try:
-                try:
-                    mos.clear_messages()
-                    response = mos.chat(sample["question"])
-                    break
-                except Exception as e:
-                    try_cnt += 1
-                    response = f"Error: {e!s}"
-                    if try_cnt > args.max_try:
-                        break
-
-            sample["response"] = response
-            # Extract and evaluate response
-            if "Error:" not in response:
-                extracted_res = extract_answer(sample["question"], response, prompt)
-                sample["extracted_res"] = extracted_res
-                try:
-                    pred_ans = (
-                        extracted_res.split("Answer format:")[0]
-                        .split("Extracted answer:")[1]
-                        .strip()
-                    )
-                    score = eval_score(sample["answer"], pred_ans, sample["answer_format"])
-                except Exception:
-                    pred_ans = ""
-                    score = 0
-                sample["pred"] = pred_ans
-                sample["score"] = score
-            else:
-                sample["pred"] = ""
-                sample["score"] = 0
-
-            res_samples.append(sample)
-            print("--------------------------------------")
-            print("Question: {}".format(sample["question"]))
-            print("Response: {}".format(sample["response"]))
-            print(
-                "Gt: {}\tPred: {}\tScore: {}".format(
-                    sample["answer"], sample["pred"], sample["score"]
+                acc, f1 = eval_acc_and_f1(res_samples)
+                print(
+                    f"\n[Progress Save] {doc_file} done. Metrics - Accuracy: {acc:.4f}, F1 Score: {f1:.4f}"
                 )
-            )
+                with open(args.output_path, "w") as f:
+                    json.dump(res_samples, f)
+            except Exception as e:
+                print(f"Error while processing {doc_file}: {e}")
 
-        acc, f1 = eval_acc_and_f1(res_samples)
-        print(f"\nMetrics - Accuracy: {acc:.4f}, F1 Score: {f1:.4f}")
-
-        # Save progress after each sample
-        with open(args.output_path, "w") as f:
-            json.dump(res_samples, f)
-
-    # Calculate and display final results
     acc, f1 = eval_acc_and_f1(res_samples)
     print(f"\nFinal Metrics - Accuracy: {acc:.4f}, F1 Score: {f1:.4f}")
     show_results(res_samples, show_path=re.sub("\.json$", ".txt", args.output_path))
