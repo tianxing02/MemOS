@@ -189,7 +189,6 @@ def show_results(samples, show_path=None):
         f.write(f"Overall F1-score: {f1} | Question Number: {len(samples)}\n")
         f.write("-----------------------\n")
 
-        #####################
         acc_single_page, _ = eval_acc_and_f1(
             [sample for sample in samples if len(sample["evidence_pages"]) == 1]
         )
@@ -230,7 +229,6 @@ def show_results(samples, show_path=None):
         )
         f.write("-----------------------\n")
 
-        #####################
         source_sample_dict, document_type_dict = defaultdict(list), defaultdict(list)
         for sample in samples:
             for answer_source in sample["evidence_sources"]:
