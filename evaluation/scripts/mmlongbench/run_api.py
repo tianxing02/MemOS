@@ -4,11 +4,8 @@ import os
 import re
 import signal
 import sys
-import threading
 import time
 import uuid
-
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from dotenv import load_dotenv
 from eval.eval_score import eval_acc_and_f1, eval_score, show_results
@@ -35,79 +32,12 @@ openapi_config = {
 neo4j_uri = os.getenv("NEO4J_URI", "bolt://47.117.41.207:7687")
 db_name = "mm-long-bench-single-"
 
-
 # Global state tracking
-class ProcessingState:
-    def __init__(self):
-        self.lock = threading.Lock()
-        self.completed_docs = set()
-        self.completed_samples = set()
-        self.skipped = 0
-        self.doc_user_map = {}  # Map document name to user_name
-        self.doc_temp_dir = {}  # Map document name to temp directory
-
-    def mark_doc_completed(self, doc_id):
-        with self.lock:
-            self.completed_docs.add(doc_id)
-
-    def is_doc_completed(self, doc_id):
-        with self.lock:
-            return doc_id in self.completed_docs
-
-    def mark_sample_completed(self, doc_id, sample_id):
-        with self.lock:
-            self.completed_samples.add((doc_id, sample_id))
-
-    def is_sample_completed(self, doc_id, sample_id):
-        with self.lock:
-            return (doc_id, sample_id) in self.completed_samples
-
-    def increment_skipped(self):
-        with self.lock:
-            self.skipped += 1
-
-    def get_skipped(self):
-        with self.lock:
-            return self.skipped
-
-    def add_doc_user_mapping(self, doc_name, user_name, temp_dir):
-        with self.lock:
-            self.doc_user_map[doc_name] = user_name
-            self.doc_temp_dir[doc_name] = temp_dir
-
-    def get_user_name_for_doc(self, doc_name):
-        with self.lock:
-            return self.doc_user_map.get(doc_name)
-
-    def get_temp_dir_for_doc(self, doc_name):
-        with self.lock:
-            return self.doc_temp_dir.get(doc_name)
-
-    def to_dict(self):
-        """Convert state to dictionary for JSON serialization"""
-        with self.lock:
-            return {
-                "completed_docs": list(self.completed_docs),
-                "completed_samples": [{"doc": d, "sample": s} for d, s in self.completed_samples],
-                "skipped": self.skipped,
-                "doc_user_map": self.doc_user_map,
-                "doc_temp_dir": self.doc_temp_dir,
-            }
-
-    def from_dict(self, data):
-        """Load state from dictionary"""
-        with self.lock:
-            self.completed_docs = set(data.get("completed_docs", []))
-            self.completed_samples = set()
-            for item in data.get("completed_samples", []):
-                self.completed_samples.add((item["doc"], item["sample"]))
-            self.skipped = data.get("skipped", 0)
-            self.doc_user_map = data.get("doc_user_map", {})
-            self.doc_temp_dir = data.get("doc_temp_dir", {})
-
-
-# Initialize global state
-state = ProcessingState()
+completed_docs = set()
+completed_samples = set()
+skipped = 0
+doc_user_map = {}  # Map document name to user_name
+doc_temp_dir = {}  # Map document name to temp directory
 
 
 # Graceful shutdown handler
@@ -115,13 +45,36 @@ def graceful_shutdown(signum, frame):
     """Handle interrupt signals and exit gracefully"""
     print("\n🛑 Received interrupt signal. Saving progress and exiting...")
     save_test_results(args.test_results_path, test_results)
-    save_doc_processing_state(args.doc_state_path, state.to_dict())
+    save_doc_processing_state(args.doc_state_path, get_state_dict())
     sys.exit(1)
 
 
 # Register signal handlers
 signal.signal(signal.SIGINT, graceful_shutdown)
 signal.signal(signal.SIGTERM, graceful_shutdown)
+
+
+def get_state_dict():
+    """Convert state to dictionary for JSON serialization"""
+    return {
+        "completed_docs": list(completed_docs),
+        "completed_samples": [{"doc": d, "sample": s} for d, s in completed_samples],
+        "skipped": skipped,
+        "doc_user_map": doc_user_map,
+        "doc_temp_dir": doc_temp_dir,
+    }
+
+
+def load_state_dict(data):
+    """Load state from dictionary"""
+    global completed_docs, completed_samples, skipped, doc_user_map, doc_temp_dir
+    completed_docs = set(data.get("completed_docs", []))
+    completed_samples = set()
+    for item in data.get("completed_samples", []):
+        completed_samples.add((item["doc"], item["sample"]))
+    skipped = data.get("skipped", 0)
+    doc_user_map = data.get("doc_user_map", {})
+    doc_temp_dir = data.get("doc_temp_dir", {})
 
 
 def import_document(doc_path):
@@ -213,7 +166,8 @@ def import_document(doc_path):
 
         # Save mapping
         doc_name = os.path.basename(doc_path)
-        state.add_doc_user_mapping(doc_name, user_name, temp_dir)
+        doc_user_map[doc_name] = user_name
+        doc_temp_dir[doc_name] = temp_dir
 
         return user_name, temp_dir
     except Exception as e:
@@ -282,16 +236,17 @@ def extract_answer_safe(question, response, prompt):
 
 def process_sample(sample, mos, prompt, max_try, doc_file):
     """Process a single sample with retry and evaluation"""
+    global skipped
     if sample["evidence_sources"] != "['Pure-text (Plain-text)']":
-        state.increment_skipped()
+        skipped += 1
         return None
 
     doc_id = os.path.basename(doc_file)
     sample_id = sample.get("question_id", hash(sample["question"]))
 
     # Skip already completed samples
-    if state.is_sample_completed(doc_id, sample_id):
-        state.increment_skipped()
+    if (doc_id, sample_id) in completed_samples:
+        skipped += 1
         return None
 
     try_cnt = 0
@@ -349,19 +304,12 @@ def process_sample(sample, mos, prompt, max_try, doc_file):
     print("-" * 80 + "\n")
 
     # Mark sample as completed
-    state.mark_sample_completed(doc_id, sample_id)
+    completed_samples.add((doc_id, sample_id))
     return sample
 
 
-def import_document_task(doc_file, args):
-    """Task for importing a single document"""
-    doc_path = os.path.join(args.document_path, doc_file)
-    user_name, temp_dir = import_document(doc_path)
-    return doc_file, user_name, temp_dir
-
-
 def import_all_documents(args):
-    """Import all documents concurrently and save user_name mappings"""
+    """Import all documents sequentially"""
     print("\n" + "=" * 80)
     print("🚀 Starting document import phase")
     print("=" * 80)
@@ -376,13 +324,11 @@ def import_all_documents(args):
     # Load existing mappings if available
     if os.path.exists(args.doc_state_path):
         state_data = load_doc_processing_state(args.doc_state_path)
-        state.from_dict(state_data)
-        print(
-            f"🔍 Loaded existing document processing state for {len(state.doc_user_map)} documents"
-        )
+        load_state_dict(state_data)
+        print(f"🔍 Loaded existing document processing state for {len(doc_user_map)} documents")
 
     # Import new documents
-    new_docs = [doc for doc in doc_files[:20] if doc not in state.doc_user_map]
+    new_docs = [doc for doc in doc_files if doc not in doc_user_map]
 
     if not new_docs:
         print("✅ All documents already imported")
@@ -390,41 +336,33 @@ def import_all_documents(args):
 
     print(f"📂 Importing {len(new_docs)} new documents")
 
-    # Use ThreadPoolExecutor for concurrent imports
-    with ThreadPoolExecutor(max_workers=8) as executor:
-        futures = {
-            executor.submit(import_document_task, doc_file, args): doc_file for doc_file in new_docs
-        }
-
-        for future in tqdm(as_completed(futures), total=len(futures), desc="Importing documents"):
-            doc_file = futures[future]
-            print(f"📂 Importing document：{doc_file}")
-            try:
-                doc_file, user_name, temp_dir = future.result()
-                if user_name and temp_dir:
-                    print(f"✅ Imported {doc_file} with user {user_name}")
-                    # Save state after each document
-                    save_doc_processing_state(args.doc_state_path, state.to_dict())
-                else:
-                    print(f"❌ Failed to import {doc_file}")
-            except Exception as e:
-                print(f"❌ Error importing {doc_file}: {e!s}")
+    for doc_file in tqdm(new_docs, desc="Importing documents"):
+        print(f"📂 Importing document：{doc_file}")
+        doc_path = os.path.join(args.document_path, doc_file)
+        user_name, temp_dir = import_document(doc_path)
+        if user_name and temp_dir:
+            print(f"✅ Imported {doc_file} with user {user_name}")
+            # Save state after each document
+            save_doc_processing_state(args.doc_state_path, get_state_dict())
+        else:
+            print(f"❌ Failed to import {doc_file}")
 
     print("✅ Document import completed")
 
 
 def process_document_with_samples(doc_file, args, samples, prompt):
-    """Process one document and all its samples concurrently"""
+    """Process one document and all its samples sequentially"""
+    global skipped
     # Skip already completed documents
-    if state.is_doc_completed(doc_file):
+    if doc_file in completed_docs:
         print(f"⏭️ Skipping already processed document: {doc_file}")
         return []
 
     print(f"🔄 Processing document: {doc_file}")
 
     # Get user_name and temp_dir for this document
-    user_name = state.get_user_name_for_doc(doc_file)
-    temp_dir = state.get_temp_dir_for_doc(doc_file)
+    user_name = doc_user_map.get(doc_file)
+    temp_dir = doc_temp_dir.get(doc_file)
     if not user_name or not temp_dir:
         print(f"❌ No user mapping found for {doc_file}. Skipping.")
         return []
@@ -439,28 +377,21 @@ def process_document_with_samples(doc_file, args, samples, prompt):
     doc_samples = [s for s in samples if s.get("doc_id") == doc_id]
 
     results = []
-    # Process samples concurrently
-    with ThreadPoolExecutor(max_workers=args.max_concurrent_samples) as executor:
-        futures = [
-            executor.submit(process_sample, sample, mos, prompt, args.max_try, doc_file)
-            for sample in doc_samples
-            if not state.is_sample_completed(
-                doc_file, sample.get("question_id", hash(sample["question"]))
-            )
-        ]
+    for sample in tqdm(doc_samples, desc=f"Processing samples in {doc_file}"):
+        sample_id = sample.get("question_id", hash(sample["question"]))
+        if (doc_file, sample_id) in completed_samples:
+            skipped += 1
+            continue
 
-        for future in tqdm(
-            as_completed(futures), total=len(futures), desc=f"Processing samples in {doc_file}"
-        ):
-            try:
-                result = future.result()
-                if result:
-                    results.append(result)
-            except Exception as e:
-                print(f"⚠️ Error processing sample: {e!s}")
+        try:
+            result = process_sample(sample, mos, prompt, args.max_try, doc_file)
+            if result:
+                results.append(result)
+        except Exception as e:
+            print(f"⚠️ Error processing sample: {e!s}")
 
     # Mark document as completed
-    state.mark_doc_completed(doc_file)
+    completed_docs.add(doc_file)
     return results
 
 
@@ -478,8 +409,8 @@ def load_test_results(output_path):
                 if "doc_file" in sample:
                     doc_file = sample["doc_file"]
                     sample_id = sample.get("question_id", hash(sample["question"]))
-                    state.mark_doc_completed(doc_file)
-                    state.mark_sample_completed(doc_file, sample_id)
+                    completed_docs.add(doc_file)
+                    completed_samples.add((doc_file, sample_id))
 
             processed_docs = len({s["doc_file"] for s in test_results if "doc_file" in s})
             print(f"📊 Loaded existing test results: {len(test_results)} samples")
@@ -537,14 +468,12 @@ def load_doc_processing_state(map_path):
 
 def main(args):
     global test_results
-    # Load existing test results
-    test_results = load_test_results(args.test_results_path)
 
     # Load document processing state
     if os.path.exists(args.doc_state_path):
         state_data = load_doc_processing_state(args.doc_state_path)
-        state.from_dict(state_data)
-        print(f"🔍 Loaded document processing state for {len(state.doc_user_map)} documents")
+        load_state_dict(state_data)
+        print(f"🔍 Loaded document processing state for {len(doc_user_map)} documents")
 
     # Import all documents first
     import_all_documents(args)
@@ -566,53 +495,43 @@ def main(args):
     print("\n" + "=" * 80)
     print(f"🚀 Starting sample processing with {len(doc_files)} documents")
     print(f"📂 {len(original_samples)} total samples in dataset")
-    print(f"⏭️ {state.get_skipped()} samples skipped due to filtering")
+    print(f"⏭️ {skipped} samples skipped due to filtering")
     print("=" * 80 + "\n")
 
-    # Process documents concurrently
+    # Load existing test results
+    test_results = load_test_results(args.test_results_path)
+
+    # Process documents sequentially
     completed = 0
-    with ThreadPoolExecutor(max_workers=min(args.max_concurrent_docs, len(doc_files))) as executor:
-        future_to_doc = {
-            executor.submit(
-                process_document_with_samples, doc_file, args, original_samples, prompt
-            ): doc_file
-            for doc_file in doc_files
-        }
+    for doc_file in tqdm(doc_files, desc="Processing documents"):
+        try:
+            doc_results = process_document_with_samples(doc_file, args, original_samples, prompt)
+            if doc_results:
+                test_results.extend(doc_results)
+                completed += 1
 
-        for future in tqdm(
-            as_completed(future_to_doc), total=len(future_to_doc), desc="Processing documents"
-        ):
-            doc_file = future_to_doc[future]
-            try:
-                doc_results = future.result()
-                if doc_results:
-                    test_results.extend(doc_results)
-                    completed += 1
-
-                    # Save test results after each document
-                    save_test_results(args.test_results_path, test_results)
-
-                    # Save document processing state
-                    save_doc_processing_state(args.doc_state_path, state.to_dict())
-
-                    # Calculate metrics
-                    processed_samples = [s for s in test_results if "score" in s]
-                    if processed_samples:
-                        acc, f1 = eval_acc_and_f1(processed_samples)
-                        print("\n" + "=" * 80)
-                        print(f"📈 Cumulative Metrics After Document: {doc_file}")
-                        print(f"✅ Processed: {completed}/{len(doc_files)} documents")
-                        print(
-                            f"🧪 Processed: {len(processed_samples)}/{len(original_samples)} samples"
-                        )
-                        print(f"🎯 Accuracy: {acc:.4f}")
-                        print(f"📊 F1 Score: {f1:.4f}")
-                        print("=" * 80 + "\n")
-            except Exception as e:
-                print(f"⛔ Unhandled error processing {doc_file}: {e!s}")
-                # Try to save current progress on error
+                # Save test results after each document
                 save_test_results(args.test_results_path, test_results)
-                save_doc_processing_state(args.doc_state_path, state.to_dict())
+
+                # Save document processing state
+                save_doc_processing_state(args.doc_state_path, get_state_dict())
+
+                # Calculate metrics
+                processed_samples = [s for s in test_results if "score" in s]
+                if processed_samples:
+                    acc, f1 = eval_acc_and_f1(processed_samples)
+                    print("\n" + "=" * 80)
+                    print(f"📈 Cumulative Metrics After Document: {doc_file}")
+                    print(f"✅ Processed: {completed}/{len(doc_files)} documents")
+                    print(f"🧪 Processed: {len(processed_samples)}/{len(original_samples)} samples")
+                    print(f"🎯 Accuracy: {acc:.4f}")
+                    print(f"📊 F1 Score: {f1:.4f}")
+                    print("=" * 80 + "\n")
+        except Exception as e:
+            print(f"⛔ Unhandled error processing {doc_file}: {e!s}")
+            # Try to save current progress on error
+            save_test_results(args.test_results_path, test_results)
+            save_doc_processing_state(args.doc_state_path, get_state_dict())
 
     # Final evaluation
     if test_results:
@@ -625,7 +544,7 @@ def main(args):
 
         print(f"✅ Completed: {completed}/{len(doc_files)} documents")
         print(f"🧪 Completed: {len(processed_samples)}/{len(original_samples)} samples")
-        print(f"⏭️ Skipped: {state.get_skipped()} samples (filtered)")
+        print(f"⏭️ Skipped: {skipped} samples (filtered)")
         print(f"🎯 Final Accuracy: {acc:.4f}")
         print(f"📊 Final F1 Score: {f1:.4f}")
         print("=" * 80)
@@ -667,18 +586,6 @@ if __name__ == "__main__":
         type=str,
         default="evaluation/data/mmlongbench/test_results.json",
     )
-    parser.add_argument(
-        "--max_concurrent_docs",
-        type=int,
-        default=5,
-        help="Maximum number of documents to process concurrently",
-    )
-    parser.add_argument(
-        "--max_concurrent_samples",
-        type=int,
-        default=4,
-        help="Maximum number of samples to process concurrently per document",
-    )
     args = parser.parse_args()
 
     # Initialize test results list
@@ -690,5 +597,5 @@ if __name__ == "__main__":
         print(f"⛔ Critical error: {e!s}")
         print("💾 Attempting to save progress...")
         save_test_results(args.test_results_path, test_results)
-        save_doc_processing_state(args.doc_state_path, state.to_dict())
+        save_doc_processing_state(args.doc_state_path, get_state_dict())
         sys.exit(1)
