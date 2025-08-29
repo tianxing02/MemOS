@@ -4,8 +4,11 @@ import os
 import re
 import signal
 import sys
+import threading
 import time
 import uuid
+
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from dotenv import load_dotenv
 from eval.eval_score import eval_acc_and_f1, eval_score, show_results
@@ -38,6 +41,8 @@ completed_samples = set()
 skipped = 0
 doc_user_map = {}  # Map document name to user_name
 doc_temp_dir = {}  # Map document name to temp directory
+results_lock = threading.Lock()
+completed_counter = 0
 
 
 # Graceful shutdown handler
@@ -257,6 +262,7 @@ def process_sample(sample, mos, prompt, max_try, doc_file):
             response = mos.chat(sample["question"])
             break
         except Exception as e:
+            print(e)
             try_cnt += 1
             response = f"Error: {e!s}"
             if try_cnt > max_try:
@@ -309,7 +315,7 @@ def process_sample(sample, mos, prompt, max_try, doc_file):
 
 
 def import_all_documents(args):
-    """Import all documents sequentially"""
+    """Import all documents concurrently"""
     print("\n" + "=" * 80)
     print("🚀 Starting document import phase")
     print("=" * 80)
@@ -336,16 +342,23 @@ def import_all_documents(args):
 
     print(f"📂 Importing {len(new_docs)} new documents")
 
-    for doc_file in tqdm(new_docs, desc="Importing documents"):
-        print(f"📂 Importing document：{doc_file}")
+    def import_doc(doc_file):
+        """Import a single document and save state"""
         doc_path = os.path.join(args.document_path, doc_file)
         user_name, temp_dir = import_document(doc_path)
         if user_name and temp_dir:
             print(f"✅ Imported {doc_file} with user {user_name}")
-            # Save state after each document
+            # Save state after each document (safely in a thread-safe way)
             save_doc_processing_state(args.doc_state_path, get_state_dict())
         else:
             print(f"❌ Failed to import {doc_file}")
+
+    # Use ThreadPoolExecutor to process documents concurrently
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        futures = {executor.submit(import_doc, doc): doc for doc in new_docs}
+
+        for future in tqdm(as_completed(futures), desc="Importing documents", total=len(new_docs)):
+            future.result()  # Wait for each document to finish and handle exceptions if needed
 
     print("✅ Document import completed")
 
@@ -466,6 +479,43 @@ def load_doc_processing_state(map_path):
     return {}
 
 
+def process_document_wrapper(doc_file, args, original_samples, prompt):
+    try:
+        doc_results = process_document_with_samples(doc_file, args, original_samples, prompt)
+        return {"success": True, "file": doc_file, "results": doc_results}
+    except Exception as e:
+        return {"success": False, "file": doc_file, "error": e}
+
+
+def update_shared_state(doc_data, args, original_samples, file_nums):
+    global completed_counter, test_results
+
+    with results_lock:
+        if doc_data["success"]:
+            if doc_data["results"]:
+                test_results.extend(doc_data["results"])
+
+            completed_counter += 1
+
+            save_test_results(args.test_results_path, test_results)
+            save_doc_processing_state(args.doc_state_path, get_state_dict())
+
+            processed_samples = [s for s in test_results if "score" in s]
+            if processed_samples:
+                acc, f1 = eval_acc_and_f1(processed_samples)
+                print("\n" + "=" * 80)
+                print(f"📈 Cumulative Metrics After Document: {doc_data['file']}")
+                print(f"✅ Processed: {completed_counter}/{file_nums} documents")
+                print(f"🧪 Processed: {len(processed_samples)}/{len(original_samples)} samples")
+                print(f"🎯 Accuracy: {acc:.4f}")
+                print(f"📊 F1 Score: {f1:.4f}")
+                print("=" * 80 + "\n")
+        else:
+            print(f"⛔ Unhandled error processing {doc_data['file']}: {doc_data['error']!s}")
+            save_test_results(args.test_results_path, test_results)
+            save_doc_processing_state(args.doc_state_path, get_state_dict())
+
+
 def main(args):
     global test_results
 
@@ -502,36 +552,20 @@ def main(args):
     test_results = load_test_results(args.test_results_path)
 
     # Process documents sequentially
-    completed = 0
-    for doc_file in tqdm(doc_files, desc="Processing documents"):
-        try:
-            doc_results = process_document_with_samples(doc_file, args, original_samples, prompt)
-            if doc_results:
-                test_results.extend(doc_results)
-                completed += 1
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        future_to_file = {
+            executor.submit(
+                process_document_wrapper, doc_file, args, original_samples, prompt
+            ): doc_file
+            for doc_file in doc_files
+        }
 
-                # Save test results after each document
-                save_test_results(args.test_results_path, test_results)
+        progress = tqdm(total=len(doc_files), desc="Processing documents", position=0, leave=True)
 
-                # Save document processing state
-                save_doc_processing_state(args.doc_state_path, get_state_dict())
-
-                # Calculate metrics
-                processed_samples = [s for s in test_results if "score" in s]
-                if processed_samples:
-                    acc, f1 = eval_acc_and_f1(processed_samples)
-                    print("\n" + "=" * 80)
-                    print(f"📈 Cumulative Metrics After Document: {doc_file}")
-                    print(f"✅ Processed: {completed}/{len(doc_files)} documents")
-                    print(f"🧪 Processed: {len(processed_samples)}/{len(original_samples)} samples")
-                    print(f"🎯 Accuracy: {acc:.4f}")
-                    print(f"📊 F1 Score: {f1:.4f}")
-                    print("=" * 80 + "\n")
-        except Exception as e:
-            print(f"⛔ Unhandled error processing {doc_file}: {e!s}")
-            # Try to save current progress on error
-            save_test_results(args.test_results_path, test_results)
-            save_doc_processing_state(args.doc_state_path, get_state_dict())
+        for future in as_completed(future_to_file):
+            doc_data = future.result()
+            update_shared_state(doc_data, args, original_samples, len(doc_files))
+            progress.update(1)
 
     # Final evaluation
     if test_results:
@@ -542,7 +576,7 @@ def main(args):
         processed_samples = [s for s in test_results if "score" in s]
         acc, f1 = eval_acc_and_f1(processed_samples)
 
-        print(f"✅ Completed: {completed}/{len(doc_files)} documents")
+        print(f"✅ Completed: {completed_counter}/{len(doc_files)} documents")
         print(f"🧪 Completed: {len(processed_samples)}/{len(original_samples)} samples")
         print(f"⏭️ Skipped: {skipped} samples (filtered)")
         print(f"🎯 Final Accuracy: {acc:.4f}")
