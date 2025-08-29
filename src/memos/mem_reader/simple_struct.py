@@ -1,6 +1,7 @@
 import concurrent.futures
 import copy
 import json
+import os
 import re
 
 from abc import ABC
@@ -19,10 +20,11 @@ from memos.templates.mem_reader_prompts import (
     SIMPLE_STRUCT_DOC_READER_PROMPT,
     SIMPLE_STRUCT_DOC_READER_PROMPT_ZH,
     SIMPLE_STRUCT_MEM_READER_EXAMPLE,
-    SIMPLE_STRUCT_MEM_READER_PROMPT_ZH,
-    SIMPLE_STRUCT_MEM_READER_PROMPT,
     SIMPLE_STRUCT_MEM_READER_EXAMPLE_ZH,
+    SIMPLE_STRUCT_MEM_READER_PROMPT,
+    SIMPLE_STRUCT_MEM_READER_PROMPT_ZH,
 )
+
 
 logger = log.get_logger(__name__)
 PROMPT_DICT = {
@@ -207,12 +209,14 @@ class SimpleStructMemReader(BaseMemReader, ABC):
         elif type == "doc":
             for item in scene_data:
                 try:
-                    if not isinstance(item, str):
+                    if os.path.exists(item):
                         parsed_text = parser.parse(item)
-                        results.append({"file": "pure_text", "text": parsed_text})
+                        results.append(
+                            {"file": "pure_text", "file_name": item, "text": parsed_text}
+                        )
                     else:
                         parsed_text = item
-                        results.append({"file": item, "text": parsed_text})
+                        results.append({"file": item, "file_name": item, "text": parsed_text})
                 except Exception as e:
                     print(f"Error parsing file {item}: {e!s}")
 
@@ -251,7 +255,7 @@ class SimpleStructMemReader(BaseMemReader, ABC):
                         key=chunk_res["key"],
                         embedding=self.embedder.embed([chunk_res["value"]])[0],
                         usage=[],
-                        sources=[f"{scene_data_info['file']}_{i}"],
+                        sources=[str({scene_data_info["file_name"]: chunks[i].text})],
                         background="",
                         confidence=0.99,
                         type="fact",
