@@ -1,3 +1,5 @@
+import copy
+
 import numpy as np
 
 from memos.embedders.factory import OllamaEmbedder
@@ -74,7 +76,15 @@ class MemoryReranker:
             list(tuple): Ranked list of memory items with similarity score.
         """
         # Step 1: Filter out items without embeddings
-        items_with_embeddings = [item for item in graph_results if item.metadata.embedding]
+        items_with_embeddings = []
+        for item in graph_results:
+            if item.metadata.embedding:
+                items_with_embeddings.append(copy.deepcopy(item))
+                detail = str(item.metadata.sources)
+                item.memory = detail
+                item.metadata.embedding = self.embedder.embed([detail])[0]
+                items_with_embeddings.append(copy.deepcopy(item))
+
         embeddings = [item.metadata.embedding for item in items_with_embeddings]
 
         if not embeddings:

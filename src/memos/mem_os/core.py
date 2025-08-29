@@ -267,6 +267,32 @@ class MOSCore:
 
         chat_history = self.chat_history_manager[target_user_id]
 
+        # Helper function to check if memories are sufficient
+        def check_memory_sufficiency(memories: list, query_str: str) -> bool:
+            """Use model to determine if memories are sufficient to answer the query"""
+            # Construct judgment prompt
+            judgment_prompt = (
+                "Strictly based on the provided memory fragments, determine if you can answer the user's question. "
+                "Respond only with 'yes' or 'no'\n\n"
+                "### Memory Fragments:\n"
+                f"{self._str_memories(memories)}\n\n"
+                "### User Question:\n"
+                f"{query_str}"
+            )
+
+            # Call model for judgment
+            judgment_response = self.chat_llm.generate(
+                [
+                    {"role": "system", "content": "You are a memory sufficiency evaluator"},
+                    {"role": "user", "content": judgment_prompt},
+                ]
+            )
+
+            # Parse model response
+            judgment = judgment_response.strip().lower()
+            logger.info(f"🧠 [Memory Judgment] Result: '{judgment}'")
+            return "yes" in judgment
+
         if self.config.enable_textual_memory and self.mem_cubes:
             memories_all = []
             for mem_cube_id, mem_cube in self.mem_cubes.items():
@@ -298,6 +324,19 @@ class MOSCore:
                 )
                 memories_all.extend(memories)
             logger.info(f"🧠 [Memory] Searched memories:\n{self._str_memories(memories_all)}\n")
+
+            # Check memory sufficiency if we have memories
+            memory_sufficient = False
+            if memories_all:
+                memory_sufficient = check_memory_sufficiency(memories_all, query)
+
+            # Return early if memories are insufficient
+            if not memory_sufficient and memories_all:
+                logger.warning("🧠 [Memory] Insufficient information to answer")
+                for memory_item in memories_all:
+                    if hasattr(memory_item.metadata, "sources") and memory_item.metadata.sources:
+                        memory_item.memory = str(memory_item.metadata.sources)
+
             system_prompt = self._build_system_prompt(memories_all, base_prompt=base_prompt)
         else:
             system_prompt = self._build_system_prompt(base_prompt=base_prompt)
@@ -617,7 +656,7 @@ class MOSCore:
         self,
         messages: MessageList | None = None,
         memory_content: str | None = None,
-        doc_path: str | None = None,
+        doc_path: list[str] | None = None,
         mem_cube_id: str | None = None,
         user_id: str | None = None,
     ) -> None:
@@ -745,7 +784,7 @@ class MOSCore:
             and self.config.enable_textual_memory
             and self.mem_cubes[mem_cube_id].text_mem
         ):
-            documents = self._get_all_documents(doc_path)
+            documents = doc_path
             doc_memories = self.mem_reader.get_memory(
                 documents,
                 type="doc",
@@ -755,6 +794,7 @@ class MOSCore:
             mem_ids = []
             for mem in doc_memories:
                 mem_id_list: list[str] = self.mem_cubes[mem_cube_id].text_mem.add(mem)
+                self.mem_cubes[mem_cube_id].text_mem.memory_manager.wait_reorganizer()
                 mem_ids.extend(mem_id_list)
 
             # submit messages for scheduler
