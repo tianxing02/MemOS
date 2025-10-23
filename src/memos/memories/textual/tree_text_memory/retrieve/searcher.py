@@ -1,19 +1,23 @@
 import concurrent.futures
+import copy
 import json
+import os
+import traceback
 
 from datetime import datetime
 
-from memos.embedders.factory import OllamaEmbedder
-from memos.graph_dbs.factory import Neo4jGraphDB
+from memos.configs.reranker import RerankerConfigFactory
+from memos.embedders.factory import UniversalAPIEmbedder
+from memos.graph_dbs.factory import NebulaGraphDB
 from memos.llms.factory import AzureLLM, OllamaLLM, OpenAILLM
 from memos.log import get_logger
 from memos.memories.textual.item import SearchedTreeNodeTextualMemoryMetadata, TextualMemoryItem
+from memos.reranker.factory import RerankerFactory
 from memos.utils import timed
 
 from .internet_retriever_factory import InternetRetrieverFactory
 from .reasoner import MemoryReasoner
 from .recall import GraphMemoryRetriever
-from .reranker import MemoryReranker
 from .task_goal_parser import TaskGoalParser
 
 
@@ -24,16 +28,30 @@ class Searcher:
     def __init__(
         self,
         dispatcher_llm: OpenAILLM | OllamaLLM | AzureLLM,
-        graph_store: Neo4jGraphDB,
-        embedder: OllamaEmbedder,
+        graph_store: NebulaGraphDB,
+        embedder: UniversalAPIEmbedder,
         internet_retriever: InternetRetrieverFactory | None = None,
     ):
+        bge_url = os.getenv("BGE_RERANKER_URL")  # e.g., "http://xxx.x.xxxxx.xxx:xxxx/v1/rerank"
+        if bge_url:
+            http_cfg = RerankerConfigFactory.model_validate(
+                {
+                    "backend": "http_bge",
+                    "config": {
+                        "url": bge_url,
+                        "model": os.getenv("BGE_RERANKER_MODEL", "bge-reranker-v2-m3"),
+                        "timeout": int(os.getenv("BGE_RERANKER_TIMEOUT", "10")),
+                        "boost_weights": {"user_id": 0.5, "tags": 0.2},
+                    },
+                }
+            )
+            reranker = RerankerFactory.from_config(http_cfg)
+            self.reranker = reranker
+
         self.graph_store = graph_store
         self.embedder = embedder
-
         self.task_goal_parser = TaskGoalParser(dispatcher_llm)
         self.graph_retriever = GraphMemoryRetriever(self.graph_store, self.embedder)
-        self.reranker = MemoryReranker(dispatcher_llm, self.embedder)
         self.reasoner = MemoryReasoner(dispatcher_llm)
 
         # Create internet retriever from config if provided
@@ -177,10 +195,25 @@ class Searcher:
         items = self.graph_retriever.retrieve(
             query=query, parsed_goal=parsed_goal, top_k=top_k, memory_scope="WorkingMemory"
         )
+
+        items_with_detail = []
+        for item in items:
+            if item.metadata.embedding:
+                items_with_detail.append(copy.deepcopy(item))
+                detail = str(item.metadata.sources)
+                item.memory = detail
+                try:
+                    item.metadata.embedding = self.embedder.embed([detail])[0]
+                except Exception as e:
+                    print("Error:", e)
+                    traceback.print_exc()
+                    print("=====> detail:", detail)
+                items_with_detail.append(copy.deepcopy(item))
+
         return self.reranker.rerank(
             query=query,
             query_embedding=query_embedding[0],
-            graph_results=items,
+            graph_results=items_with_detail,
             top_k=top_k,
             parsed_goal=parsed_goal,
         )
@@ -208,10 +241,20 @@ class Searcher:
                 top_k=top_k * 2,
                 memory_scope="UserMemory",
             )
+
+        items_with_detail = []
+        for item in results:
+            if item.metadata.embedding:
+                items_with_detail.append(copy.deepcopy(item))
+                detail = str(item.metadata.sources)
+                item.memory = detail
+                item.metadata.embedding = self.embedder.embed([detail])[0]
+                items_with_detail.append(copy.deepcopy(item))
+
         return self.reranker.rerank(
             query=query,
             query_embedding=query_embedding[0],
-            graph_results=results,
+            graph_results=items_with_detail,
             top_k=top_k * 2,
             parsed_goal=parsed_goal,
         )

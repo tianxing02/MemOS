@@ -350,7 +350,7 @@ class GraphStructureReorganizer:
 
         joined_scene = "\n".join(scene_lines)
         if len(joined_scene) > max_length:
-            logger.warning(f"Sub-cluster too long: {joined_scene}")
+            logger.warning(f"Sub-cluster too long: {joined_scene[:100]}")
         prompt = LOCAL_SUBCLUSTER_PROMPT.replace("{joined_scene}", joined_scene[:max_length])
 
         messages = [{"role": "user", "content": prompt}]

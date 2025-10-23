@@ -69,7 +69,14 @@ class Neo4jGraphDB(BaseGraphDB):
         from neo4j import GraphDatabase
 
         self.config = config
-        self.driver = GraphDatabase.driver(config.uri, auth=(config.user, config.password))
+        self.driver = GraphDatabase.driver(
+            config.uri,
+            auth=(config.user, config.password),
+            connection_timeout=600,
+            max_connection_lifetime=3600,
+            max_connection_pool_size=50,
+            max_transaction_retry_time=60,
+        )
         self.db_name = config.db_name
         self.user_name = config.user_name
 

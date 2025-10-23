@@ -1,40 +1,55 @@
 {
   "extractor_llm": {
-    "backend": "ollama",
+    "backend": "openai",
     "config": {
-      "model_name_or_path": "qwen3:0.6b",
-      "temperature": 0.0,
+      "model_name_or_path": "gpt-4o-mini",
+      "temperature": 0.8,
+      "max_tokens": 1024,
+      "top_p": 0.9,
+      "top_k": 50,
       "remove_think_prefix": true,
-      "max_tokens": 8192
+      "api_key": "sk-5hTdYsmX7ErNsLQKJ8jUTahHzyDjQ3H5mpgAeTfUfeRyIUYV",
+      "api_base": "http://123.129.219.111:3000/v1"
     }
   },
   "dispatcher_llm": {
-    "backend": "ollama",
+    "backend": "openai",
     "config": {
-      "model_name_or_path": "qwen3:0.6b",
-      "temperature": 0.0,
+      "model_name_or_path": "gpt-4o-mini",
+      "temperature": 0.8,
+      "max_tokens": 1024,
+      "top_p": 0.9,
+      "top_k": 50,
       "remove_think_prefix": true,
-      "max_tokens": 8192
+      "api_key": "sk-5hTdYsmX7ErNsLQKJ8jUTahHzyDjQ3H5mpgAeTfUfeRyIUYV",
+      "api_base": "http://123.129.219.111:3000/v1"
     }
   },
   "embedder": {
-    "backend": "ollama",
+    "backend": "universal_api",
     "config": {
-      "model_name_or_path": "nomic-embed-text:latest"
+      "provider": "openai",
+      "api_key": "sk-5hTdYsmX7ErNsLQKJ8jUTahHzyDjQ3H5mpgAeTfUfeRyIUYV",
+      "model_name_or_path": "text-embedding-3-large",
+      "base_url": "http://123.129.219.111:3000/v1"
     }
   },
   "graph_db": {
-    "backend": "neo4j",
+    "backend": "nebular",
     "config": {
-      "uri": "bolt://localhost:7687",
-      "user": "neo4j",
-      "password": "12345678",
-      "db_name": "shared-tree-textual-memory",
-      "user_name": "alice",
-      "auto_create": true,
+      "uri": [
+        "106.14.142.60:9669",
+        "120.55.160.164:9669",
+        "106.15.38.5:9669"
+      ],
+      "user": "root",
+      "password": "NebulaMemOS0724",
+      "space": "nebula-longbench-stx-new",
+      "user_name": "user_name",
       "use_multi_db": false,
-      "embedding_dimension": 768
+      "auto_create": true,
+      "embedding_dimension": 3072
     }
   },
-  "reorganize": true
+  "reorganize": false
 }

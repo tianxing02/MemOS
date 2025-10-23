@@ -17,8 +17,12 @@ from tqdm import tqdm
 
 from memos.configs.mem_cube import GeneralMemCubeConfig
 from memos.configs.mem_os import MOSConfig
+from memos.configs.mem_reader import SimpleStructMemReaderConfig
+from memos.configs.memory import TreeTextMemoryConfig
 from memos.mem_cube.general import GeneralMemCube
 from memos.mem_os.main import MOS
+from memos.mem_reader.simple_struct import SimpleStructMemReader
+from memos.memories.textual.tree import TreeTextMemory
 
 
 load_dotenv()
@@ -33,6 +37,7 @@ openapi_config = {
     "api_base": os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1"),
 }
 neo4j_uri = os.getenv("NEO4J_URI", "bolt://47.117.41.207:7687")
+space_name = "nebula-longbench-stx"
 db_name = "mm-long-bench-single-"
 
 # Global state tracking
@@ -135,13 +140,16 @@ def import_document(doc_path):
                         "extractor_llm": {"backend": "openai", "config": openapi_config},
                         "dispatcher_llm": {"backend": "openai", "config": openapi_config},
                         "graph_db": {
-                            "backend": "neo4j",
+                            "backend": "nebular",
                             "config": {
-                                "uri": neo4j_uri,
-                                "user": "neo4j",
-                                "password": "iaarlichunyu",
-                                "db_name": db_name + user_name[:8],
+                                "uri": json.loads(os.getenv("NEBULAR_HOSTS", "localhost")),
+                                "user": os.getenv("NEBULAR_USER", "root"),
+                                "password": os.getenv("NEBULAR_PASSWORD", "xxxxxx"),
+                                "space": space_name,  # 可以新建
+                                "user_name": user_name,  # cube_name
+                                "use_multi_db": False,  # 建议不要改
                                 "auto_create": True,
+                                "embedding_dimension": 3072,
                             },
                         },
                         "embedder": {
@@ -155,7 +163,7 @@ def import_document(doc_path):
                                 ),
                             },
                         },
-                        "reorganize": True,
+                        "reorganize": False,
                     },
                 },
                 "act_mem": {},
@@ -221,6 +229,49 @@ def create_mos_for_doc(user_name, temp_dir):
         }
         mos_config = MOSConfig(**config)
         mos = MOS(mos_config)
+
+        mem_cube_config = GeneralMemCubeConfig.model_validate(
+            {
+                "user_id": user_name,
+                "cube_id": user_name,
+                "text_mem": {
+                    "backend": "tree_text",
+                    "config": {
+                        "extractor_llm": {"backend": "openai", "config": openapi_config},
+                        "dispatcher_llm": {"backend": "openai", "config": openapi_config},
+                        "graph_db": {
+                            "backend": "neo4j",
+                            "config": {
+                                "uri": neo4j_uri,
+                                "user": "neo4j",
+                                "password": "iaarlichunyu",
+                                "db_name": space_name,
+                                "auto_create": True,
+                            },
+                        },
+                        "embedder": {
+                            "backend": "universal_api",
+                            "config": {
+                                "provider": "openai",
+                                "api_key": os.getenv("OPENAI_API_KEY", "sk-xxxxx"),
+                                "model_name_or_path": "text-embedding-3-large",
+                                "base_url": os.getenv(
+                                    "OPENAI_API_BASE", "https://api.openai.com/v1"
+                                ),
+                            },
+                        },
+                        "reorganize": True,
+                    },
+                },
+                "act_mem": {},
+                "para_mem": {},
+            }
+        )
+        mem_cube = GeneralMemCube(mem_cube_config)
+
+        if not os.path.exists(temp_dir) or not os.listdir(temp_dir):
+            os.makedirs(temp_dir, exist_ok=True)
+            mem_cube.dump(temp_dir)
         mos.register_mem_cube(temp_dir, mem_cube_id=user_name)
         return mos
     except Exception as e:
@@ -334,13 +385,27 @@ def import_all_documents(args):
         print(f"🔍 Loaded existing document processing state for {len(doc_user_map)} documents")
 
     # Import new documents
-    new_docs = [doc for doc in doc_files if doc not in doc_user_map]
+    new_docs = [doc for doc in doc_files[:20] if doc not in doc_user_map]
 
     if not new_docs:
         print("✅ All documents already imported")
         return
 
     print(f"📂 Importing {len(new_docs)} new documents")
+
+    # Create a memory reader instance
+    reader_config = SimpleStructMemReaderConfig.from_json_file(
+        "examples/data/config/simple_struct_reader_config.json"
+    )
+    reader = SimpleStructMemReader(reader_config)
+    tree_config = TreeTextMemoryConfig.from_json_file(
+        "examples/data/config/tree_config_shared_database.json"
+    )
+    my_tree_textual_memory = TreeTextMemory(tree_config)
+    doc_memory = reader.get_memory(new_docs, "doc", info={"user_id": "1111", "session_id": "2222"})
+    for m_list in doc_memory:
+        my_tree_textual_memory.add(m_list)
+        my_tree_textual_memory.memory_manager.wait_reorganizer()
 
     def import_doc(doc_file):
         """Import a single document and save state"""
@@ -374,8 +439,8 @@ def process_document_with_samples(doc_file, args, samples, prompt):
     print(f"🔄 Processing document: {doc_file}")
 
     # Get user_name and temp_dir for this document
-    user_name = doc_user_map.get(doc_file)
-    temp_dir = doc_temp_dir.get(doc_file)
+    user_name = "user_" + doc_file
+    temp_dir = "tmp/" + doc_file
     if not user_name or not temp_dir:
         print(f"❌ No user mapping found for {doc_file}. Skipping.")
         return []
@@ -526,7 +591,6 @@ def main(args):
         print(f"🔍 Loaded document processing state for {len(doc_user_map)} documents")
 
     # Import all documents first
-    import_all_documents(args)
 
     with open(args.extractor_prompt_path) as f:
         prompt = f.read()

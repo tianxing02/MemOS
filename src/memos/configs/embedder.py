@@ -45,10 +45,11 @@ class UniversalAPIEmbedderConfig(BaseEmbedderConfig):
     OpenAI, etc.
     """
 
-    provider: str = Field(..., description="Provider name, e.g., 'openai'")
-    api_key: str = Field(..., description="API key for the embedding provider")
+    provider: str = Field(default="openai", description="Provider name, e.g., 'openai'")
+    api_key: str = Field(default="EMPTY", description="API key for the embedding provider")
     base_url: str | None = Field(
-        default=None, description="Optional base URL for custom or proxied endpoint"
+        default="http://111.31.225.48:8078/v1",
+        description="Optional base URL for custom or proxied endpoint",
     )
 
 
