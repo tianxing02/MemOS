@@ -14,6 +14,7 @@ from memos.mem_os.main import MOS
 
 load_dotenv()
 
+db_name = "stx-pdf-doc-test"
 # 1. Create MOS Config and set openai config
 print(f"🚀 [{datetime.now().strftime('%H:%M:%S')}] Starting to create MOS configuration...")
 start_time = time.time()
@@ -53,9 +54,9 @@ config = {
                 "backend": "universal_api",
                 "config": {
                     "provider": "openai",
-                    "api_key": "sk-xxxxxxxxx",
+                    "api_key": os.getenv("OPENAI_API_KEY", "sk-xxxxx"),
                     "model_name_or_path": "text-embedding-3-large",
-                    "base_url": "http://xxx.xxx.xxx.xxx:xxxx/v1"
+                    "base_url": os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1"),
                 },
             },
             "chunker": {
@@ -109,17 +110,17 @@ config = GeneralMemCubeConfig.model_validate(
                         "uri": neo4j_uri,
                         "user": "neo4j",
                         "password": "iaarlichunyu",
-                        "db_name": f"db{user_name.replace('-', '')}",
+                        "db_name": db_name,
                         "auto_create": True,
                     },
                 },
                 "embedder": {
                     "backend": "universal_api",
                     "config": {
-                         "provider": "openai",
-                          "api_key": "sk-xxxxxxxxx",
-                          "model_name_or_path": "text-embedding-3-large",
-                          "base_url": "http://xxx.xxx.xxx.xxx:xxxx/v1"
+                        "provider": "openai",
+                        "api_key": os.getenv("OPENAI_API_KEY", "sk-xxxxx"),
+                        "model_name_or_path": "text-embedding-3-large",
+                        "base_url": os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1"),
                     },
                 },
                 "reorganize": True,
@@ -267,8 +268,8 @@ print(
 print(f"🚀 [{datetime.now().strftime('%H:%M:%S')}] Starting to add document...")
 start_time = time.time()
 
-## 7.1 add pdf for ./tmp/data if use doc mem mos.add(doc_path="./tmp/data/")
-mos.add(doc_path="examples/data/docs/test/")
+# 7.1 add pdf for ./tmp/data if use doc mem mos.add(doc_path="./tmp/data/")
+mos.add(doc_path=["examples/data/docs/test/0b85477387a9d0cc33fca0f4becaa0e5.pdf"])
 get_all_results = mos.get_all()
 filtered_results = filter_memory_data(get_all_results)
 

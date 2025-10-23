@@ -107,7 +107,7 @@ class SimpleStructMemReader(BaseMemReader, ABC):
 
         return chat_read_nodes
 
-    def get_memory(
+    async def get_memory(
         self, scene_data: list, type: str, info: dict[str, Any]
     ) -> list[list[TextualMemoryItem]]:
         """
@@ -145,7 +145,7 @@ class SimpleStructMemReader(BaseMemReader, ABC):
         if not all(isinstance(info[field], str) for field in required_fields):
             raise ValueError("user_id and session_id must be strings")
 
-        list_scene_data_info = self.get_scene_data_info(scene_data, type)
+        list_scene_data_info = await self.get_scene_data_info(scene_data, type)
 
         memory_list = []
 
@@ -168,7 +168,7 @@ class SimpleStructMemReader(BaseMemReader, ABC):
 
         return memory_list
 
-    def get_scene_data_info(self, scene_data: list, type: str) -> list[str]:
+    async def get_scene_data_info(self, scene_data: list, type: str) -> list[str]:
         """
         Get raw information from scene_data.
         If scene_data contains dictionaries, convert them to strings.
@@ -210,7 +210,7 @@ class SimpleStructMemReader(BaseMemReader, ABC):
             for item in scene_data:
                 try:
                     if os.path.exists(item):
-                        parsed_text = parser.parse(item)
+                        parsed_text = await parser.parse(item)
                         results.append(
                             {"file": "pure_text", "file_name": item, "text": parsed_text}
                         )
@@ -223,7 +223,14 @@ class SimpleStructMemReader(BaseMemReader, ABC):
         return results
 
     def _process_doc_data(self, scene_data_info, info):
-        chunks = self.chunker.chunk(scene_data_info["text"])
+        full_text = scene_data_info["text"]
+        for ch in ["\\", "\n", "\r"]:
+            full_text = full_text.replace(ch, " ")
+        full_text = re.sub(r"\$\d+\\\%\$", "", full_text)
+        full_text = full_text.replace('"', '\\"')
+        full_text = full_text.strip()
+
+        chunks = self.chunker.chunk(full_text)
         messages = []
         for chunk in chunks:
             lang = detect_lang(chunk.text)
@@ -242,6 +249,8 @@ class SimpleStructMemReader(BaseMemReader, ABC):
 
         processed_chunks = [self.parse_json_result(r) for r in processed_chunks]
         doc_nodes = []
+
+        file_name = os.path.basename(scene_data_info["file_name"])
         for i, chunk_res in enumerate(processed_chunks):
             if chunk_res:
                 node_i = TextualMemoryItem(
@@ -255,7 +264,7 @@ class SimpleStructMemReader(BaseMemReader, ABC):
                         key=chunk_res["key"],
                         embedding=self.embedder.embed([chunk_res["value"]])[0],
                         usage=[],
-                        sources=[str({scene_data_info["file_name"]: chunks[i].text})],
+                        sources=[f"{file_name}####{chunks[i].text}"],
                         background="",
                         confidence=0.99,
                         type="fact",

@@ -43,7 +43,7 @@ class MOSConfig(BaseConfig):
         description="Maximum number of turns to keep in the conversation history",
     )
     top_k: int = Field(
-        default=5,
+        default=50,
         description="Maximum number of memories to retrieve for each query",
     )
     enable_textual_memory: bool = Field(

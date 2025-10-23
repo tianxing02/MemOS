@@ -621,6 +621,7 @@ class NebulaGraphDB(BaseGraphDB):
                     props = {k: v.value for k, v in row.items()}
                 nodes.append(self._parse_node(props))
         except Exception as e:
+            print("============> query:", query)
             logger.error(
                 f"[get_nodes] Failed to retrieve nodes {ids}: {e}, trace: {traceback.format_exc()}"
             )
@@ -938,7 +939,7 @@ class NebulaGraphDB(BaseGraphDB):
 
         def _escape_value(value):
             if isinstance(value, str):
-                return f'"{value}"'
+                return f'"{value.replace('"', '\\"')}"'
             elif isinstance(value, list):
                 return "[" + ", ".join(_escape_value(v) for v in value) + "]"
             else:
