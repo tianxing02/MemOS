@@ -140,7 +140,9 @@ def get_images(sources: list[str]) -> list[str]:
     return dedup
 
 
-def add_images_context(current_messages: list[dict[str, Any]], images: list[str]) -> None:
+def add_images_context(
+    current_messages: list[dict[str, Any]], images: list[str]
+) -> list[dict[str, Any]]:
     """Append images in OpenAI-compatible multi-part format and ensure message structure.
 
     - Deduplicates image paths.
@@ -150,7 +152,7 @@ def add_images_context(current_messages: list[dict[str, Any]], images: list[str]
     - In-place modification of `current_messages`.
     """
     if not images:
-        return
+        return current_messages
 
     # Deduplicate images while preserving order
     unique_images: list[str] = []
@@ -180,7 +182,7 @@ def add_images_context(current_messages: list[dict[str, Any]], images: list[str]
         content_parts = [{"type": "text", "text": str(orig_content)}]
 
     # 5) Append up to 3 images as data URLs
-    limit = 3
+    limit = 6
     count = 0
     for img_path in unique_images:
         if count >= limit:
@@ -423,6 +425,7 @@ class MOSCore:
         Returns:
             str: The response from the MOS.
         """
+        global images_all
         target_user_id = user_id if user_id is not None else self.user_id
         accessible_cubes = self.user_manager.get_user_cubes(target_user_id)
         user_cube_ids = [cube.cube_id for cube in accessible_cubes]
