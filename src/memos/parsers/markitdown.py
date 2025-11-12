@@ -1,6 +1,7 @@
 import asyncio
 import shlex
 import time
+import traceback
 
 from pathlib import Path
 
@@ -197,17 +198,19 @@ class MarkItDownParser(BaseParser):
 
         if not ppt_file.exists():
             print(f"❌ PPT文件不存在: {ppt_file}")
-            return
-
-        temp_dir = Path(f"./ppt_test_result/ppt_test_results_{int(time.time())}")
+            return ""
+        file_stem = ppt_file.stem
+        temp_dir = Path("./ppt_test_result/" + file_stem)
         temp_dir.mkdir(exist_ok=True)
+        file_id: str | None = None
+        text_content: str = ""
 
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
                 # 0. 健康检查
                 if not await check_service_health(client):
                     print("中止测试")
-                    return
+                    return ""
 
                 file_id = await upload_ppt_file(client, ppt_file)
 
@@ -217,8 +220,10 @@ class MarkItDownParser(BaseParser):
 
         except Exception as e:
             print(f"\n❌ 测试失败: {e}")
+            tb_text = "".join(traceback.TracebackException.from_exception(e).format())
+            print(tb_text)
             print(f"🔍 文件保留在代码目录用于检查: ./{temp_dir.name}/")
-            return
+            return ""
 
         try:
             if file_id:
@@ -232,5 +237,7 @@ class MarkItDownParser(BaseParser):
 
         except Exception as e:
             print(f"⚠️ 服务器清理失败: {e}")
+            tb_text = "".join(traceback.TracebackException.from_exception(e).format())
+            print(tb_text)
 
         return text_content

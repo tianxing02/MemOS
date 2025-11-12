@@ -30,22 +30,6 @@ PRO_MODE_WELCOME_MESSAGE = """
 ✅ Chain of Thought (CoT) enhancement is now enabled by default
 ✅ Complex queries will be automatically decomposed and enhanced
 
-🌐 To enable Internet search capabilities:
-   1. Go to your cube's textual memory configuration
-   2. Set the backend to 'google' in the internet_retriever section
-   3. Configure the following parameters:
-      - api_key: Your Google Search API key
-      - cse_id: Your Custom Search Engine ID
-      - num_results: Number of search results (default: 5)
-
-📝 Example configuration at cube config for tree_text_memory :
-   internet_retriever:
-     backend: 'google'
-     config:
-       api_key: 'your_google_api_key_here'
-       cse_id: 'your_custom_search_engine_id'
-       num_results: 5
-details: https://github.com/memos-ai/memos/blob/main/examples/core_memories/tree_textual_w_internet_memoy.py
 ============================================================
 """
 

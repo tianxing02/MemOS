@@ -1,5 +1,6 @@
 import asyncio
 import os
+import traceback
 import uuid
 
 from memos import log
@@ -32,6 +33,8 @@ async def process_doc(doc_path):
         "examples/data/config/tree_config_shared_database.json"
     )
     doc_file = doc_path.split("/")[-1]
+    if doc_file != "38331-h80.pdf":
+        return doc_path
 
     user_id = "user_" + doc_file
     tree_config.graph_db.config.user_name = user_id
@@ -44,6 +47,7 @@ async def process_doc(doc_path):
 
     count = 0
     for m_list in doc_memory:
+        count += len(m_list)
         my_tree_textual_memory.add(m_list)
     print("total memories: ", count)
 
@@ -52,7 +56,7 @@ async def process_doc(doc_path):
 
 
 async def main():
-    batch_size = 1
+    batch_size = 4
 
     for i in range(0, len(doc_paths), batch_size):
         batch = doc_paths[i : i + batch_size]
@@ -64,6 +68,8 @@ async def main():
         for p, result in zip(batch, results, strict=False):
             if isinstance(result, Exception):
                 print(f"❌ Error processing {p}: {result}")
+                tb_text = "".join(traceback.TracebackException.from_exception(result).format())
+                print(tb_text)
             else:
                 print(f"✅ Finished {result}")
 

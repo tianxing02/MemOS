@@ -87,6 +87,50 @@ class Neo4jGraphDB(BaseGraphDB):
         # Create only if not exists
         self.create_index(dimensions=config.embedding_dimension)
 
+    def _run_with_retry(
+        self,
+        query: str,
+        params: dict | None = None,
+        *,
+        max_retries: int = 3,
+        base_sleep: float = 1.0,
+    ):
+        """Execute a Cypher query with retry on transient connection errors.
+
+        Retries on neo4j ServiceUnavailable/TransientError and common network timeouts.
+
+        Args:
+            query: Cypher query string
+            params: parameters dictionary
+            max_retries: maximum number of attempts
+            base_sleep: base sleep for exponential backoff
+
+        Returns:
+            neo4j.Result
+
+        Raises:
+            Last exception encountered after exhausting retries.
+        """
+
+        attempt = 0
+        last_exc = None
+        while attempt < max_retries:
+            try:
+                with self.driver.session(database=self.db_name) as session:
+                    return session.run(query, parameters=(params or {}))
+            except Exception as e:
+                last_exc = e
+                attempt += 1
+                logger.warning(
+                    f"Neo4j query failed (attempt {attempt}/{max_retries}): {e}. Retrying..."
+                )
+                time.sleep(base_sleep * (2 ** (attempt - 1)))
+
+        logger.error(
+            f"Neo4j query exhausted retries ({max_retries}). Raising last error: {last_exc}"
+        )
+        raise last_exc
+
     def create_index(
         self,
         label: str = "Memory",
@@ -160,8 +204,7 @@ class Neo4jGraphDB(BaseGraphDB):
             SKIP {keep_latest}
             DETACH DELETE n
         """
-        with self.driver.session(database=self.db_name) as session:
-            session.run(query)
+        self._run_with_retry(query)
 
     def add_node(self, id: str, memory: str, metadata: dict[str, Any]) -> None:
         if not self.config.use_multi_db and self.config.user_name:
@@ -181,15 +224,16 @@ class Neo4jGraphDB(BaseGraphDB):
                 n.updated_at = datetime($updated_at),
                 n += $metadata
         """
-        with self.driver.session(database=self.db_name) as session:
-            session.run(
-                query,
-                id=id,
-                memory=memory,
-                created_at=created_at,
-                updated_at=updated_at,
-                metadata=metadata,
-            )
+        self._run_with_retry(
+            query,
+            {
+                "id": id,
+                "memory": memory,
+                "created_at": created_at,
+                "updated_at": updated_at,
+                "metadata": metadata,
+            },
+        )
 
     def update_node(self, id: str, fields: dict[str, Any]) -> None:
         """
@@ -217,8 +261,7 @@ class Neo4jGraphDB(BaseGraphDB):
 
         query += f"\nSET {set_clause_str}"
 
-        with self.driver.session(database=self.db_name) as session:
-            session.run(query, **params)
+        self._run_with_retry(query, params)
 
     def delete_node(self, id: str) -> None:
         """
@@ -235,8 +278,7 @@ class Neo4jGraphDB(BaseGraphDB):
 
         query += " DETACH DELETE n"
 
-        with self.driver.session(database=self.db_name) as session:
-            session.run(query, **params)
+        self._run_with_retry(query, params)
 
     # Edge (Relationship) Management
     def add_edge(self, source_id: str, target_id: str, type: str) -> None:
@@ -260,8 +302,7 @@ class Neo4jGraphDB(BaseGraphDB):
 
         query += f"\nMERGE (a)-[:{type}]->(b)"
 
-        with self.driver.session(database=self.db_name) as session:
-            session.run(query, params)
+        self._run_with_retry(query, params)
 
     def delete_edge(self, source_id: str, target_id: str, type: str) -> None:
         """
@@ -284,8 +325,7 @@ class Neo4jGraphDB(BaseGraphDB):
 
         query += "\nDELETE r"
 
-        with self.driver.session(database=self.db_name) as session:
-            session.run(query, params)
+        self._run_with_retry(query, params)
 
     def edge_exists(
         self, source_id: str, target_id: str, type: str = "ANY", direction: str = "OUTGOING"

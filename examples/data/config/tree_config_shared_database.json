@@ -35,20 +35,13 @@
     }
   },
   "graph_db": {
-    "backend": "nebular",
+    "backend": "neo4j",
     "config": {
-      "uri": [
-        "106.14.142.60:9669",
-        "120.55.160.164:9669",
-        "106.15.38.5:9669"
-      ],
-      "user": "root",
-      "password": "NebulaMemOS0724",
-      "space": "nebula-longbench-stx-new",
-      "user_name": "user_name",
-      "use_multi_db": false,
-      "auto_create": true,
-      "embedding_dimension": 3072
+      "uri": "bolt://47.117.45.189:7687",
+      "user": "neo4j",
+      "password": "iaarlichunyu",
+      "db_name": "stx-mmlongbench-001",
+      "auto_create": true
     }
   },
   "reorganize": false
