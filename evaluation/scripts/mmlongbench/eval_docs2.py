@@ -17,7 +17,7 @@ from memos.mem_os.main import MOS
 
 load_dotenv()
 openapi_config = {
-    "model_name_or_path": "gpt-5-nano",
+    "model_name_or_path": "gpt-4o",
     "top_k": 50,
     "remove_think_prefix": True,
     "api_key": os.getenv("OPENAI_API_KEY", "sk-xxxxx"),
@@ -87,16 +87,13 @@ def process_doc(doc_file):
                     "extractor_llm": {"backend": "openai", "config": openapi_config},
                     "dispatcher_llm": {"backend": "openai", "config": openapi_config},
                     "graph_db": {
-                        "backend": "nebular",
+                        "backend": "neo4j",
                         "config": {
-                            "uri": json.loads(os.getenv("NEBULAR_HOSTS", "localhost")),
-                            "user": os.getenv("NEBULAR_USER", "root"),
-                            "password": os.getenv("NEBULAR_PASSWORD", "xxxxxx"),
-                            "space": space_name,
-                            "user_name": user_name,
-                            "use_multi_db": False,
+                            "uri": "bolt://47.117.45.189:7687",
+                            "user": "neo4j",
+                            "password": "iaarlichunyu",
+                            "db_name": "stx-mmlongbench-001",
                             "auto_create": True,
-                            "embedding_dimension": 3072,
                         },
                     },
                     "embedder": {
@@ -117,8 +114,10 @@ def process_doc(doc_file):
     )
     mem_cube = GeneralMemCube(mem_cube_config)
 
-    temp_dir = "tmp/" + doc_file
-    if not os.path.exists(temp_dir) or not os.listdir(temp_dir):
+    temp_dir = os.path.join("tmp", doc_file)
+    # Only dump when the directory does not exist or is empty
+    # Avoid calling dump on a non-empty directory to prevent MemCubeError
+    if (not os.path.exists(temp_dir)) or (not os.listdir(temp_dir)):
         mem_cube.dump(temp_dir)
 
     mos.register_mem_cube(temp_dir, mem_cube_id=user_name)
