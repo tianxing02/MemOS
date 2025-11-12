@@ -115,6 +115,7 @@ def process_doc(doc_file):
     mem_cube = GeneralMemCube(mem_cube_config)
 
     temp_dir = os.path.join("tmp", doc_file)
+
     # Only dump when the directory does not exist or is empty
     # Avoid calling dump on a non-empty directory to prevent MemCubeError
     if (not os.path.exists(temp_dir)) or (not os.listdir(temp_dir)):
