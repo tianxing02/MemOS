@@ -184,6 +184,10 @@ def add_images_context(
     # 5) Append up to 3 images as data URLs
     limit = 6
     count = 0
+    print("=========> images path:")
+    for image_path in unique_images:
+        print(image_path)
+
     for img_path in unique_images:
         if count >= limit:
             break
@@ -470,7 +474,11 @@ class MOSCore:
                         images_all.extend(images_list)
 
             logger.info(f"🧠 [Memory] Searched memories:\n{self._str_memories(memories_all)}\n")
-
+            print("===========> memories:\n")
+            for memory in memories_all:
+                print("memory relativity: ", memory.metadata.relativity)
+                print("memory user id: ", memory.metadata.user_id)
+                print(memory.memory)
             system_prompt = self._build_system_prompt(memories_all, base_prompt=base_prompt)
         else:
             system_prompt = self._build_system_prompt(base_prompt=base_prompt)

@@ -18,6 +18,10 @@ reader_config = SimpleStructMemReaderConfig.from_json_file(
 )
 reader = SimpleStructMemReader(reader_config)
 
+tree_config = TreeTextMemoryConfig.from_json_file(
+    "examples/data/config/tree_config_shared_database.json"
+)
+tree_config.graph_db.config.db_name = "stx-mmlongbench-002"
 # Processing Documents
 doc_paths = [
     "evaluation/data/mmlongbench/documents_xcy/" + f
@@ -28,21 +32,23 @@ doc_paths = [
 
 async def process_doc(doc_path):
     print(f"🔄 Processing document: {doc_path}")
-    session_id = str(uuid.uuid4())
-    tree_config = TreeTextMemoryConfig.from_json_file(
-        "examples/data/config/tree_config_shared_database.json"
-    )
-    doc_file = doc_path.split("/")[-1]
-    if doc_file != "38331-h80.pdf":
-        return doc_path
+    doc_file = doc_path.split("/")[-1].rsplit(".", 1)[0]
 
-    user_id = "user_" + doc_file
+    # Generate random user id: 'user_' + random short hex
+    user_id = "user_" + uuid.uuid4().hex[:8]
+    # Persist mapping between user_id and doc_path
+    try:
+        os.makedirs("evaluation/data/mmlongbench", exist_ok=True)
+        with open("evaluation/data/mmlongbench/user_doc_map.csv", "a", encoding="utf-8") as f:
+            f.write(f"{user_id},{doc_path}\n")
+    except Exception as e:
+        logger.error(f"Failed to write user-doc mapping: {e}")
+
     tree_config.graph_db.config.user_name = user_id
     temp_dir = "tmp/" + doc_file
-
     my_tree_textual_memory = TreeTextMemory(tree_config)
     doc_memory = await reader.get_memory(
-        [doc_path], "doc", info={"user_id": user_id, "session_id": session_id}
+        [doc_path], "doc", info={"user_id": user_id, "session_id": "session_" + str(uuid.uuid4())}
     )
 
     count = 0
@@ -56,7 +62,7 @@ async def process_doc(doc_path):
 
 
 async def main():
-    batch_size = 4
+    batch_size = 1
 
     for i in range(0, len(doc_paths), batch_size):
         batch = doc_paths[i : i + batch_size]

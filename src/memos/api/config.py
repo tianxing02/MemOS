@@ -186,6 +186,7 @@ class APIConfig:
     @staticmethod
     def get_neo4j_config(user_id: str | None = None) -> dict[str, Any]:
         """Get Neo4j configuration."""
+        print("MOS_NEO4J_SHARED_DB: ", os.getenv("MOS_NEO4J_SHARED_DB", "false"))
         if os.getenv("MOS_NEO4J_SHARED_DB", "false").lower() == "true":
             return APIConfig.get_neo4j_shared_config(user_id)
         else:

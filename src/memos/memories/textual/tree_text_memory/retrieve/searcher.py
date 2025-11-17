@@ -2,13 +2,12 @@ import concurrent.futures
 import copy
 import json
 import os
-import traceback
 
 from datetime import datetime
 
 from memos.configs.reranker import RerankerConfigFactory
 from memos.embedders.factory import UniversalAPIEmbedder
-from memos.graph_dbs.factory import NebulaGraphDB
+from memos.graph_dbs.neo4j import Neo4jGraphDB
 from memos.llms.factory import AzureLLM, OllamaLLM, OpenAILLM
 from memos.log import get_logger
 from memos.memories.textual.item import SearchedTreeNodeTextualMemoryMetadata, TextualMemoryItem
@@ -28,7 +27,7 @@ class Searcher:
     def __init__(
         self,
         dispatcher_llm: OpenAILLM | OllamaLLM | AzureLLM,
-        graph_store: NebulaGraphDB,
+        graph_store: Neo4jGraphDB,
         embedder: UniversalAPIEmbedder,
         internet_retriever: InternetRetrieverFactory | None = None,
     ):
@@ -40,7 +39,8 @@ class Searcher:
                     "config": {
                         "url": bge_url,
                         "model": os.getenv("BGE_RERANKER_MODEL", "bge-reranker-v2-m3"),
-                        "timeout": int(os.getenv("BGE_RERANKER_TIMEOUT", "10")),
+                        # Increase default timeout from 10s to 60s; env can override via BGE_RERANKER_TIMEOUT
+                        "timeout": int(os.getenv("BGE_RERANKER_TIMEOUT", "60")),
                         "boost_weights": {"user_id": 0.5, "tags": 0.2},
                     },
                 }
@@ -196,6 +196,7 @@ class Searcher:
             query=query, parsed_goal=parsed_goal, top_k=top_k, memory_scope="WorkingMemory"
         )
 
+        print("items: ", len(items))
         items_with_detail = []
         for item in items:
             if item.metadata.embedding:
@@ -204,11 +205,23 @@ class Searcher:
                 item.memory = detail
                 try:
                     item.metadata.embedding = self.embedder.embed([detail])[0]
+                    # only append the detailed variant if embedding succeeds
+                    items_with_detail.append(copy.deepcopy(item))
                 except Exception as e:
-                    print("Error:", e)
-                    traceback.print_exc()
-                    print("=====> detail:", detail)
-                items_with_detail.append(copy.deepcopy(item))
+                    # Only skip when token/context exceeds model limits; otherwise log error
+                    err_msg = str(e)
+                    if "maximum context length" in err_msg or (
+                        "requested" in err_msg and "tokens" in err_msg
+                    ):
+                        logger.warning(
+                            f"[PATH-A] Skip embedding due to token limit for memory_id={item.id}"
+                        )
+                    else:
+                        logger.error(
+                            f"[PATH-A] Embedding failed for memory_id={item.id}: {err_msg}",
+                            exc_info=True,
+                        )
+                    # Do not append the detailed variant when embedding fails
 
         return self.reranker.rerank(
             query=query,
@@ -242,14 +255,29 @@ class Searcher:
                 memory_scope="UserMemory",
             )
 
+        print("_retrieve_from_long_term_and_user: ", len(results))
         items_with_detail = []
         for item in results:
             if item.metadata.embedding:
                 items_with_detail.append(copy.deepcopy(item))
                 detail = str(item.metadata.sources)
                 item.memory = detail
-                item.metadata.embedding = self.embedder.embed([detail])[0]
-                items_with_detail.append(copy.deepcopy(item))
+                try:
+                    item.metadata.embedding = self.embedder.embed([detail])[0]
+                    items_with_detail.append(copy.deepcopy(item))
+                except Exception as e:
+                    err_msg = str(e)
+                    if "maximum context length" in err_msg or (
+                        "requested" in err_msg and "tokens" in err_msg
+                    ):
+                        logger.warning(
+                            f"[PATH-B] Skip embedding due to token limit for memory_id={item.id}"
+                        )
+                    else:
+                        logger.error(
+                            f"[PATH-B] Embedding failed for memory_id={item.id}: {err_msg}",
+                            exc_info=True,
+                        )
 
         return self.reranker.rerank(
             query=query,

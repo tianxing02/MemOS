@@ -38,6 +38,7 @@ with open("evaluation/data/mmlongbench/all_samples_with_gt.json") as f:
 
 def process_doc(doc_file):
     user_name = "user_" + doc_file
+    print(user_name)
     config = {
         "user_id": user_name,
         "chat_model": {
