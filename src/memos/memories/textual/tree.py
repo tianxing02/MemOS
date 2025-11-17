@@ -44,7 +44,6 @@ class TreeTextMemory(BaseTextMemory):
         self.memory_manager: MemoryManager = MemoryManager(
             self.graph_store, self.embedder, self.extractor_llm, is_reorganize=self.is_reorganize
         )
-
         # Create internet retriever if configured
         self.internet_retriever = None
         if config.internet_retriever is not None:

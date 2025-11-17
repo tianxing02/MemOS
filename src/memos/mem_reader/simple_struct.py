@@ -226,7 +226,6 @@ class SimpleStructMemReader(BaseMemReader, ABC):
         full_text = scene_data_info["text"]
         for ch in ["\\", "\n", "\r"]:
             full_text = full_text.replace(ch, " ")
-        full_text = re.sub(r"\$\d+\\\%\$", "", full_text)
         full_text = full_text.replace('"', '\\"')
         full_text = full_text.strip()
 

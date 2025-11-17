@@ -40,7 +40,7 @@
       "uri": "bolt://47.117.45.189:7687",
       "user": "neo4j",
       "password": "iaarlichunyu",
-      "db_name": "stx-mmlongbench-001",
+      "db_name": "",
       "auto_create": true
     }
   },

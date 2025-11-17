@@ -31,7 +31,7 @@ class RerankerFactory:
             return HTTPBGEReranker(
                 reranker_url=c.get("url") or c.get("endpoint") or c.get("reranker_url"),
                 model=c.get("model", "bge-reranker-v2-m3"),
-                timeout=int(c.get("timeout", 10)),
+                timeout=int(c.get("timeout", 60)),
                 headers_extra=c.get("headers_extra"),
                 rerank_source=c.get("rerank_source"),
             )

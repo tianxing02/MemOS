@@ -78,7 +78,7 @@ class HTTPBGEReranker(BaseReranker):
         reranker_url: str,
         token: str = "",
         model: str = "bge-reranker-v2-m3",
-        timeout: int = 10,
+        timeout: int = 60,
         headers_extra: dict | None = None,
         rerank_source: list[str] | None = None,
         boost_weights: dict[str, float] | None = None,
