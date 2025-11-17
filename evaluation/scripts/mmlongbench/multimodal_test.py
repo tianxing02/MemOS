@@ -67,7 +67,6 @@ config = {
 }
 
 mos_config = MOSConfig(**config)
-# you can set PRO_MODE to True to enable CoT enhancement mos_config.PRO_MODE = True
 mos = MOS(mos_config)
 
 config = GeneralMemCubeConfig.model_validate(
