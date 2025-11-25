@@ -21,6 +21,7 @@ evaluation/scripts/personamem
 benchmarks/
 
 ppt_test_result/
+ppt_test_result_xinyu/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

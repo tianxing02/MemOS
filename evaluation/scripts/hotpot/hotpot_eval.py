@@ -1,10 +1,8 @@
 import json
 import os
-import time
 import uuid
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
 
 from dotenv import load_dotenv
 from tqdm import tqdm
@@ -17,12 +15,10 @@ from memos.mem_os.main import MOS
 
 load_dotenv()
 
-# 1. Create MOS Config and set openai config
-print(f"🚀 [{datetime.now().strftime('%H:%M:%S')}] Starting to create MOS configuration...")
-start_time = time.time()
+db_name = "stx-hotpot-001"
+
 
 user_name = str(uuid.uuid4())
-print(user_name)
 
 # 1.1 Set openai config
 openapi_config = {
@@ -138,14 +134,6 @@ def filter_memory_data(memories_data):
     return filtered_data
 
 
-print(
-    f"✅ [{datetime.now().strftime('%H:%M:%S')}] MOS configuration created successfully, time elapsed: {time.time() - start_time:.2f}s\n"
-)
-
-# 2. Initialize memory cube
-print(f"🚀 [{datetime.now().strftime('%H:%M:%S')}] Starting to initialize MemCube configuration...")
-start_time = time.time()
-
 config = GeneralMemCubeConfig.model_validate(
     {
         "user_id": user_name,
@@ -167,7 +155,7 @@ config = GeneralMemCubeConfig.model_validate(
                         "uri": neo4j_uri,
                         "user": "neo4j",
                         "password": "iaarlichunyu",
-                        "db_name": "hotpot-evaluation",
+                        "db_name": db_name,
                         "auto_create": True,
                     },
                 },
@@ -188,34 +176,11 @@ config = GeneralMemCubeConfig.model_validate(
     },
 )
 
-print(
-    f"✅ [{datetime.now().strftime('%H:%M:%S')}] MemCube configuration initialization completed, time elapsed: {time.time() - start_time:.2f}s\n"
-)
-
-# 3. Initialize the MemCube with the configuration
-print(f"🚀 [{datetime.now().strftime('%H:%M:%S')}] Starting to create MemCube instance...")
-start_time = time.time()
-
 mem_cube = GeneralMemCube(config)
-try:
-    mem_cube.dump(f"/tmp/{user_name}/")
-    print(
-        f"✅ [{datetime.now().strftime('%H:%M:%S')}] MemCube created and saved successfully, time elapsed: {time.time() - start_time:.2f}s\n"
-    )
-except Exception as e:
-    print(
-        f"❌ [{datetime.now().strftime('%H:%M:%S')}] MemCube save failed: {e}, time elapsed: {time.time() - start_time:.2f}s\n"
-    )
 
-# 4. Register the MemCube
-print(f"🚀 [{datetime.now().strftime('%H:%M:%S')}] Starting to register MemCube...")
-start_time = time.time()
 
 mos.register_mem_cube(f"/tmp/{user_name}", mem_cube_id=user_name)
 
-print(
-    f"✅ [{datetime.now().strftime('%H:%M:%S')}] MemCube registration completed, time elapsed: {time.time() - start_time:.2f}s\n"
-)
 
 with open("evaluation/data/hotpot/hotpot_dev_distractor_v1.json") as f:
     data = json.load(f)

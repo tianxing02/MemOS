@@ -1,5 +1,4 @@
 import json
-import os
 import time
 
 from datetime import datetime
@@ -109,8 +108,8 @@ class Neo4jGraphDB(BaseGraphDB):
         - NEO4J_RETRY_MAX_ATTEMPTS (default: 3)
         - NEO4J_RETRY_BACKOFF_SECONDS (default: 2, exponential backoff)
         """
-        attempts = int(os.getenv("NEO4J_RETRY_MAX_ATTEMPTS", "3"))
-        base_backoff = float(os.getenv("NEO4J_RETRY_BACKOFF_SECONDS", "2"))
+        attempts = 8
+        base_backoff = 2
         try:
             from neo4j.exceptions import Neo4jError, ServiceUnavailable, TransientError
         except Exception:
@@ -235,11 +234,6 @@ class Neo4jGraphDB(BaseGraphDB):
                 )
                 summary = result.consume()
                 created = summary.counters.nodes_created
-                print(
-                    "add_node id=%s action=%s",
-                    id,
-                    "created" if created else "matched",
-                )
                 return created
 
         self._run_with_retry(_op, "add_node")
@@ -861,7 +855,6 @@ class Neo4jGraphDB(BaseGraphDB):
         where_str = " AND ".join(where_clauses)
         query = f"MATCH (n:Memory) WHERE {where_str} RETURN n.id AS id"
 
-        print(query, params)
         with self.driver.session(database=self.db_name) as session:
             result = session.run(query, params)
             return [record["id"] for record in result]
@@ -1070,7 +1063,6 @@ class Neo4jGraphDB(BaseGraphDB):
         where_clause = "WHERE n.memory_type = $scope"
         params = {"scope": scope}
 
-        print("user_name: ", user_name)
         if not self.config.use_multi_db and (self.config.user_name or user_name):
             where_clause += " AND n.user_id = $user_name"
             params["user_name"] = user_name
@@ -1081,7 +1073,6 @@ class Neo4jGraphDB(BaseGraphDB):
             RETURN n
             """
 
-        print(query, params)
         with self.driver.session(database=self.db_name) as session:
             results = session.run(query, params)
             return [self._parse_node(dict(record["n"])) for record in results]
