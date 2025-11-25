@@ -196,7 +196,6 @@ class Searcher:
             query=query, parsed_goal=parsed_goal, top_k=top_k, memory_scope="WorkingMemory"
         )
 
-        print("items: ", len(items))
         items_with_detail = []
         for item in items:
             if item.metadata.embedding:
@@ -255,7 +254,6 @@ class Searcher:
                 memory_scope="UserMemory",
             )
 
-        print("_retrieve_from_long_term_and_user: ", len(results))
         items_with_detail = []
         for item in results:
             if item.metadata.embedding:

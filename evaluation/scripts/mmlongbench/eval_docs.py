@@ -1,3 +1,4 @@
+import csv
 import json
 import os
 import re
@@ -17,16 +18,15 @@ from memos.mem_os.main import MOS
 
 
 load_dotenv()
-
 openapi_config = {
-    "model_name_or_path": "gpt-5-nano",
+    "model_name_or_path": "gpt-4o",
     "top_k": 50,
     "remove_think_prefix": True,
     "api_key": os.getenv("OPENAI_API_KEY", "sk-xxxxx"),
     "api_base": os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1"),
 }
 neo4j_uri = os.getenv("NEO4J_URI", "bolt://47.117.41.207:7687")
-space_name = "nebula-longbench-stx-5"
+db_name = "stx-mmlongbench-004"
 
 doc_paths = [
     f
@@ -37,9 +37,50 @@ doc_paths = [
 with open("evaluation/data/mmlongbench/samples.json") as f:
     samples = json.load(f)
 
+RESULTS_PATH = "evaluation/data/mmlongbench/test_results.json"
+completed_pairs: set[tuple[str, str]] = set()
+
+
+def _load_existing_results():
+    global completed_pairs
+    if os.path.exists(RESULTS_PATH):
+        try:
+            with open(RESULTS_PATH, encoding="utf-8") as f:
+                existing = json.load(f)
+            for r in existing:
+                did = r.get("doc_id")
+                q = r.get("question")
+                if did and q:
+                    completed_pairs.add((did, q))
+            return existing
+        except Exception:
+            return []
+    return []
+
+
+def _doc_has_pending(doc_file: str) -> bool:
+    for s in samples:
+        if s.get("doc_id") == doc_file and (doc_file, s.get("question")) not in completed_pairs:
+            return True
+    return False
+
+
+def get_user_name(doc_file):
+    csv_path = "evaluation/data/mmlongbench/user_doc_map.csv"
+    if os.path.exists(csv_path):
+        with open(csv_path, newline="", encoding="utf-8") as f:
+            reader = csv.reader(f)
+            for row in reader:
+                uid, path = row[0], row[1]
+                base = os.path.basename(path)
+                if base == doc_file or os.path.splitext(base)[0] == os.path.splitext(doc_file)[0]:
+                    return uid
+    return ""
+
 
 def process_doc(doc_file):
-    user_name = "user_" + doc_file
+    user_name = get_user_name(doc_file)
+    print(user_name, doc_file)
     config = {
         "user_id": user_name,
         "chat_model": {
@@ -89,12 +130,12 @@ def process_doc(doc_file):
                     "extractor_llm": {"backend": "openai", "config": openapi_config},
                     "dispatcher_llm": {"backend": "openai", "config": openapi_config},
                     "graph_db": {
-                        "backend": "nebular",
+                        "backend": "neo4j",
                         "config": {
-                            "uri": json.loads(os.getenv("NEBULAR_HOSTS", "localhost")),
-                            "user": os.getenv("NEBULAR_USER", "root"),
-                            "password": os.getenv("NEBULAR_PASSWORD", "xxxxxx"),
-                            "space": space_name,
+                            "uri": neo4j_uri,
+                            "user": "neo4j",
+                            "password": "iaarlichunyu",
+                            "db_name": db_name,
                             "user_name": user_name,
                             "use_multi_db": False,
                             "auto_create": True,
@@ -129,15 +170,13 @@ def process_doc(doc_file):
         prompt = f.read()
 
     samples_res = []
-    doc_samples = [
-        s
-        for s in samples
-        if s.get("doc_id") == doc_file and s.get("evidence_sources") == "['Pure-text (Plain-text)']"
-    ]
+    doc_samples = [s for s in samples if s.get("doc_id") == doc_file]
     if len(doc_samples) == 0:
         return []
 
     for sample in tqdm(doc_samples, desc=f"Processing {doc_file}"):
+        if (doc_file, sample.get("question")) in completed_pairs:
+            continue
         messages = sample["question"]
         try_cnt, is_success = 0, False
 
@@ -174,10 +213,29 @@ def process_doc(doc_file):
 
 
 if __name__ == "__main__":
-    results = []
-
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        future_to_doc = {executor.submit(process_doc, doc_file): doc_file for doc_file in doc_paths}
+    results = _load_existing_results()
+    total_samples = len(samples)
+    processed_samples = len(completed_pairs)
+    pending_samples = total_samples - processed_samples
+    sample_doc_ids = [s.get("doc_id") for s in samples if s.get("doc_id")]
+    all_docs_in_samples = set(sample_doc_ids)
+    processed_docs = {d for d, _ in completed_pairs}
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        pending_docs = [d for d in doc_paths if _doc_has_pending(d)]
+        print("\n" + "=" * 80)
+        print("📊 评测进度统计")
+        print("=" * 80)
+        print(f"✅ 已加载历史结果: {len(results)} 条")
+        print(f"📂 数据集总样本: {total_samples}")
+        print(f"🧪 已完成样本: {processed_samples}")
+        print(f"⏳ 待处理样本: {pending_samples}")
+        print(f"📄 数据集中总文档: {len(all_docs_in_samples)}")
+        print(f"✔️ 已完成文档: {len(processed_docs)}")
+        print(f"➡️ 待处理文档(本次将运行): {len(pending_docs)}")
+        print("=" * 80 + "\n")
+        future_to_doc = {
+            executor.submit(process_doc, doc_file): doc_file for doc_file in pending_docs
+        }
 
         for future in as_completed(future_to_doc):
             doc_file = future_to_doc[future]
@@ -191,8 +249,8 @@ if __name__ == "__main__":
                     print(f"Avg acc: {acc}")
                     print(f"Avg f1: {f1}")
 
-                with open("evaluation/data/mmlongbench/test_results.json", "w") as f:
-                    json.dump(results, f)
+                with open(RESULTS_PATH, "w", encoding="utf-8") as f:
+                    json.dump(results, f, ensure_ascii=False, indent=2)
             except Exception as e:
                 print(f"[{doc_file}] failed with {e}")
 

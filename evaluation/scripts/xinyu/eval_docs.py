@@ -1,3 +1,4 @@
+import csv
 import json
 import os
 import re
@@ -6,9 +7,9 @@ import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from dotenv import load_dotenv
-from eval.eval_score2 import eval_acc_and_f1, eval_score, show_results
-from eval.extract_answer import extract_answer
 
+from evaluation.scripts.mmlongbench.eval.extract_answer import extract_answer
+from evaluation.scripts.xinyu.eval.eval_score_llm import eval_acc_and_f1, eval_score, show_results
 from memos.configs.mem_cube import GeneralMemCubeConfig
 from memos.configs.mem_os import MOSConfig
 from memos.mem_cube.general import GeneralMemCube
@@ -24,21 +25,33 @@ openapi_config = {
     "api_base": os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1"),
 }
 neo4j_uri = os.getenv("NEO4J_URI", "bolt://47.117.41.207:7687")
-space_name = "nebula-longbench-stx-new"
-
+db_name = "stx-mmlongbench-003"
 doc_paths = [
     f
-    for f in os.listdir("evaluation/data/mmlongbench/documents_xcy")
-    if os.path.isfile(os.path.join("evaluation/data/mmlongbench/documents_xcy", f))
+    for f in os.listdir("evaluation/data/xinyu/documents")
+    if os.path.isfile(os.path.join("evaluation/data/xinyu/documents", f))
 ]
 
-with open("evaluation/data/mmlongbench/all_samples_with_gt.json") as f:
+with open("evaluation/data/xinyu/all_samples_with_gt.json") as f:
     samples = json.load(f)
 
 
+def get_user_name(doc_file):
+    csv_path = "evaluation/data/xinyu/user_doc_map.csv"
+    if os.path.exists(csv_path):
+        with open(csv_path, newline="", encoding="utf-8") as f:
+            reader = csv.reader(f)
+            for row in reader:
+                uid, path = row[0], row[1]
+                base = os.path.basename(path)
+                if base == doc_file or os.path.splitext(base)[0] == os.path.splitext(doc_file)[0]:
+                    return uid
+    return ""
+
+
 def process_doc(doc_file):
-    user_name = "user_" + doc_file
-    print(user_name)
+    user_name = get_user_name(doc_file)
+    print(user_name, doc_file)
     config = {
         "user_id": user_name,
         "chat_model": {
@@ -90,11 +103,14 @@ def process_doc(doc_file):
                     "graph_db": {
                         "backend": "neo4j",
                         "config": {
-                            "uri": "bolt://47.117.45.189:7687",
+                            "uri": neo4j_uri,
                             "user": "neo4j",
                             "password": "iaarlichunyu",
-                            "db_name": "stx-mmlongbench-001",
+                            "db_name": db_name,
+                            "user_name": user_name,
+                            "use_multi_db": False,
                             "auto_create": True,
+                            "embedding_dimension": 3072,
                         },
                     },
                     "embedder": {
@@ -117,8 +133,6 @@ def process_doc(doc_file):
 
     temp_dir = os.path.join("tmp", doc_file)
 
-    # Only dump when the directory does not exist or is empty
-    # Avoid calling dump on a non-empty directory to prevent MemCubeError
     if (not os.path.exists(temp_dir)) or (not os.listdir(temp_dir)):
         mem_cube.dump(temp_dir)
 
@@ -196,9 +210,7 @@ if __name__ == "__main__":
                     print(f"Avg acc: {acc}")
                     print(f"Avg f1: {f1}")
 
-                with open(
-                    "evaluation/data/mmlongbench/test_results2.json", "w", encoding="utf-8"
-                ) as f:
+                with open("evaluation/data/xinyu/test_results.json", "w", encoding="utf-8") as f:
                     json.dump(results, f, ensure_ascii=False, indent=2)
 
             except Exception as e:
@@ -212,7 +224,5 @@ if __name__ == "__main__":
 
     show_results(
         results,
-        show_path=re.sub(
-            r"\.json$", ".txt", "evaluation/data/mmlongbench/test_results_report2.txt"
-        ),
+        show_path=re.sub(r"\.json$", ".txt", "evaluation/data/xinyu/test_results_report.txt"),
     )

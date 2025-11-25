@@ -64,16 +64,6 @@ class MemoryManager:
                 except Exception as e:
                     logger.exception("Memory processing error: ", exc_info=e)
 
-        self.graph_store.remove_oldest_memory(
-            memory_type="WorkingMemory", keep_latest=self.memory_size["WorkingMemory"]
-        )
-        self.graph_store.remove_oldest_memory(
-            memory_type="LongTermMemory", keep_latest=self.memory_size["LongTermMemory"]
-        )
-        self.graph_store.remove_oldest_memory(
-            memory_type="UserMemory", keep_latest=self.memory_size["UserMemory"]
-        )
-
         self._refresh_memory_size()
         return added_ids
 
