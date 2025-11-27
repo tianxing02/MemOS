@@ -71,6 +71,7 @@ def filter_memory_data(memories_data):
         if key == "text_mem":
             filtered_data[key] = []
             for mem_group in value:
+                # Check if it's the new data structure (list of TextualMemoryItem objects)
                 if "memories" in mem_group and isinstance(mem_group["memories"], list):
                     # New data structure: directly a list of TextualMemoryItem objects
                     filtered_memories = []
