@@ -52,10 +52,14 @@ class NodeHandler:
             ]
             result = self.llm.generate(prompt).strip()
             if result == "contradictory":
-                logger.warning("detected <==CONFLICT==>")
+                logger.info(
+                    f'detected "{memory.memory}" <==CONFLICT==> "{embedding_candidate.memory}"'
+                )
                 detected_relationships.append([memory, embedding_candidate, "contradictory"])
             elif result == "redundant":
-                logger.warning("detected <==REDUNDANT==>")
+                logger.info(
+                    f'detected "{memory.memory}" <==REDUNDANT==> "{embedding_candidate.memory}"'
+                )
                 detected_relationships.append([memory, embedding_candidate, "redundant"])
             elif result == "independent":
                 pass

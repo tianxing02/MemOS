@@ -8,6 +8,7 @@ from memos.memos_tools.singleton import singleton_factory
 
 from .cosine_local import CosineLocalReranker
 from .http_bge import HTTPBGEReranker
+from .http_bge_strategy import HTTPBGERerankerStrategy
 from .noop import NoopReranker
 
 
@@ -31,7 +32,7 @@ class RerankerFactory:
             return HTTPBGEReranker(
                 reranker_url=c.get("url") or c.get("endpoint") or c.get("reranker_url"),
                 model=c.get("model", "bge-reranker-v2-m3"),
-                timeout=int(c.get("timeout", 60)),
+                timeout=int(c.get("timeout", 10)),
                 headers_extra=c.get("headers_extra"),
                 rerank_source=c.get("rerank_source"),
             )
@@ -44,5 +45,15 @@ class RerankerFactory:
 
         if backend in {"noop", "none", "disabled"}:
             return NoopReranker()
+
+        if backend in {"http_bge_strategy", "bge_strategy"}:
+            return HTTPBGERerankerStrategy(
+                reranker_url=c.get("url") or c.get("endpoint") or c.get("reranker_url"),
+                model=c.get("model", "bge-reranker-v2-m3"),
+                timeout=int(c.get("timeout", 10)),
+                headers_extra=c.get("headers_extra"),
+                rerank_source=c.get("rerank_source"),
+                reranker_strategy=c.get("reranker_strategy"),
+            )
 
         raise ValueError(f"Unknown reranker backend: {cfg.backend}")
