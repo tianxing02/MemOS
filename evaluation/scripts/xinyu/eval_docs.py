@@ -7,9 +7,9 @@ import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from dotenv import load_dotenv
+from eval.eval_score_llm import eval_acc_and_f1, eval_score, show_results
+from eval.extract_answer import extract_answer
 
-from evaluation.scripts.mmlongbench.eval.extract_answer import extract_answer
-from evaluation.scripts.xinyu.eval.eval_score_llm import eval_acc_and_f1, eval_score, show_results
 from memos.configs.mem_cube import GeneralMemCubeConfig
 from memos.configs.mem_os import MOSConfig
 from memos.mem_cube.general import GeneralMemCube
@@ -34,6 +34,36 @@ doc_paths = [
 
 with open("evaluation/data/xinyu/all_samples_with_gt.json") as f:
     samples = json.load(f)
+
+RESULTS_PATH = "evaluation/data/xinyu/test_results.json"
+completed_pairs: set[tuple[str, str]] = set()
+
+
+def _load_existing_results():
+    global completed_pairs
+    if os.path.exists(RESULTS_PATH):
+        try:
+            with open(RESULTS_PATH, encoding="utf-8") as f:
+                existing = json.load(f)
+            for r in existing:
+                did = r.get("doc_id")
+                q = r.get("question")
+                if did and q:
+                    completed_pairs.add((did, q))
+            return existing
+        except Exception:
+            return []
+    return []
+
+
+def _doc_has_pending(doc_file: str) -> bool:
+    for s in samples:
+        if s.get("doc_id") == doc_file:
+            qs = s.get("question")
+            if isinstance(qs, dict):
+                return any((doc_file, q) not in completed_pairs for _, q in qs.items())
+            return any((doc_file, q) not in completed_pairs for q in qs)
+    return False
 
 
 def get_user_name(doc_file):
@@ -151,7 +181,13 @@ def process_doc(doc_file):
     question_list = sample["question"]
     answer_list = sample["answer"]
 
+    if isinstance(question_list, dict):
+        ordered = sorted(question_list.items(), key=lambda kv: int(kv[0]))
+        question_list = [v for _, v in ordered]
+
     for idx, question in enumerate(question_list):
+        if (doc_file, question) in completed_pairs:
+            continue
         gt = answer_list.get(str(idx))
 
         try_cnt, is_success = 0, False
@@ -193,10 +229,41 @@ def process_doc(doc_file):
 
 
 if __name__ == "__main__":
-    results = []
+    results = _load_existing_results()
 
     with ThreadPoolExecutor(max_workers=4) as executor:
-        future_to_doc = {executor.submit(process_doc, doc_file): doc_file for doc_file in doc_paths}
+        pending_docs = [d for d in doc_paths if _doc_has_pending(d)]
+        total_samples = 0
+        for s in samples:
+            qs = s.get("question", [])
+            total_samples += len(qs) if not isinstance(qs, dict) else len(list(qs.values()))
+        processed_samples = len(completed_pairs)
+        pending_samples = max(0, total_samples - processed_samples)
+        sample_doc_ids = []
+        for s in samples:
+            did = s.get("doc_id")
+            if not did:
+                continue
+            if isinstance(did, list):
+                sample_doc_ids.extend([os.path.basename(x) for x in did if isinstance(x, str)])
+            elif isinstance(did, str):
+                sample_doc_ids.append(os.path.basename(did))
+        all_docs_in_samples = set(sample_doc_ids)
+        processed_docs = len(all_docs_in_samples) - len(pending_docs)
+        print("\n" + "=" * 80)
+        print("📊 评测进度统计")
+        print("=" * 80)
+        print(f"✅ 已加载历史结果: {len(results)} 条")
+        print(f"📂 数据集总样本: {total_samples}")
+        print(f"🧪 已完成样本: {processed_samples}")
+        print(f"⏳ 待处理样本: {pending_samples}")
+        print(f"📄 数据集中总文档: {len(all_docs_in_samples)}")
+        print(f"✔️ 已完成文档: {processed_docs}")
+        print(f"➡️ 待处理文档(本次将运行): {len(pending_docs)}")
+        print("=" * 80 + "\n")
+        future_to_doc = {
+            executor.submit(process_doc, doc_file): doc_file for doc_file in pending_docs
+        }
 
         for future in as_completed(future_to_doc):
             doc_file = future_to_doc[future]
@@ -210,7 +277,7 @@ if __name__ == "__main__":
                     print(f"Avg acc: {acc}")
                     print(f"Avg f1: {f1}")
 
-                with open("evaluation/data/xinyu/test_results.json", "w", encoding="utf-8") as f:
+                with open(RESULTS_PATH, "w", encoding="utf-8") as f:
                     json.dump(results, f, ensure_ascii=False, indent=2)
 
             except Exception as e:

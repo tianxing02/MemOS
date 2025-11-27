@@ -34,6 +34,8 @@ for f in os.listdir("evaluation/data/xinyu/documents"):
         if name in existing_names:
             continue
         doc_paths.append(fp)
+print(f"existing_names length: {len(existing_names)}")
+print(f"doc_paths length: {len(doc_paths)}")
 
 
 async def process_doc(doc_path):
