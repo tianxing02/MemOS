@@ -213,8 +213,26 @@ def eval_acc_and_f1(samples):
 
 def show_results(samples, show_path=None):
     for sample in samples:
-        sample["evidence_pages"] = eval(sample["evidence_pages"])
-        sample["evidence_sources"] = eval(sample["evidence_sources"])
+        ep = sample.get("evidence_pages")
+        es = sample.get("evidence_sources")
+        if isinstance(ep, str):
+            try:
+                sample["evidence_pages"] = eval(ep)
+            except Exception:
+                sample["evidence_pages"] = []
+        elif isinstance(ep, list):
+            sample["evidence_pages"] = ep
+        else:
+            sample["evidence_pages"] = []
+        if isinstance(es, str):
+            try:
+                sample["evidence_sources"] = eval(es)
+            except Exception:
+                sample["evidence_sources"] = []
+        elif isinstance(es, list):
+            sample["evidence_sources"] = es
+        else:
+            sample["evidence_sources"] = []
 
     with open(show_path, "w") as f:
         acc, f1 = eval_acc_and_f1(samples)
