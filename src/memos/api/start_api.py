@@ -9,6 +9,7 @@ from fastapi.requests import Request
 from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
+from memos.api.middleware.request_context import RequestContextMiddleware
 from memos.configs.mem_os import MOSConfig
 from memos.mem_os.main import MOS
 from memos.mem_user.user_manager import UserManager, UserRole
@@ -77,6 +78,8 @@ app = FastAPI(
     description="A REST API for managing and searching memories using MemOS.",
     version="1.0.0",
 )
+
+app.add_middleware(RequestContextMiddleware)
 
 
 class BaseRequest(BaseModel):
@@ -418,3 +421,13 @@ async def global_exception_handler(request: Request, exc: Exception):
         status_code=500,
         content={"code": 500, "message": str(exc), "data": None},
     )
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--port", type=int, default=8000, help="Port to run the server on")
+    parser.add_argument("--host", type=str, default="0.0.0.0", help="Host to run the server on")
+    parser.add_argument("--reload", action="store_true", help="Enable auto-reload for development")
+    args = parser.parse_args()

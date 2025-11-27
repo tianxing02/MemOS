@@ -101,35 +101,6 @@ class Neo4jGraphDB(BaseGraphDB):
         # Create indexes
         self._create_basic_property_indexes()
 
-    def _run_with_retry(self, op, op_name: str):
-        """Run an operation with retry for transient/timeout errors.
-
-        Controlled via env vars:
-        - NEO4J_RETRY_MAX_ATTEMPTS (default: 3)
-        - NEO4J_RETRY_BACKOFF_SECONDS (default: 2, exponential backoff)
-        """
-        attempts = 8
-        base_backoff = 2
-        try:
-            from neo4j.exceptions import Neo4jError, ServiceUnavailable, TransientError
-        except Exception:
-            # If neo4j isn't available for some reason, run once and let it raise
-            return op()
-
-        for i in range(attempts):
-            try:
-                return op()
-            except (ServiceUnavailable, TransientError, Neo4jError, TimeoutError, OSError) as e:
-                if i == attempts - 1:
-                    logger.error(f"Neo4j operation {op_name} failed after {attempts} attempts: {e}")
-                    raise
-                sleep_s = base_backoff * (2**i)
-                logger.warning(
-                    f"Neo4j operation {op_name} failed (attempt {i + 1}/{attempts}): {e}. "
-                    f"Retrying in {sleep_s:.1f}s"
-                )
-                time.sleep(sleep_s)
-
     def get_memory_count(self, memory_type: str, user_name: str | None = None) -> int:
         user_name = user_name if user_name else self.config.user_name
         query = """
@@ -137,7 +108,7 @@ class Neo4jGraphDB(BaseGraphDB):
         WHERE n.memory_type = $memory_type
         """
         if not self.config.use_multi_db and (self.config.user_name or user_name):
-            query += "\nAND n.user_id = $user_name"
+            query += "\nAND n.user_name = $user_name"
         query += "\nRETURN COUNT(n) AS count"
         with self.driver.session(database=self.db_name) as session:
             result = session.run(
@@ -156,7 +127,7 @@ class Neo4jGraphDB(BaseGraphDB):
         WHERE n.memory_type = $scope
         """
         if not self.config.use_multi_db and (self.config.user_name or user_name):
-            query += "\nAND n.user_id = $user_name"
+            query += "\nAND n.user_name = $user_name"
         query += "\nRETURN n LIMIT 1"
 
         with self.driver.session(database=self.db_name) as session:
@@ -186,7 +157,7 @@ class Neo4jGraphDB(BaseGraphDB):
         WHERE n.memory_type = '{memory_type}'
         """
         if not self.config.use_multi_db and (self.config.user_name or user_name):
-            query += f"\nAND n.user_id = '{user_name}'"
+            query += f"\nAND n.user_name = '{user_name}'"
         keep_latest = int(keep_latest)
         query += f"""
             WITH n ORDER BY n.updated_at DESC
@@ -217,26 +188,21 @@ class Neo4jGraphDB(BaseGraphDB):
                 n.updated_at = datetime($updated_at),
                 n += $metadata
         """
+
         # serialization
         if metadata["sources"]:
             for idx in range(len(metadata["sources"])):
                 metadata["sources"][idx] = json.dumps(metadata["sources"][idx])
 
-        def _op():
-            with self.driver.session(database=self.db_name) as session:
-                result = session.run(
-                    query,
-                    id=id,
-                    memory=memory,
-                    created_at=created_at,
-                    updated_at=updated_at,
-                    metadata=metadata,
-                )
-                summary = result.consume()
-                created = summary.counters.nodes_created
-                return created
-
-        self._run_with_retry(_op, "add_node")
+        with self.driver.session(database=self.db_name) as session:
+            session.run(
+                query,
+                id=id,
+                memory=memory,
+                created_at=created_at,
+                updated_at=updated_at,
+                metadata=metadata,
+            )
 
     def update_node(self, id: str, fields: dict[str, Any], user_name: str | None = None) -> None:
         """
@@ -260,16 +226,13 @@ class Neo4jGraphDB(BaseGraphDB):
         MATCH (n:Memory {id: $id})
         """
         if not self.config.use_multi_db and (self.config.user_name or user_name):
-            query += "\nWHERE n.user_id = $user_name"
+            query += "\nWHERE n.user_name = $user_name"
             params["user_name"] = user_name
 
         query += f"\nSET {set_clause_str}"
 
-        def _op():
-            with self.driver.session(database=self.db_name) as session:
-                session.run(query, **params)
-
-        self._run_with_retry(_op, "update_node")
+        with self.driver.session(database=self.db_name) as session:
+            session.run(query, **params)
 
     def delete_node(self, id: str, user_name: str | None = None) -> None:
         """
@@ -282,16 +245,13 @@ class Neo4jGraphDB(BaseGraphDB):
 
         params = {"id": id}
         if not self.config.use_multi_db and (self.config.user_name or user_name):
-            query += " WHERE n.user_id = $user_name"
+            query += " WHERE n.user_name = $user_name"
             params["user_name"] = user_name
 
         query += " DETACH DELETE n"
 
-        def _op():
-            with self.driver.session(database=self.db_name) as session:
-                session.run(query, **params)
-
-        self._run_with_retry(_op, "delete_node")
+        with self.driver.session(database=self.db_name) as session:
+            session.run(query, **params)
 
     # Edge (Relationship) Management
     def add_edge(
@@ -318,11 +278,8 @@ class Neo4jGraphDB(BaseGraphDB):
 
         query += f"\nMERGE (a)-[:{type}]->(b)"
 
-        def _op():
-            with self.driver.session(database=self.db_name) as session:
-                session.run(query, params)
-
-        self._run_with_retry(_op, "add_edge")
+        with self.driver.session(database=self.db_name) as session:
+            session.run(query, params)
 
     def delete_edge(
         self, source_id: str, target_id: str, type: str, user_name: str | None = None
@@ -348,11 +305,8 @@ class Neo4jGraphDB(BaseGraphDB):
 
         query += "\nDELETE r"
 
-        def _op():
-            with self.driver.session(database=self.db_name) as session:
-                session.run(query, params)
-
-        self._run_with_retry(_op, "delete_edge")
+        with self.driver.session(database=self.db_name) as session:
+            session.run(query, params)
 
     def edge_exists(
         self,
@@ -415,7 +369,7 @@ class Neo4jGraphDB(BaseGraphDB):
         where_user = ""
         params = {"id": id}
         if not self.config.use_multi_db and (self.config.user_name or user_name):
-            where_user = " AND n.user_id = $user_name"
+            where_user = " AND n.user_name = $user_name"
             params["user_name"] = user_name
 
         query = f"MATCH (n:Memory) WHERE n.id = $id {where_user} RETURN n"
@@ -444,7 +398,7 @@ class Neo4jGraphDB(BaseGraphDB):
         params = {"ids": ids}
 
         if not self.config.use_multi_db and (self.config.user_name or user_name):
-            where_user = " AND n.user_id = $user_name"
+            where_user = " AND n.user_name = $user_name"
             if kwargs.get("cube_name"):
                 params["user_name"] = kwargs["cube_name"]
             else:
@@ -560,7 +514,7 @@ class Neo4jGraphDB(BaseGraphDB):
         }
 
         if not self.config.use_multi_db and (self.config.user_name or user_name):
-            where_user = "AND n.user_id = $user_name"
+            where_user = "AND n.user_name = $user_name"
             params["user_name"] = user_name
 
         query = f"""
@@ -849,7 +803,7 @@ class Neo4jGraphDB(BaseGraphDB):
                 raise ValueError(f"Unsupported operator: {op}")
 
         if not self.config.use_multi_db and (self.config.user_name or user_name):
-            where_clauses.append("n.user_id = $user_name")
+            where_clauses.append("n.user_name = $user_name")
             params["user_name"] = user_name
 
         where_str = " AND ".join(where_clauses)
@@ -885,7 +839,7 @@ class Neo4jGraphDB(BaseGraphDB):
         final_params = params.copy() if params else {}
 
         if not self.config.use_multi_db and (self.config.user_name or user_name):
-            user_clause = "n.user_id = $user_name"
+            user_clause = "n.user_name = $user_name"
             final_params["user_name"] = user_name
             if where_clause:
                 where_clause = where_clause.strip()
@@ -947,7 +901,7 @@ class Neo4jGraphDB(BaseGraphDB):
         user_name = user_name if user_name else self.config.user_name
         try:
             if not self.config.use_multi_db and (self.config.user_name or user_name):
-                query = "MATCH (n:Memory) WHERE n.user_id = $user_name DETACH DELETE n"
+                query = "MATCH (n:Memory) WHERE n.user_name = $user_name DETACH DELETE n"
                 params = {"user_name": user_name}
             else:
                 query = "MATCH (n) DETACH DELETE n"
@@ -980,7 +934,7 @@ class Neo4jGraphDB(BaseGraphDB):
             params = {}
 
             if not self.config.use_multi_db and (self.config.user_name or user_name):
-                node_query += " WHERE n.user_id = $user_name"
+                node_query += " WHERE n.user_name = $user_name"
                 edge_query += " WHERE a.user_name = $user_name AND b.user_name = $user_name"
                 params["user_name"] = user_name
 
@@ -1064,7 +1018,7 @@ class Neo4jGraphDB(BaseGraphDB):
         params = {"scope": scope}
 
         if not self.config.use_multi_db and (self.config.user_name or user_name):
-            where_clause += " AND n.user_id = $user_name"
+            where_clause += " AND n.user_name = $user_name"
             params["user_name"] = user_name
 
         query = f"""
@@ -1092,7 +1046,7 @@ class Neo4jGraphDB(BaseGraphDB):
         params = {"scope": scope}
 
         if not self.config.use_multi_db and (self.config.user_name or user_name):
-            where_clause += " AND n.user_id = $user_name"
+            where_clause += " AND n.user_name = $user_name"
             params["user_name"] = user_name
 
         query = f"""
@@ -1210,7 +1164,7 @@ class Neo4jGraphDB(BaseGraphDB):
                     session.run(
                         """
                         CREATE INDEX memory_user_name_index IF NOT EXISTS
-                        FOR (n:Memory) ON (n.user_id)
+                        FOR (n:Memory) ON (n.user_name)
                         """
                     )
                 logger.debug("Index 'memory_user_name_index' ensured.")
