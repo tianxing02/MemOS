@@ -7,9 +7,9 @@ import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from dotenv import load_dotenv
+from eval.eval_score_llm import eval_acc_and_f1, eval_score, show_results
+from eval.extract_answer import extract_answer
 
-from evaluation.scripts.mmlongbench.eval.extract_answer import extract_answer
-from evaluation.scripts.xinyu.eval.eval_score_llm import eval_acc_and_f1, eval_score, show_results
 from memos.configs.mem_cube import GeneralMemCubeConfig
 from memos.configs.mem_os import MOSConfig
 from memos.mem_cube.general import GeneralMemCube
