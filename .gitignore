@@ -22,6 +22,7 @@ benchmarks/
 
 ppt_test_result/
 ppt_test_result_xinyu/
+ppt_test_result_longbench/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
