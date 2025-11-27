@@ -20,8 +20,6 @@ from memos.mem_scheduler.schemas.general_schemas import (
     QUERY_LABEL,
     USER_INPUT_TYPE,
     WORKING_MEMORY_TYPE,
-    MemCubeID,
-    UserID,
 )
 from memos.mem_scheduler.schemas.message_schemas import ScheduleMessageItem
 from memos.mem_scheduler.schemas.monitor_schemas import QueryMonitorItem
@@ -34,6 +32,10 @@ from memos.mem_scheduler.utils.misc_utils import group_messages_by_user_and_mem_
 from memos.memories.textual.item import TextualMemoryItem
 from memos.memories.textual.preference import PreferenceTextMemory
 from memos.memories.textual.tree import TreeTextMemory
+from memos.types import (
+    MemCubeID,
+    UserID,
+)
 
 
 logger = get_logger(__name__)
@@ -187,6 +189,7 @@ class GeneralScheduler(BaseScheduler):
                             memory_len=1,
                             memcube_name=self._map_memcube_name(msg.mem_cube_id),
                         )
+                        event.task_id = msg.task_id
                         self._submit_web_logs([event])
                 except Exception:
                     logger.exception("Failed to record addMessage log for query")
@@ -231,6 +234,7 @@ class GeneralScheduler(BaseScheduler):
                             memory_len=1,
                             memcube_name=self._map_memcube_name(msg.mem_cube_id),
                         )
+                        event.task_id = msg.task_id
                         self._submit_web_logs([event])
                 except Exception:
                     logger.exception("Failed to record addMessage log for answer")
@@ -365,6 +369,7 @@ class GeneralScheduler(BaseScheduler):
                 mem_cube = self.current_mem_cube
                 content = message.content
                 user_name = message.user_name
+                info = message.info or {}
 
                 # Parse the memory IDs from content
                 mem_ids = json.loads(content) if isinstance(content, str) else content
@@ -388,6 +393,7 @@ class GeneralScheduler(BaseScheduler):
                     mem_cube_id=mem_cube_id,
                     text_mem=text_mem,
                     user_name=user_name,
+                    custom_tags=info.get("custom_tags", None),
                 )
 
                 logger.info(
@@ -412,6 +418,7 @@ class GeneralScheduler(BaseScheduler):
         mem_cube_id: str,
         text_mem: TreeTextMemory,
         user_name: str,
+        custom_tags: list[str] | None = None,
     ) -> None:
         """
         Process memories using mem_reader for enhanced memory processing.
@@ -421,6 +428,7 @@ class GeneralScheduler(BaseScheduler):
             user_id: User ID
             mem_cube_id: Memory cube ID
             text_mem: Text memory instance
+            custom_tags: Optional list of custom tags for memory processing
         """
         try:
             # Get the mem_reader from the parent MOSCore
@@ -464,6 +472,7 @@ class GeneralScheduler(BaseScheduler):
                 processed_memories = self.mem_reader.fine_transfer_simple_mem(
                     memory_items,
                     type="chat",
+                    custom_tags=custom_tags,
                 )
             except Exception as e:
                 logger.warning(f"{e}: Fail to transfer mem: {memory_items}")
@@ -754,6 +763,7 @@ class GeneralScheduler(BaseScheduler):
                 mem_cube_id = message.mem_cube_id
                 content = message.content
                 messages_list = json.loads(content)
+                info = message.info or {}
 
                 logger.info(f"Processing pref_add for user_id={user_id}, mem_cube_id={mem_cube_id}")
 
@@ -776,7 +786,12 @@ class GeneralScheduler(BaseScheduler):
                 pref_memories = pref_mem.get_memory(
                     messages_list,
                     type="chat",
-                    info={"user_id": user_id, "session_id": session_id, "mem_cube_id": mem_cube_id},
+                    info={
+                        **info,
+                        "user_id": user_id,
+                        "session_id": session_id,
+                        "mem_cube_id": mem_cube_id,
+                    },
                 )
                 # Add pref_mem to vector db
                 pref_ids = pref_mem.add(pref_memories)
@@ -784,6 +799,50 @@ class GeneralScheduler(BaseScheduler):
                 logger.info(
                     f"Successfully processed and add preferences for user_id={user_id}, mem_cube_id={mem_cube_id}, pref_ids={pref_ids}"
                 )
+
+                # Create and submit log for web display
+                # Only send logs if RabbitMQ is configured with direct exchange (cloud service scenario)
+                should_send_log = (
+                    self.rabbitmq_config is not None
+                    and hasattr(self.rabbitmq_config, "exchange_type")
+                    and self.rabbitmq_config.exchange_type == "direct"
+                )
+                if pref_ids and should_send_log:
+                    pref_content = []
+                    pref_meta = []
+                    for i, pref_mem_item in enumerate(pref_memories):
+                        if i < len(pref_ids):
+                            pref_content.append(
+                                {
+                                    "content": pref_mem_item.memory,
+                                    "ref_id": pref_ids[i],
+                                }
+                            )
+                            pref_meta.append(
+                                {
+                                    "ref_id": pref_ids[i],
+                                    "id": pref_ids[i],
+                                    "memory": pref_mem_item.memory,
+                                    "memory_type": getattr(
+                                        pref_mem_item.metadata, "memory_type", "preference"
+                                    ),
+                                }
+                            )
+
+                    event = self.create_event_log(
+                        label="addMemory",
+                        from_memory_type=USER_INPUT_TYPE,
+                        to_memory_type=LONG_TERM_MEMORY_TYPE,
+                        user_id=user_id,
+                        mem_cube_id=mem_cube_id,
+                        mem_cube=mem_cube,
+                        memcube_log_content=pref_content,
+                        metadata=pref_meta,
+                        memory_len=len(pref_content),
+                        memcube_name=self._map_memcube_name(mem_cube_id),
+                    )
+                    event.task_id = message.task_id
+                    self._submit_web_logs([event])
 
             except Exception as e:
                 logger.error(f"Error processing pref_add message: {e}", exc_info=True)
