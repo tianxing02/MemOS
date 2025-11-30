@@ -96,6 +96,9 @@ def eval(prediction_file, gold_file):
     with open(gold_file) as f:
         gold = json.load(f)
 
+    evaluated_ids = set((prediction.get("answer") or {}).keys())
+    gold = [dp for dp in gold if (dp.get("_id") or dp.get("id")) in evaluated_ids]
+
     metrics = {
         "em": 0,
         "f1": 0,
@@ -114,12 +117,10 @@ def eval(prediction_file, gold_file):
         cur_id = dp["_id"]
         can_eval_joint = True
         if cur_id not in prediction["answer"]:
-            print(f"missing answer {cur_id}")
             can_eval_joint = False
         else:
             em, prec, recall = update_answer(metrics, prediction["answer"][cur_id], dp["answer"])
         if cur_id not in prediction["sp"]:
-            print(f"missing sp fact {cur_id}")
             can_eval_joint = False
         else:
             sp_em, sp_prec, sp_recall = update_sp(
@@ -141,10 +142,12 @@ def eval(prediction_file, gold_file):
             metrics["joint_recall"] += joint_recall
 
     n = len(gold)
-    for k in metrics:
-        metrics[k] /= n
-
-    print(metrics)
+    if n > 0:
+        for k in metrics:
+            metrics[k] /= n
+        print(metrics)
+    else:
+        print(metrics)
 
 
 if __name__ == "__main__":
