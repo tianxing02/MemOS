@@ -799,7 +799,6 @@ class MOSCore:
                             "session_id": target_session_id,
                             "chat_history": chat_history.chat_history,
                         },
-                        moscube=moscube,
                         search_filter=search_filter,
                     )
                     search_time_end = time.time()
