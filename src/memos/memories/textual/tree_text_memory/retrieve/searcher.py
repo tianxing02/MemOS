@@ -1,17 +1,24 @@
 import traceback
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 from memos.context.context import ContextThreadPoolExecutor
 from memos.embedders.factory import OllamaEmbedder
 from memos.graph_dbs.factory import Neo4jGraphDB
 from memos.llms.factory import AzureLLM, OllamaLLM, OpenAILLM
 from memos.log import get_logger
-from memos.memories.textual.item import SearchedTreeNodeTextualMemoryMetadata, TextualMemoryItem
+from memos.memories.textual.item import (
+    SearchedTreeNodeTextualMemoryMetadata,
+    TextualMemoryItem,
+    TreeNodeTextualMemoryMetadata,
+)
 from memos.memories.textual.tree_text_memory.retrieve.bm25_util import EnhancedBM25
 from memos.memories.textual.tree_text_memory.retrieve.retrieve_utils import (
     detect_lang,
     parse_json_result,
 )
 from memos.reranker.base import BaseReranker
+from memos.reranker.strategies.dialogue_common import extract_texts_and_sp_from_sources
 from memos.templates.mem_search_prompts import (
     COT_PROMPT,
     COT_PROMPT_ZH,
@@ -303,6 +310,19 @@ class Searcher:
         logger.info(f"[SEARCH] Total raw results: {len(results)}")
         return results
 
+    def _process_result(self, result):
+        sources = result.metadata.sources or []
+        texts, _ = extract_texts_and_sp_from_sources(sources)
+        memory_text = "\n".join([s for s in texts if isinstance(s, str) and s.strip()])
+        embedding = self.embedder.embed([memory_text])[0]
+        return TextualMemoryItem(
+            memory=memory_text,
+            metadata=TreeNodeTextualMemoryMetadata(
+                embedding=embedding,
+                sources=result.metadata.sources,
+            ),
+        )
+
     # --- Path A
     @timed
     def _retrieve_from_working_memory(
@@ -330,10 +350,16 @@ class Searcher:
             id_filter=id_filter,
             use_fast_graph=self.use_fast_graph,
         )
+        all_items = list(items)
+        with ThreadPoolExecutor(max_workers=16) as executor:
+            futures = [executor.submit(self._process_result, item) for item in items]
+            for f in as_completed(futures):
+                all_items.append(f.result())
+
         return self.reranker.rerank(
             query=query,
             query_embedding=query_embedding[0],
-            graph_results=items,
+            graph_results=all_items,
             top_k=top_k,
             parsed_goal=parsed_goal,
             search_filter=search_filter,
@@ -403,10 +429,16 @@ class Searcher:
             for task in tasks:
                 results.extend(task.result())
 
+        all_results = list(results)
+        with ThreadPoolExecutor(max_workers=16) as executor:
+            futures = [executor.submit(self._process_result, r) for r in results]
+            for f in as_completed(futures):
+                all_results.append(f.result())
+
         return self.reranker.rerank(
             query=query,
             query_embedding=query_embedding[0],
-            graph_results=results,
+            graph_results=all_results,
             top_k=top_k,
             parsed_goal=parsed_goal,
             search_filter=search_filter,
