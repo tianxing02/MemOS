@@ -1457,7 +1457,6 @@ class MOSProduct(MOSCore):
                 memories = data.model_dump()
                 memories["ref_id"] = f"[{memories['id'].split('-')[0]}]"
                 memories["metadata"]["embedding"] = []
-                memories["metadata"]["sources"] = []
                 memories["metadata"]["ref_id"] = f"[{memories['id'].split('-')[0]}]"
                 memories["metadata"]["id"] = memories["id"]
                 memories["metadata"]["memory"] = memories["memory"]
@@ -1474,7 +1473,6 @@ class MOSProduct(MOSCore):
                 memories = data.model_dump()
                 memories["ref_id"] = f"[{memories['id'].split('-')[0]}]"
                 memories["metadata"]["embedding"] = []
-                memories["metadata"]["sources"] = []
                 memories["metadata"]["ref_id"] = f"[{memories['id'].split('-')[0]}]"
                 memories["metadata"]["id"] = memories["id"]
                 memories["metadata"]["memory"] = memories["memory"]

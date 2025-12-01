@@ -6,7 +6,6 @@ import time
 import traceback
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
 
 from datasets import load_dataset
 from dotenv import load_dotenv
@@ -15,8 +14,11 @@ from tqdm import tqdm
 
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from utils.client import MemosApiClient
 from utils.prompts import LME_ANSWER_PROMPT, MEMOS_CONTEXT_TEMPLATE
+
+from memos.reranker.strategies.dialogue_common import extract_texts_and_sp_from_sources
 
 
 load_dotenv()
@@ -62,8 +64,7 @@ def add_context_memories(user_id: str, ctx: dict | list | None):
                 print("线程执行失败:", e)
 
 
-def memos_search(user_id: str, query: str, top_k: int = 30) -> tuple[str, float]:
-    start_time = datetime.now()
+def memos_search(user_id: str, query: str, top_k: int = 30):
     results = None
     for attempt in range(max_retries):
         try:
@@ -74,14 +75,34 @@ def memos_search(user_id: str, query: str, top_k: int = 30) -> tuple[str, float]
                 time.sleep(2**attempt)
             else:
                 raise e
-    print("Search memories:", len(results["text_mem"][0]["memories"]))
-    context = (
-        "\n".join([i["memory"] for i in results["text_mem"][0]["memories"]])
-        + f"\n{results.get('pref_string', '')}"
-    )
+    memories = results["text_mem"][0]["memories"]
+    print("Search memories:", len(memories))
+
+    # Build readable context
+    for memory in memories[:3]:
+        print("memory content:", memory["memory"])
+
+    context = "\n".join([i["memory"] for i in memories]) + f"\n{results.get('pref_string', '')}"
     context = MEMOS_CONTEXT_TEMPLATE.format(user_id=user_id, memories=context)
-    elapsed = (datetime.now() - start_time).total_seconds() * 1000
-    return context, elapsed
+
+    # Extract supporting facts (sp) from raw sources
+    sp_list: list[list[str | int]] = []
+    for m in memories:
+        sources = (m.get("metadata", {}) or {}).get("sources") or []
+        texts, sps = extract_texts_and_sp_from_sources(sources)
+        for t, s in sps:
+            sp_list.append([t, s])
+
+    # De-duplicate while preserving order
+    seen = set()
+    dedup_sp = []
+    for t, s in sp_list:
+        key = (t, s)
+        if key not in seen:
+            seen.add(key)
+            dedup_sp.append([t, s])
+
+    return context, dedup_sp
 
 
 def lme_response(context: str, question: str, question_date: str | None = None) -> str:
@@ -149,39 +170,23 @@ def build_and_ask(item):
     add_context_memories(qid, ctx)
 
     try:
-        context, _ = memos_search(qid, question, top_k=30)
+        context, sp_list = memos_search(qid, question, top_k=30)
         raw_answer = lme_response(context=context, question=question, question_date="")
         answer = extract_answer(question, raw_answer)
         print("Question:", question)
         print("Answer (raw):", raw_answer)
         print("Answer (final):", answer)
+        # Persist sp for this qid
+        pred_sp[qid] = sp_list
         return qid, answer
     except Exception as e:
         print(f"[Question {qid}] Error:", e)
         traceback.print_exc()
-        try:
-            if isinstance(ctx, dict):
-                titles = ctx.get("title") or []
-                sentences = ctx.get("sentences") or []
-                ctx_list = [[t, s] for t, s in zip(titles, sentences, strict=False)]
-            else:
-                ctx_list = ctx or []
-            fallback_context = MEMOS_CONTEXT_TEMPLATE.format(
-                user_id=qid, memories=build_context_text(ctx_list)
-            )
-            raw_answer = lme_response(context=fallback_context, question=question, question_date="")
-            answer = extract_answer(question, raw_answer)
-            print("Question:", question)
-            print("Fallback Answer (raw):", raw_answer)
-            print("Fallback Answer (final):", answer)
-            return qid, answer
-        except Exception as e2:
-            print(f"[Question {qid}] Fallback failed:", e2)
-            traceback.print_exc()
-            return qid, None
+        return qid, None
 
 
 pred_answers = {}
+pred_sp = {}
 output_dir = "evaluation/data/hotpot/output"
 os.makedirs(output_dir, exist_ok=True)
 pred_path = os.path.join(output_dir, "dev_distractor_pred.json")
@@ -242,7 +247,7 @@ def save_pred():
     tmp_path = pred_path + ".tmp"
     try:
         with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump({"answer": pred_answers, "sp": {}}, f, ensure_ascii=False, indent=2)
+            json.dump({"answer": pred_answers, "sp": pred_sp}, f, ensure_ascii=False, indent=2)
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp_path, pred_path)
@@ -251,9 +256,9 @@ def save_pred():
 
 
 def main():
-    interval = 20
+    interval = 10
     split = data.get("validation")
-    items_list = [split[i] for i in range(10)]
+    items_list = [split[i] for i in range(1000)]
     write_gold(data)
 
     if os.path.exists(pred_path):
@@ -262,6 +267,8 @@ def main():
                 prev = json.load(f)
             if isinstance(prev, dict) and isinstance(prev.get("answer"), dict):
                 pred_answers.update(prev["answer"])
+            if isinstance(prev, dict) and isinstance(prev.get("sp"), dict):
+                pred_sp.update(prev["sp"])
         except Exception as e:
             print("读取历史预测失败:", e)
 

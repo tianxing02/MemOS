@@ -105,7 +105,7 @@ class MemoryManager:
             for mem_type in ["WorkingMemory", "LongTermMemory", "UserMemory"]:
                 try:
                     self.graph_store.remove_oldest_memory(
-                        memory_type="WorkingMemory",
+                        memory_type=mem_type,
                         keep_latest=self.memory_size[mem_type],
                         user_name=user_name,
                     )
