@@ -38,7 +38,6 @@ def extract_texts_and_sp_from_sources(
     for src in sources or []:
         raw = extract_content(src)
         content = raw
-        idx = 0
         try:
             import json as _json
 
@@ -51,9 +50,19 @@ def extract_texts_and_sp_from_sources(
                     pass
             if isinstance(obj, dict):
                 content = obj.get("content", raw)
-                idx = int(obj.get("index", 0)) if isinstance(obj.get("index", 0), int) else 0
         except Exception:
             pass
+
+        idx = 0
+        if isinstance(content, str):
+            m = re.search(r"\s\[#(\d+)\]\s*$", content)
+            if m:
+                try:
+                    idx = int(m.group(1))
+                except Exception:
+                    idx = 0
+                content = re.sub(r"\s\[#(\d+)\]\s*$", "", content).rstrip()
+
         texts.append(content)
         if isinstance(content, str) and ":" in content:
             title = content.split(":", 1)[0].strip()
