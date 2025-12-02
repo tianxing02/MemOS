@@ -141,6 +141,7 @@ def eval(prediction_file, gold_file):
             metrics["joint_prec"] += joint_prec
             metrics["joint_recall"] += joint_recall
 
+    print("=========Eval Results===========")
     n = len(gold)
     if n > 0:
         for k in metrics:

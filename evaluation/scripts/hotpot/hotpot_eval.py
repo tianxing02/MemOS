@@ -39,8 +39,8 @@ def add_context_memories(user_id: str, ctx: dict | list | None):
 
     tasks = []
     for title, sentences in zip(titles, sentences_list, strict=False):
-        for sentence in sentences:
-            memory_content = f"{title}: {sentence}"
+        for idx, sentence in enumerate(sentences):
+            memory_content = f"{title}: {sentence} [#{idx}]"
             tasks.append(memory_content)
 
     def _add_one_memory(content: str):
@@ -64,7 +64,7 @@ def add_context_memories(user_id: str, ctx: dict | list | None):
                 print("线程执行失败:", e)
 
 
-def memos_search(user_id: str, query: str, top_k: int = 30):
+def memos_search(user_id: str, query: str, top_k):
     results = None
     for attempt in range(max_retries):
         try:
@@ -170,9 +170,9 @@ def build_and_ask(item):
     add_context_memories(qid, ctx)
 
     try:
-        context, sp_list = memos_search(qid, question, top_k=30)
+        context, sp_list = memos_search(qid, question, top_k=7)
         raw_answer = lme_response(context=context, question=question, question_date="")
-        answer = extract_answer(question, raw_answer)
+        answer = extract_answer(question, raw_answer) or ""
         print("Question:", question)
         print("Answer (raw):", raw_answer)
         print("Answer (final):", answer)
@@ -182,7 +182,7 @@ def build_and_ask(item):
     except Exception as e:
         print(f"[Question {qid}] Error:", e)
         traceback.print_exc()
-        return qid, None
+        return qid, ""
 
 
 pred_answers = {}
@@ -246,8 +246,12 @@ def run_eval(pred_file: str | None = None, gold_file: str | None = None):
 def save_pred():
     tmp_path = pred_path + ".tmp"
     try:
+        safe_pred_answers = {
+            k: (v if isinstance(v, str) else ("" if v is None else str(v)))
+            for k, v in pred_answers.items()
+        }
         with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump({"answer": pred_answers, "sp": pred_sp}, f, ensure_ascii=False, indent=2)
+            json.dump({"answer": safe_pred_answers, "sp": pred_sp}, f, ensure_ascii=False, indent=2)
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp_path, pred_path)
@@ -258,7 +262,7 @@ def save_pred():
 def main():
     interval = 10
     split = data.get("validation")
-    items_list = [split[i] for i in range(1000)]
+    items_list = [split[i] for i in range(len(split))]
     write_gold(data)
 
     if os.path.exists(pred_path):
@@ -266,7 +270,11 @@ def main():
             with open(pred_path, encoding="utf-8") as f:
                 prev = json.load(f)
             if isinstance(prev, dict) and isinstance(prev.get("answer"), dict):
-                pred_answers.update(prev["answer"])
+                prev_ans = {
+                    k: (v if isinstance(v, str) else ("" if v is None else str(v)))
+                    for k, v in prev["answer"].items()
+                }
+                pred_answers.update(prev_ans)
             if isinstance(prev, dict) and isinstance(prev.get("sp"), dict):
                 pred_sp.update(prev["sp"])
         except Exception as e:
