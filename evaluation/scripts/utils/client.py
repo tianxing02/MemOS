@@ -140,23 +140,28 @@ class MemosApiClient:
         self.memos_url = os.getenv("MEMOS_URL")
         self.headers = {"Content-Type": "application/json", "Authorization": os.getenv("MEMOS_KEY")}
 
-    def add(self, memory_content, user_id, conv_id):
+    def add(self, messages, user_id, conv_id, batch_size: int = 9999):
         """
         messages = [{"role": "assistant", "content": data, "chat_time": date_str}]
         """
         url = f"{self.memos_url}/product/add"
         added_memories = []
-        payload = json.dumps(
-            {
-                "memory_content": memory_content,
-                "user_id": user_id,
-                "mem_cube_id": user_id,
-                "conversation_id": conv_id,
-            }
-        )
-
-        response = requests.request("POST", url, data=payload, headers=self.headers)
-        assert response.status_code == 200, response.text
+        for i in range(0, len(messages), batch_size):
+            batch_messages = messages[i : i + batch_size]
+            payload = json.dumps(
+                {
+                    "messages": batch_messages,
+                    "user_id": user_id,
+                    "mem_cube_id": user_id,
+                    "conversation_id": conv_id,
+                }
+            )
+            response = requests.request("POST", url, data=payload, headers=self.headers)
+            assert response.status_code == 200, response.text
+            assert json.loads(response.text)["message"] == "Memory added successfully", (
+                response.text
+            )
+            added_memories += json.loads(response.text)["data"]
         return added_memories
 
     def search(self, query, user_id, top_k):
