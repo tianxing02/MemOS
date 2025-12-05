@@ -207,11 +207,6 @@ def get_default_cube_config(
                 },
                 "embedder": embedder_config,
                 "reorganize": kwargs.get("enable_reorganize", False),
-                "mode": kwargs.get("memory_mode", "sync"),
-                "memory_size": kwargs.get(
-                    "memory_size",
-                    {"WorkingMemory": 50, "LongTermMemory": 1500, "UserMemory": 480},
-                ),
             },
         }
 
