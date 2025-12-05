@@ -4,7 +4,6 @@ import sys
 import time
 
 from collections.abc import Iterator
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
@@ -96,31 +95,15 @@ def add_context(client, user_id: str, md_path: Path, lib) -> None:
     paragraphs = [p for p in chunker.split_text(text) if p.strip()]
     print(f"[Ingest] doc_id={user_id} paragraphs={len(paragraphs)} path={md_path}")
 
-    def _add_one(content: str) -> None:
-        for attempt in range(max_retries):
-            try:
-                client.add(memory_content=content, user_id=user_id, conv_id=user_id)
-                return
-            except Exception:
-                if attempt < max_retries - 1:
-                    time.sleep(2**attempt)
-                else:
-                    raise
-
     if lib == "memos":
-        with ThreadPoolExecutor(max_workers=8) as executor:
-            futures = {executor.submit(_add_one, p): i for i, p in enumerate(paragraphs)}
-            success_count = 0
-            failure_count = 0
-            for f in as_completed(futures):
-                try:
-                    f.result()
-                    success_count += 1
-                except Exception:
-                    failure_count += 1
-        print(
-            f"[Add] user={user_id} success={success_count} fail={failure_count} total={len(paragraphs)}"
-        )
+        messages = [{"role": "user", "content": p} for p in paragraphs]
+        ts = int(time.time())
+        try:
+            client.add(messages=messages, user_id=user_id, conv_id=user_id)
+            print(f"[Add-memos] user={user_id} total={len(messages)}")
+        except Exception as e:
+            print(f"[Add-memos] failed: {e}")
+
     elif lib == "mem0":
         messages = [{"role": "user", "content": p} for p in paragraphs]
         ts = int(time.time())
