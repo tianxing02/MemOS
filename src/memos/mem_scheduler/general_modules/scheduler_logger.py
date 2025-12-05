@@ -7,18 +7,20 @@ from memos.mem_cube.general import GeneralMemCube
 from memos.mem_scheduler.general_modules.base import BaseSchedulerModule
 from memos.mem_scheduler.schemas.general_schemas import (
     ACTIVATION_MEMORY_TYPE,
-    ADD_LABEL,
-    MEM_ARCHIVE_LABEL,
-    MEM_UPDATE_LABEL,
     NOT_INITIALIZED,
     PARAMETER_MEMORY_TYPE,
     TEXT_MEMORY_TYPE,
-    USER_INPUT_TYPE,
     WORKING_MEMORY_TYPE,
 )
 from memos.mem_scheduler.schemas.message_schemas import (
     ScheduleLogForWebItem,
     ScheduleMessageItem,
+)
+from memos.mem_scheduler.schemas.task_schemas import (
+    ADD_TASK_LABEL,
+    MEM_ARCHIVE_TASK_LABEL,
+    MEM_UPDATE_TASK_LABEL,
+    USER_INPUT_TYPE,
 )
 from memos.mem_scheduler.utils.filter_utils import (
     transform_name_to_key,
@@ -48,8 +50,12 @@ class SchedulerLoggerModule(BaseSchedulerModule):
         mem_cube_id: str,
         mem_cube: GeneralMemCube,
     ) -> ScheduleLogForWebItem:
+        if mem_cube is None:
+            logger.error(
+                "mem_cube is None — this should not happen in production!", stack_info=True
+            )
         text_mem_base: TreeTextMemory = mem_cube.text_mem
-        current_memory_sizes = text_mem_base.get_current_memory_size()
+        current_memory_sizes = text_mem_base.get_current_memory_size(user_name=mem_cube_id)
         current_memory_sizes = {
             "long_term_memory_size": current_memory_sizes.get("LongTermMemory", 0),
             "user_memory_size": current_memory_sizes.get("UserMemory", 0),
@@ -113,9 +119,10 @@ class SchedulerLoggerModule(BaseSchedulerModule):
         metadata: list[dict],
         memory_len: int,
         memcube_name: str | None = None,
+        log_content: str | None = None,
     ) -> ScheduleLogForWebItem:
         item = self.create_autofilled_log_item(
-            log_content="",
+            log_content=log_content or "",
             label=label,
             from_memory_type=from_memory_type,
             to_memory_type=to_memory_type,
@@ -266,7 +273,7 @@ class SchedulerLoggerModule(BaseSchedulerModule):
         """Deprecated: legacy text log. Use create_event_log with structured fields instead."""
         log_message = self.create_autofilled_log_item(
             log_content=memory,
-            label=ADD_LABEL,
+            label=ADD_TASK_LABEL,
             from_memory_type=USER_INPUT_TYPE,
             to_memory_type=memory_type,
             user_id=user_id,
@@ -292,7 +299,7 @@ class SchedulerLoggerModule(BaseSchedulerModule):
         """Deprecated: legacy text log. Use create_event_log with structured fields instead."""
         log_message = self.create_autofilled_log_item(
             log_content=memory,
-            label=MEM_UPDATE_LABEL,
+            label=MEM_UPDATE_TASK_LABEL,
             from_memory_type=memory_type,
             to_memory_type=memory_type,
             user_id=user_id,
@@ -314,7 +321,7 @@ class SchedulerLoggerModule(BaseSchedulerModule):
         """Deprecated: legacy text log. Use create_event_log with structured fields instead."""
         log_message = self.create_autofilled_log_item(
             log_content=memory,
-            label=MEM_ARCHIVE_LABEL,
+            label=MEM_ARCHIVE_TASK_LABEL,
             from_memory_type=memory_type,
             to_memory_type=memory_type,
             user_id=user_id,

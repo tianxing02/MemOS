@@ -426,7 +426,7 @@ class APIConfig:
     def get_reader_config() -> dict[str, Any]:
         """Get reader configuration."""
         return {
-            "backend": os.getenv("MEM_READER_BACKEND", "simple_struct"),
+            "backend": os.getenv("MEM_READER_BACKEND", "multimodal_struct"),
             "config": {
                 "chunk_type": os.getenv("MEM_READER_CHAT_CHUNK_TYPE", "default"),
                 "chunk_length": int(os.getenv("MEM_READER_CHAT_CHUNK_TOKEN_SIZE", 1600)),
@@ -500,6 +500,9 @@ class APIConfig:
                     "distance_metric": "cosine",
                     "host": os.getenv("QDRANT_HOST", "localhost"),
                     "port": int(os.getenv("QDRANT_PORT", "6333")),
+                    "path": os.getenv("QDRANT_PATH"),
+                    "url": os.getenv("QDRANT_URL"),
+                    "api_key": os.getenv("QDRANT_API_KEY"),
                 },
             },
         }
@@ -704,6 +707,13 @@ class APIConfig:
                         },
                     },
                     "chat_chunker": reader_config,
+                    "direct_markdown_hostnames": [
+                        h.strip()
+                        for h in os.getenv(
+                            "FILE_PARSER_DIRECT_MARKDOWN_HOSTNAMES", "139.196.232.20"
+                        ).split(",")
+                        if h.strip()
+                    ],
                 },
             },
             "enable_textual_memory": True,
