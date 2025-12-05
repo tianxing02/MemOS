@@ -29,6 +29,7 @@ from memos.graph_dbs.factory import GraphStoreFactory
 from memos.llms.factory import LLMFactory
 from memos.log import get_logger
 from memos.mem_cube.navie import NaiveMemCube
+from memos.mem_feedback.simple_feedback import SimpleMemFeedback
 from memos.mem_os.product_server import MOSServer
 from memos.mem_reader.factory import MemReaderFactory
 from memos.mem_scheduler.orm_modules.base_model import BaseDBManager
@@ -41,6 +42,7 @@ from memos.memories.textual.prefer_text_memory.factory import (
 from memos.memories.textual.simple_preference import SimplePreferenceTextMemory
 from memos.memories.textual.simple_tree import SimpleTreeTextMemory
 from memos.memories.textual.tree_text_memory.organize.manager import MemoryManager
+from memos.memories.textual.tree_text_memory.retrieve.retrieve_utils import FastTokenizer
 
 
 if TYPE_CHECKING:
@@ -129,6 +131,21 @@ def init_server() -> dict[str, Any]:
     """
     logger.info("Initializing MemOS server components...")
 
+    # Initialize Redis client first as it is a core dependency for features like scheduler status tracking
+    try:
+        from memos.mem_scheduler.orm_modules.api_redis_model import APIRedisDBManager
+
+        redis_client = APIRedisDBManager.load_redis_engine_from_env()
+        if redis_client:
+            logger.info("Redis client initialized successfully.")
+        else:
+            logger.error(
+                "Failed to initialize Redis client. Check REDIS_HOST etc. in environment variables."
+            )
+    except Exception as e:
+        logger.error(f"Failed to initialize Redis client: {e}", exc_info=True)
+        redis_client = None  # Ensure redis_client exists even on failure
+
     # Get default cube configuration
     default_cube_config = APIConfig.get_default_cube_config()
 
@@ -181,6 +198,7 @@ def init_server() -> dict[str, Any]:
 
     logger.debug("Memory manager initialized")
 
+    tokenizer = FastTokenizer()
     # Initialize text memory
     text_mem = SimpleTreeTextMemory(
         llm=llm,
@@ -191,6 +209,7 @@ def init_server() -> dict[str, Any]:
         memory_manager=memory_manager,
         config=default_cube_config.text_mem.config,
         internet_retriever=internet_retriever,
+        tokenizer=tokenizer,
     )
 
     logger.debug("Text memory initialized")
@@ -272,8 +291,20 @@ def init_server() -> dict[str, Any]:
     tree_mem: TreeTextMemory = naive_mem_cube.text_mem
     searcher: Searcher = tree_mem.get_searcher(
         manual_close_internet=os.getenv("ENABLE_INTERNET", "true").lower() == "false",
+        moscube=False,
+        process_llm=mem_reader.llm,
     )
     logger.debug("Searcher created")
+
+    # Initialize feedback server
+    feedback_server = SimpleMemFeedback(
+        llm=llm,
+        embedder=embedder,
+        graph_store=graph_db,
+        memory_manager=memory_manager,
+        mem_reader=mem_reader,
+        searcher=searcher,
+    )
 
     # Initialize Scheduler
     scheduler_config_dict = APIConfig.get_scheduler_config()
@@ -286,8 +317,11 @@ def init_server() -> dict[str, Any]:
         process_llm=mem_reader.llm,
         db_engine=BaseDBManager.create_default_sqlite_engine(),
         mem_reader=mem_reader,
+        redis_client=redis_client,
     )
-    mem_scheduler.init_mem_cube(mem_cube=naive_mem_cube, searcher=searcher)
+    mem_scheduler.init_mem_cube(
+        mem_cube=naive_mem_cube, searcher=searcher, feedback_server=feedback_server
+    )
     logger.debug("Scheduler initialized")
 
     # Initialize SchedulerAPIModule
@@ -335,5 +369,7 @@ def init_server() -> dict[str, Any]:
         "text_mem": text_mem,
         "pref_mem": pref_mem,
         "online_bot": online_bot,
+        "feedback_server": feedback_server,
+        "redis_client": redis_client,
         "deepsearch_agent": deepsearch_agent,
     }

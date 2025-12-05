@@ -11,8 +11,6 @@ from memos.mem_scheduler.general_modules.base import BaseSchedulerModule
 from memos.mem_scheduler.schemas.general_schemas import (
     DEFAULT_SCHEDULER_RETRIEVER_BATCH_SIZE,
     DEFAULT_SCHEDULER_RETRIEVER_RETRIES,
-    FINE_STRATEGY,
-    FineStrategy,
     TreeTextMemory_FINE_SEARCH_METHOD,
     TreeTextMemory_SEARCH_METHOD,
 )
@@ -24,6 +22,7 @@ from memos.mem_scheduler.utils.filter_utils import (
 from memos.mem_scheduler.utils.misc_utils import extract_json_obj, extract_list_items_in_answer
 from memos.memories.textual.item import TextualMemoryMetadata
 from memos.memories.textual.tree import TextualMemoryItem, TreeTextMemory
+from memos.types.general_types import FINE_STRATEGY, FineStrategy
 
 # Extract JSON response
 from .memory_filter import MemoryFilter
@@ -210,10 +209,9 @@ class SchedulerRetriever(BaseSchedulerModule):
     def recall_for_missing_memories(
         self,
         query: str,
-        memories: list[TextualMemoryItem],
+        memories: list[str],
     ) -> tuple[str, bool]:
-        text_memories = [one.memory for one in memories] if memories else []
-        text_memories = "\n".join([f"- {mem}" for i, mem in enumerate(text_memories)])
+        text_memories = "\n".join([f"- {mem}" for i, mem in enumerate(memories)])
 
         prompt = self.build_prompt(
             template_name="enlarge_recall",

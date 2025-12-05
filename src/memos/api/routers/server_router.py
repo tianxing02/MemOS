@@ -15,18 +15,18 @@ import os
 import random as _random
 import socket
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Query
 
 from memos.api import handlers
 from memos.api.handlers.add_handler import AddHandler
 from memos.api.handlers.base_handler import HandlerDependencies
 from memos.api.handlers.chat_handler import ChatHandler
+from memos.api.handlers.feedback_handler import FeedbackHandler
 from memos.api.handlers.search_handler import SearchHandler
 from memos.api.product_models import (
-    AddStatusRequest,
-    AddStatusResponse,
     APIADDRequest,
     APIChatCompleteRequest,
+    APIFeedbackRequest,
     APISearchRequest,
     ChatRequest,
     DeleteMemoryRequest,
@@ -36,11 +36,13 @@ from memos.api.product_models import (
     GetMemoryResponse,
     MemoryResponse,
     SearchResponse,
+    StatusResponse,
     SuggestionRequest,
     SuggestionResponse,
 )
 from memos.log import get_logger
 from memos.mem_scheduler.base_scheduler import BaseScheduler
+from memos.mem_scheduler.utils.status_tracker import TaskStatusTracker
 
 
 logger = get_logger(__name__)
@@ -66,12 +68,14 @@ chat_handler = ChatHandler(
     add_handler,
     online_bot=components.get("online_bot"),
 )
-
+feedback_handler = FeedbackHandler(dependencies)
 # Extract commonly used components for function-based handlers
 # (These can be accessed from the components dict without unpacking all of them)
 mem_scheduler: BaseScheduler = components["mem_scheduler"]
 llm = components["llm"]
 naive_mem_cube = components["naive_mem_cube"]
+redis_client = components["redis_client"]
+status_tracker = TaskStatusTracker(redis_client=redis_client)
 
 
 # =============================================================================
@@ -86,7 +90,8 @@ def search_memories(search_req: APISearchRequest):
 
     This endpoint uses the class-based SearchHandler for better code organization.
     """
-    return search_handler.handle_search_memories(search_req)
+    search_results = search_handler.handle_search_memories(search_req)
+    return search_results
 
 
 # =============================================================================
@@ -109,17 +114,18 @@ def add_memories(add_req: APIADDRequest):
 # =============================================================================
 
 
-@router.get(
-    "/scheduler/status", summary="Get scheduler running status", response_model=AddStatusResponse
+@router.get(  # Changed from post to get
+    "/scheduler/status", summary="Get scheduler running status", response_model=StatusResponse
 )
-def scheduler_status(add_status_req: AddStatusRequest):
+def scheduler_status(
+    user_id: str = Query(..., description="User ID"),
+    task_id: str | None = Query(None, description="Optional Task ID to query a specific task"),
+):
     """Get scheduler running status."""
     return handlers.scheduler_handler.handle_scheduler_status(
-        mem_cube_id=add_status_req.mem_cube_id,
-        user_id=add_status_req.user_id,
-        session_id=add_status_req.session_id,
-        mem_scheduler=mem_scheduler,
-        instance_id=INSTANCE_ID,
+        user_id=user_id,
+        task_id=task_id,
+        status_tracker=status_tracker,
     )
 
 
@@ -127,14 +133,14 @@ def scheduler_status(add_status_req: AddStatusRequest):
 def scheduler_wait(
     user_name: str,
     timeout_seconds: float = 120.0,
-    poll_interval: float = 0.2,
+    poll_interval: float = 0.5,
 ):
     """Wait until scheduler is idle for a specific user."""
     return handlers.scheduler_handler.handle_scheduler_wait(
         user_name=user_name,
+        status_tracker=status_tracker,
         timeout_seconds=timeout_seconds,
         poll_interval=poll_interval,
-        mem_scheduler=mem_scheduler,
     )
 
 
@@ -142,14 +148,14 @@ def scheduler_wait(
 def scheduler_wait_stream(
     user_name: str,
     timeout_seconds: float = 120.0,
-    poll_interval: float = 0.2,
+    poll_interval: float = 0.5,
 ):
     """Stream scheduler progress via Server-Sent Events (SSE)."""
     return handlers.scheduler_handler.handle_scheduler_wait_stream(
         user_name=user_name,
+        status_tracker=status_tracker,
         timeout_seconds=timeout_seconds,
         poll_interval=poll_interval,
-        mem_scheduler=mem_scheduler,
         instance_id=INSTANCE_ID,
     )
 
@@ -261,3 +267,18 @@ def delete_memories(memory_req: DeleteMemoryRequest):
     return handlers.memory_handler.handle_delete_memories(
         delete_mem_req=memory_req, naive_mem_cube=naive_mem_cube
     )
+
+
+# =============================================================================
+# Feedback API Endpoints
+# =============================================================================
+
+
+@router.post("/feedback", summary="Feedback memories", response_model=MemoryResponse)
+def feedback_memories(feedback_req: APIFeedbackRequest):
+    """
+    Feedback memories for a specific user.
+
+    This endpoint uses the class-based FeedbackHandler for better code organization.
+    """
+    return feedback_handler.handle_feedback_memories(feedback_req)
