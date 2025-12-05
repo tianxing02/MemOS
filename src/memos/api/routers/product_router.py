@@ -1,20 +1,16 @@
 import json
-import logging
+import time
 import traceback
 
-from datetime import datetime
-from typing import Annotated
-
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 
 from memos.api.config import APIConfig
-from memos.api.context.dependencies import G, get_g_object
 from memos.api.product_models import (
     BaseResponse,
     ChatCompleteRequest,
     ChatRequest,
-    GetMemoryRequest,
+    GetMemoryPlaygroundRequest,
     MemoryCreateRequest,
     MemoryResponse,
     SearchRequest,
@@ -26,11 +22,12 @@ from memos.api.product_models import (
     UserRegisterResponse,
 )
 from memos.configs.mem_os import MOSConfig
+from memos.log import get_logger
 from memos.mem_os.product import MOSProduct
 from memos.memos_tools.notification_service import get_error_bot_function, get_online_bot_function
 
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 router = APIRouter(prefix="/product", tags=["Product API"])
 
@@ -79,24 +76,19 @@ def set_config(config):
 
 
 @router.post("/users/register", summary="Register a new user", response_model=UserRegisterResponse)
-def register_user(user_req: UserRegisterRequest, g: Annotated[G, Depends(get_g_object)]):
+def register_user(user_req: UserRegisterRequest):
     """Register a new user with configuration and default cube."""
     try:
-        # Set request-related information in g object
-        g.user_id = user_req.user_id
-        g.action = "user_register"
-        g.timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-        logger.info(f"Starting user registration for user_id: {user_req.user_id}")
-        logger.info(f"Request trace_id: {g.trace_id}")
-        logger.info(f"Request timestamp: {g.timestamp}")
-
         # Get configuration for the user
+        time_start_register = time.time()
         user_config, default_mem_cube = APIConfig.create_user_config(
             user_name=user_req.user_id, user_id=user_req.user_id
         )
         logger.info(f"user_config: {user_config.model_dump(mode='json')}")
         logger.info(f"default_mem_cube: {default_mem_cube.config.model_dump(mode='json')}")
+        logger.info(
+            f"time register api : create user config time user_id: {user_req.user_id} time is: {time.time() - time_start_register}"
+        )
         mos_product = get_mos_product_instance()
 
         # Register user with default config and mem cube
@@ -106,8 +98,11 @@ def register_user(user_req: UserRegisterRequest, g: Annotated[G, Depends(get_g_o
             interests=user_req.interests,
             config=user_config,
             default_mem_cube=default_mem_cube,
+            mem_cube_id=user_req.mem_cube_id,
         )
-
+        logger.info(
+            f"time register api : register time user_id: {user_req.user_id} time is: {time.time() - time_start_register}"
+        )
         if result["status"] == "success":
             return UserRegisterResponse(
                 message="User registered successfully",
@@ -164,7 +159,7 @@ def get_suggestion_queries_post(suggestion_req: SuggestionRequest):
 
 
 @router.post("/get_all", summary="Get all memories for user", response_model=MemoryResponse)
-def get_all_memories(memory_req: GetMemoryRequest):
+def get_all_memories(memory_req: GetMemoryPlaygroundRequest):
     """Get all memories for a specific user."""
     try:
         mos_product = get_mos_product_instance()
@@ -193,8 +188,44 @@ def get_all_memories(memory_req: GetMemoryRequest):
 @router.post("/add", summary="add a new memory", response_model=SimpleResponse)
 def create_memory(memory_req: MemoryCreateRequest):
     """Create a new memory for a specific user."""
+    logger.info("DIAGNOSTIC: /product/add endpoint called. This confirms the new code is deployed.")
+    # Initialize status_tracker outside try block to avoid NameError in except blocks
+    status_tracker = None
+
     try:
+        time_start_add = time.time()
         mos_product = get_mos_product_instance()
+
+        # Track task if task_id is provided
+        item_id: str | None = None
+        if (
+            memory_req.task_id
+            and hasattr(mos_product, "mem_scheduler")
+            and mos_product.mem_scheduler
+        ):
+            from uuid import uuid4
+
+            from memos.mem_scheduler.utils.status_tracker import TaskStatusTracker
+
+            item_id = str(uuid4())  # Generate a unique item_id for this submission
+
+            # Get Redis client from scheduler
+            if (
+                hasattr(mos_product.mem_scheduler, "redis_client")
+                and mos_product.mem_scheduler.redis_client
+            ):
+                status_tracker = TaskStatusTracker(mos_product.mem_scheduler.redis_client)
+                # Submit task with "product_add" type
+                status_tracker.task_submitted(
+                    task_id=item_id,  # Use generated item_id for internal tracking
+                    user_id=memory_req.user_id,
+                    task_type="product_add",
+                    mem_cube_id=memory_req.mem_cube_id or memory_req.user_id,
+                    business_task_id=memory_req.task_id,  # Use memory_req.task_id as business_task_id
+                )
+                status_tracker.task_started(item_id, memory_req.user_id)  # Use item_id here
+
+        # Execute the add operation
         mos_product.add(
             user_id=memory_req.user_id,
             memory_content=memory_req.memory_content,
@@ -203,12 +234,28 @@ def create_memory(memory_req: MemoryCreateRequest):
             mem_cube_id=memory_req.mem_cube_id,
             source=memory_req.source,
             user_profile=memory_req.user_profile,
+            session_id=memory_req.session_id,
+            task_id=memory_req.task_id,
+        )
+
+        # Mark task as completed
+        if status_tracker and item_id:
+            status_tracker.task_completed(item_id, memory_req.user_id)
+
+        logger.info(
+            f"time add api : add time user_id: {memory_req.user_id} time is: {time.time() - time_start_add}"
         )
         return SimpleResponse(message="Memory created successfully")
 
     except ValueError as err:
+        # Mark task as failed if tracking
+        if status_tracker and item_id:
+            status_tracker.task_failed(item_id, memory_req.user_id, str(err))
         raise HTTPException(status_code=404, detail=str(traceback.format_exc())) from err
     except Exception as err:
+        # Mark task as failed if tracking
+        if status_tracker and item_id:
+            status_tracker.task_failed(item_id, memory_req.user_id, str(err))
         logger.error(f"Failed to create memory: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=str(traceback.format_exc())) from err
 
@@ -217,12 +264,17 @@ def create_memory(memory_req: MemoryCreateRequest):
 def search_memories(search_req: SearchRequest):
     """Search memories for a specific user."""
     try:
+        time_start_search = time.time()
         mos_product = get_mos_product_instance()
         result = mos_product.search(
             query=search_req.query,
             user_id=search_req.user_id,
             install_cube_ids=[search_req.mem_cube_id] if search_req.mem_cube_id else None,
             top_k=search_req.top_k,
+            session_id=search_req.session_id,
+        )
+        logger.info(
+            f"time search api : add time user_id: {search_req.user_id} time is: {time.time() - time_start_search}"
         )
         return SearchResponse(message="Search completed successfully", data=result)
 
@@ -250,6 +302,7 @@ def chat(chat_req: ChatRequest):
                     history=chat_req.history,
                     internet_search=chat_req.internet_search,
                     moscube=chat_req.moscube,
+                    session_id=chat_req.session_id,
                 )
 
             except Exception as e:
@@ -284,18 +337,25 @@ def chat_complete(chat_req: ChatCompleteRequest):
         mos_product = get_mos_product_instance()
 
         # Collect all responses from the generator
-        content = mos_product.chat(
+        content, references = mos_product.chat(
             query=chat_req.query,
             user_id=chat_req.user_id,
             cube_id=chat_req.mem_cube_id,
             history=chat_req.history,
             internet_search=chat_req.internet_search,
             moscube=chat_req.moscube,
-            base_prompt=chat_req.base_prompt,
+            base_prompt=chat_req.base_prompt or chat_req.system_prompt,
+            # will deprecate base_prompt in the future
+            top_k=chat_req.top_k,
+            threshold=chat_req.threshold,
+            session_id=chat_req.session_id,
         )
 
         # Return the complete response
-        return {"message": "Chat completed successfully", "data": {"response": content}}
+        return {
+            "message": "Chat completed successfully",
+            "data": {"response": content, "references": references},
+        }
 
     except ValueError as err:
         raise HTTPException(status_code=404, detail=str(traceback.format_exc())) from err

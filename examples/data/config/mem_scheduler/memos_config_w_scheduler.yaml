@@ -1,6 +1,6 @@
 user_id: "root"
 chat_model:
-  backend: "huggingface"
+  backend: "huggingface_singleton"
   config:
     model_name_or_path: "Qwen/Qwen3-1.7B"
     temperature: 0.1
@@ -10,14 +10,16 @@ mem_reader:
   backend: "simple_struct"
   config:
     llm:
-      backend: "ollama"
+      backend: "openai"
       config:
-        model_name_or_path: "qwen3:0.6b"
-        remove_think_prefix: true
+        model_name_or_path: "gpt-4o-mini"
         temperature: 0.8
-        max_tokens: 1024
+        max_tokens: 4096
         top_p: 0.9
         top_k: 50
+        remove_think_prefix: true
+        api_key: "sk-xxxxxx"
+        api_base: "https://api.openai.com/v1"
     embedder:
       backend: "ollama"
       config:
@@ -36,7 +38,7 @@ mem_scheduler:
     act_mem_update_interval: 30
     context_window_size: 10
     thread_pool_max_workers: 10
-    consume_interval_seconds: 1
+    consume_interval_seconds: 0.01
     working_mem_monitor_capacity: 20
     activation_mem_monitor_capacity: 5
     enable_parallel_dispatch: true
