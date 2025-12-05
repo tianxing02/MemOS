@@ -39,6 +39,8 @@ Language rules:
 - The `key`, `value`, `tags`, `summary` fields must match the mostly used language of the input conversation.  **如果输入是中文，请输出中文**
 - Keep `memory_type` in English.
 
+${custom_tags_prompt}
+
 Example:
 Conversation:
 user: [June 26, 2025 at 3:00 PM]: Hi Jerry! Yesterday at 3 PM I had a meeting with my team about the new project.
@@ -88,27 +90,27 @@ ${conversation}
 
 Your Output:"""
 
-SIMPLE_STRUCT_MEM_READER_PROMPT_ZH = """您是记忆提取专家。  
+SIMPLE_STRUCT_MEM_READER_PROMPT_ZH = """您是记忆提取专家。
 您的任务是根据用户与助手之间的对话，从用户的角度提取记忆。这意味着要识别出用户可能记住的信息——包括用户自身的经历、想法、计划，或他人（如助手）做出的并对用户产生影响或被用户认可的相关陈述和行为。
 
-请执行以下操作：  
-1. 识别反映用户经历、信念、关切、决策、计划或反应的信息——包括用户认可或回应的来自助手的有意义信息。  
+请执行以下操作：
+1. 识别反映用户经历、信念、关切、决策、计划或反应的信息——包括用户认可或回应的来自助手的有意义信息。
 如果消息来自用户，请提取与用户相关的记忆；如果来自助手，则仅提取用户认可或回应的事实性记忆。
 
-2. 清晰解析所有时间、人物和事件的指代：  
-   - 如果可能，使用消息时间戳将相对时间表达（如“昨天”、“下周五”）转换为绝对日期。  
-   - 明确区分事件时间和消息时间。  
-   - 如果存在不确定性，需明确说明（例如，“约2025年6月”，“具体日期不详”）。  
-   - 若提及具体地点，请包含在内。  
-   - 将所有代词、别名和模糊指代解析为全名或明确身份。  
+2. 清晰解析所有时间、人物和事件的指代：
+   - 如果可能，使用消息时间戳将相对时间表达（如“昨天”、“下周五”）转换为绝对日期。
+   - 明确区分事件时间和消息时间。
+   - 如果存在不确定性，需明确说明（例如，“约2025年6月”，“具体日期不详”）。
+   - 若提及具体地点，请包含在内。
+   - 将所有代词、别名和模糊指代解析为全名或明确身份。
    - 如有同名人物，需加以区分。
 
-3. 始终以第三人称视角撰写，使用“用户”或提及的姓名来指代用户，而不是使用第一人称（“我”、“我们”、“我的”）。  
+3. 始终以第三人称视角撰写，使用“用户”或提及的姓名来指代用户，而不是使用第一人称（“我”、“我们”、“我的”）。
 例如，写“用户感到疲惫……”而不是“我感到疲惫……”。
 
-4. 不要遗漏用户可能记住的任何信息。  
-   - 包括所有关键经历、想法、情绪反应和计划——即使看似微小。  
-   - 优先考虑完整性和保真度，而非简洁性。  
+4. 不要遗漏用户可能记住的任何信息。
+   - 包括所有关键经历、想法、情绪反应和计划——即使看似微小。
+   - 优先考虑完整性和保真度，而非简洁性。
    - 不要泛化或跳过对用户具有个人意义的细节。
 
 5. 请避免在提取的记忆中包含违反国家法律法规或涉及政治敏感的信息。
@@ -128,19 +130,21 @@ SIMPLE_STRUCT_MEM_READER_PROMPT_ZH = """您是记忆提取专家。
   "summary": <从用户视角自然总结上述记忆的段落，120–200字，与输入语言一致>
 }
 
-语言规则：  
-- `key`、`value`、`tags`、`summary` 字段必须与输入对话的主要语言一致。**如果输入是中文，请输出中文**  
+语言规则：
+- `key`、`value`、`tags`、`summary` 字段必须与输入对话的主要语言一致。**如果输入是中文，请输出中文**
 - `memory_type` 保持英文。
 
-示例：  
-对话：  
-user: [2025年6月26日下午3:00]：嗨Jerry！昨天下午3点我和团队开了个会，讨论新项目。  
-assistant: 哦Tom！你觉得团队能在12月15日前完成吗？  
-user: [2025年6月26日下午3:00]：我有点担心。后端要到12月10日才能完成，所以测试时间会很紧。  
-assistant: [2025年6月26日下午3:00]：也许提议延期？  
+${custom_tags_prompt}
+
+示例：
+对话：
+user: [2025年6月26日下午3:00]：嗨Jerry！昨天下午3点我和团队开了个会，讨论新项目。
+assistant: 哦Tom！你觉得团队能在12月15日前完成吗？
+user: [2025年6月26日下午3:00]：我有点担心。后端要到12月10日才能完成，所以测试时间会很紧。
+assistant: [2025年6月26日下午3:00]：也许提议延期？
 user: [2025年6月26日下午4:21]：好主意。我明天上午9:30的会上提一下——也许把截止日期推迟到1月5日。
 
-输出：  
+输出：
 {
   "memory list": [
     {
@@ -159,7 +163,7 @@ user: [2025年6月26日下午4:21]：好主意。我明天上午9:30的会上提
   "summary": "Tom目前正专注于管理一个进度紧张的新项目。在2025年6月25日的团队会议后，他意识到原定2025年12月15日的截止日期可能无法实现，因为后端会延迟。由于担心测试时间不足，他接受了Jerry提出的延期建议。Tom计划在次日早上的会议上提出将截止日期推迟至2026年1月5日。他的行为反映出对时间线的担忧，以及积极、以团队为导向的问题解决方式。"
 }
 
-另一个中文示例（注意：当用户语言为中文时，您也需输出中文）：  
+另一个中文示例（注意：当用户语言为中文时，您也需输出中文）：
 {
   "memory list": [
     {
@@ -175,7 +179,7 @@ user: [2025年6月26日下午4:21]：好主意。我明天上午9:30的会上提
 
 请始终使用与对话相同的语言进行回复。
 
-对话：  
+对话：
 ${conversation}
 
 您的输出："""
@@ -212,28 +216,30 @@ Language rules:
 - The `key`, `value`, `tags`, `summary` fields must match the mostly used language of the input document summaries.  **如果输入是中文，请输出中文**
 - Keep `memory_type` in English.
 
+{custom_tags_prompt}
+
 Document chunk:
 {chunk_text}
 
 Your Output:"""
 
 
-SIMPLE_STRUCT_DOC_READER_PROMPT_ZH = """您是搜索与检索系统的文本分析专家。  
+SIMPLE_STRUCT_DOC_READER_PROMPT_ZH = """您是搜索与检索系统的文本分析专家。
 您的任务是处理文档片段，并生成一个结构化的 JSON 对象。
 
-请执行以下操作：  
-1. 识别反映文档中事实内容、见解、决策或含义的关键信息——包括任何显著的主题、结论或数据点，使读者无需阅读原文即可充分理解该片段的核心内容。  
-2. 清晰解析所有时间、人物、地点和事件的指代：  
-   - 如果上下文允许，将相对时间表达（如“去年”、“下一季度”）转换为绝对日期。  
-   - 明确区分事件时间和文档时间。  
-   - 如果存在不确定性，需明确说明（例如，“约2024年”，“具体日期不详”）。  
-   - 若提及具体地点，请包含在内。  
-   - 将所有代词、别名和模糊指代解析为全名或明确身份。  
-   - 如有同名实体，需加以区分。  
-3. 始终以第三人称视角撰写，清晰指代主题或内容，避免使用第一人称（“我”、“我们”、“我的”）。  
-4. 不要遗漏文档摘要中可能重要或值得记忆的任何信息。  
-   - 包括所有关键事实、见解、情感基调和计划——即使看似微小。  
-   - 优先考虑完整性和保真度，而非简洁性。  
+请执行以下操作：
+1. 识别反映文档中事实内容、见解、决策或含义的关键信息——包括任何显著的主题、结论或数据点，使读者无需阅读原文即可充分理解该片段的核心内容。
+2. 清晰解析所有时间、人物、地点和事件的指代：
+   - 如果上下文允许，将相对时间表达（如“去年”、“下一季度”）转换为绝对日期。
+   - 明确区分事件时间和文档时间。
+   - 如果存在不确定性，需明确说明（例如，“约2024年”，“具体日期不详”）。
+   - 若提及具体地点，请包含在内。
+   - 将所有代词、别名和模糊指代解析为全名或明确身份。
+   - 如有同名实体，需加以区分。
+3. 始终以第三人称视角撰写，清晰指代主题或内容，避免使用第一人称（“我”、“我们”、“我的”）。
+4. 不要遗漏文档摘要中可能重要或值得记忆的任何信息。
+   - 包括所有关键事实、见解、情感基调和计划——即使看似微小。
+   - 优先考虑完整性和保真度，而非简洁性。
    - 不要泛化或跳过可能具有上下文意义的细节。
 
 返回一个有效的 JSON 对象，结构如下：
@@ -246,11 +252,13 @@ SIMPLE_STRUCT_DOC_READER_PROMPT_ZH = """您是搜索与检索系统的文本分�
   "tags": <相关主题关键词列表（例如，["截止日期", "团队", "计划"]）>
 }
 
-语言规则：  
-- `key`、`value`、`tags` 字段必须与输入文档摘要的主要语言一致。**如果输入是中文，请输出中文**  
+语言规则：
+- `key`、`value`、`tags` 字段必须与输入文档摘要的主要语言一致。**如果输入是中文，请输出中文**
 - `memory_type` 保持英文。
 
-文档片段：  
+{custom_tags_prompt}
+
+文档片段：
 {chunk_text}
 
 您的输出："""
@@ -299,15 +307,15 @@ Another Example in Chinese (注意: 当user的语言为中文时，你就需要�
 
 """
 
-SIMPLE_STRUCT_MEM_READER_EXAMPLE_ZH = """示例：  
-对话：  
-user: [2025年6月26日下午3:00]：嗨Jerry！昨天下午3点我和团队开了个会，讨论新项目。  
-assistant: 哦Tom！你觉得团队能在12月15日前完成吗？  
-user: [2025年6月26日下午3:00]：我有点担心。后端要到12月10日才能完成，所以测试时间会很紧。  
-assistant: [2025年6月26日下午3:00]：也许提议延期？  
+SIMPLE_STRUCT_MEM_READER_EXAMPLE_ZH = """示例：
+对话：
+user: [2025年6月26日下午3:00]：嗨Jerry！昨天下午3点我和团队开了个会，讨论新项目。
+assistant: 哦Tom！你觉得团队能在12月15日前完成吗？
+user: [2025年6月26日下午3:00]：我有点担心。后端要到12月10日才能完成，所以测试时间会很紧。
+assistant: [2025年6月26日下午3:00]：也许提议延期？
 user: [2025年6月26日下午4:21]：好主意。我明天上午9:30的会上提一下——也许把截止日期推迟到1月5日。
 
-输出：  
+输出：
 {
   "memory list": [
     {
@@ -326,7 +334,7 @@ user: [2025年6月26日下午4:21]：好主意。我明天上午9:30的会上提
   "summary": "Tom目前正专注于管理一个进度紧张的新项目。在2025年6月25日的团队会议后，他意识到原定2025年12月15日的截止日期可能无法实现，因为后端会延迟。由于担心测试时间不足，他接受了Jerry提出的延期建议。Tom计划在次日早上的会议上提出将截止日期推迟至2026年1月5日。他的行为反映出对时间线的担忧，以及积极、以团队为导向的问题解决方式。"
 }
 
-另一个中文示例（注意：当用户语言为中文时，您也需输出中文）：  
+另一个中文示例（注意：当用户语言为中文时，您也需输出中文）：
 {
   "memory list": [
     {
@@ -341,3 +349,71 @@ user: [2025年6月26日下午4:21]：好主意。我明天上午9:30的会上提
 }
 
 """
+
+
+CUSTOM_TAGS_INSTRUCTION = """Output tags can refer to the following tags:
+{custom_tags}
+You can choose tags from the above list that are relevant to the memory. Additionally, you can freely add tags based on the content of the memory."""
+
+
+CUSTOM_TAGS_INSTRUCTION_ZH = """输出tags可以参考下列标签：
+{custom_tags}
+你可以选择与memory相关的在上述列表中可以加入tags，同时你可以根据memory的内容自由添加tags。"""
+
+
+IMAGE_ANALYSIS_PROMPT_EN = """You are an intelligent memory assistant. Analyze the provided image and extract meaningful information that should be remembered.
+
+Please extract:
+1. **Visual Content**: What objects, people, scenes, or text are visible in the image?
+2. **Context**: What is the context or situation depicted?
+3. **Key Information**: What important details, facts, or information can be extracted?
+4. **User Relevance**: What aspects of this image might be relevant to the user's memory?
+
+Return a valid JSON object with the following structure:
+{
+  "memory list": [
+    {
+      "key": <string, a unique and concise memory title>,
+      "memory_type": <string, "LongTermMemory" or "UserMemory">,
+      "value": <a detailed, self-contained description of what should be remembered from the image>,
+      "tags": <a list of relevant keywords (e.g., ["image", "visual", "scene", "object"])>
+    },
+    ...
+  ],
+  "summary": <a natural paragraph summarizing the image content, 120–200 words>
+}
+
+Language rules:
+- The `key`, `value`, `tags`, `summary` and `memory_type` fields should match the language of the user's context if available, otherwise use English.
+- Keep `memory_type` in English.
+
+Focus on extracting factual, observable information from the image. Avoid speculation unless clearly relevant to user memory."""
+
+
+IMAGE_ANALYSIS_PROMPT_ZH = """您是一个智能记忆助手。请分析提供的图像并提取应该被记住的有意义信息。
+
+请提取：
+1. **视觉内容**：图像中可见的物体、人物、场景或文字是什么？
+2. **上下文**：图像描绘了什么情境或情况？
+3. **关键信息**：可以提取哪些重要的细节、事实或信息？
+4. **用户相关性**：图像的哪些方面可能与用户的记忆相关？
+
+返回一个有效的 JSON 对象，格式如下：
+{
+  "memory list": [
+    {
+      "key": <字符串，一个唯一且简洁的记忆标题>,
+      "memory_type": <字符串，"LongTermMemory" 或 "UserMemory">,
+      "value": <一个详细、自包含的描述，说明应该从图像中记住什么>,
+      "tags": <相关关键词列表（例如：["图像", "视觉", "场景", "物体"]）>
+    },
+    ...
+  ],
+  "summary": <一个自然段落，总结图像内容，120-200字>
+}
+
+语言规则：
+- `key`、`value`、`tags`、`summary` 和 `memory_type` 字段应该与用户上下文的语言匹配（如果可用），否则使用中文。
+- `memory_type` 保持英文。
+
+专注于从图像中提取事实性、可观察的信息。除非与用户记忆明显相关，否则避免推测。"""

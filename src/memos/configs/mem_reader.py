@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any, ClassVar
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import ConfigDict, Field, field_validator, model_validator
 
 from memos.configs.base import BaseConfig
 from memos.configs.chunker import ChunkerConfigFactory
@@ -36,9 +36,31 @@ class BaseMemReaderConfig(BaseConfig):
         description="whether remove example in memory extraction prompt to save token",
     )
 
+    chat_chunker: dict[str, Any] = Field(
+        default=None, description="Configuration for the MemReader chat chunk strategy"
+    )
+
 
 class SimpleStructMemReaderConfig(BaseMemReaderConfig):
     """SimpleStruct MemReader configuration class."""
+
+    model_config = ConfigDict(extra="allow", strict=True)
+
+
+class MultiModalStructMemReaderConfig(BaseMemReaderConfig):
+    """MultiModalStruct MemReader configuration class."""
+
+    direct_markdown_hostnames: list[str] | None = Field(
+        default=None,
+        description="List of hostnames that should return markdown directly without parsing. "
+        "If None, reads from FILE_PARSER_DIRECT_MARKDOWN_HOSTNAMES environment variable.",
+    )
+
+
+class StrategyStructMemReaderConfig(BaseMemReaderConfig):
+    """StrategyStruct MemReader configuration class."""
+
+    model_config = ConfigDict(extra="allow", strict=True)
 
 
 class MemReaderConfigFactory(BaseConfig):
@@ -49,6 +71,8 @@ class MemReaderConfigFactory(BaseConfig):
 
     backend_to_class: ClassVar[dict[str, Any]] = {
         "simple_struct": SimpleStructMemReaderConfig,
+        "multimodal_struct": MultiModalStructMemReaderConfig,
+        "strategy_struct": StrategyStructMemReaderConfig,
     }
 
     @field_validator("backend")
