@@ -16,11 +16,13 @@ from memos.log import get_logger
 from memos.memories.textual.base import BaseTextMemory
 from memos.memories.textual.item import TextualMemoryItem, TreeNodeTextualMemoryMetadata
 from memos.memories.textual.tree_text_memory.organize.manager import MemoryManager
+from memos.memories.textual.tree_text_memory.retrieve.advanced_searcher import (
+    AdvancedSearcher as Searcher,
+)
 from memos.memories.textual.tree_text_memory.retrieve.bm25_util import EnhancedBM25
 from memos.memories.textual.tree_text_memory.retrieve.internet_retriever_factory import (
     InternetRetrieverFactory,
 )
-from memos.memories.textual.tree_text_memory.retrieve.searcher import Searcher
 from memos.reranker.factory import RerankerFactory
 from memos.types import MessageList
 
@@ -89,6 +91,7 @@ class TreeTextMemory(BaseTextMemory):
             )
         else:
             logger.info("No internet retriever configured")
+        self.tokenizer = None
 
     def add(
         self,
@@ -127,28 +130,17 @@ class TreeTextMemory(BaseTextMemory):
         return self.memory_manager.get_current_memory_size(user_name=user_name)
 
     def get_searcher(
-        self,
-        manual_close_internet: bool = False,
+        self, manual_close_internet: bool = False, moscube: bool = False, process_llm=None
     ):
-        if (self.internet_retriever is not None) and manual_close_internet:
-            logger.warning(
-                "Internet retriever is init by config , but  this search set manual_close_internet is True  and will close it"
-            )
-            searcher = Searcher(
-                self.dispatcher_llm,
-                self.graph_store,
-                self.embedder,
-                self.reranker,
-                internet_retriever=None,
-            )
-        else:
-            searcher = Searcher(
-                self.dispatcher_llm,
-                self.graph_store,
-                self.embedder,
-                self.reranker,
-                internet_retriever=self.internet_retriever,
-            )
+        searcher = Searcher(
+            self.dispatcher_llm,
+            self.graph_store,
+            self.embedder,
+            self.reranker,
+            internet_retriever=self.internet_retriever,
+            manual_close_internet=manual_close_internet,
+            process_llm=process_llm,
+        )
         return searcher
 
     def search(
@@ -159,8 +151,12 @@ class TreeTextMemory(BaseTextMemory):
         mode: str = "fast",
         memory_type: str = "All",
         manual_close_internet: bool = True,
+        search_priority: dict | None = None,
         search_filter: dict | None = None,
         user_name: str | None = None,
+        search_tool_memory: bool = False,
+        tool_mem_top_k: int = 6,
+        **kwargs,
     ) -> list[TextualMemoryItem]:
         """Search for memories based on a query.
         User query -> TaskGoalParser -> MemoryPathResolver ->
@@ -183,30 +179,29 @@ class TreeTextMemory(BaseTextMemory):
         Returns:
             list[TextualMemoryItem]: List of matching memories.
         """
-        if (self.internet_retriever is not None) and manual_close_internet:
-            searcher = Searcher(
-                self.dispatcher_llm,
-                self.graph_store,
-                self.embedder,
-                self.reranker,
-                bm25_retriever=self.bm25_retriever,
-                internet_retriever=None,
-                search_strategy=self.search_strategy,
-                manual_close_internet=manual_close_internet,
-            )
-        else:
-            searcher = Searcher(
-                self.dispatcher_llm,
-                self.graph_store,
-                self.embedder,
-                self.reranker,
-                bm25_retriever=self.bm25_retriever,
-                internet_retriever=self.internet_retriever,
-                search_strategy=self.search_strategy,
-                manual_close_internet=manual_close_internet,
-            )
+        searcher = Searcher(
+            self.dispatcher_llm,
+            self.graph_store,
+            self.embedder,
+            self.reranker,
+            bm25_retriever=self.bm25_retriever,
+            internet_retriever=self.internet_retriever,
+            search_strategy=self.search_strategy,
+            manual_close_internet=manual_close_internet,
+            tokenizer=self.tokenizer,
+        )
         return searcher.search(
-            query, top_k, info, mode, memory_type, search_filter, user_name=user_name
+            query,
+            top_k,
+            info,
+            mode,
+            memory_type,
+            search_filter,
+            search_priority,
+            user_name=user_name,
+            search_tool_memory=search_tool_memory,
+            tool_mem_top_k=tool_mem_top_k,
+            **kwargs,
         )
 
     def get_relevant_subgraph(
@@ -342,6 +337,28 @@ class TreeTextMemory(BaseTextMemory):
             logger.info("All memories and edges have been deleted from the graph.")
         except Exception as e:
             logger.error(f"An error occurred while deleting all memories: {e}")
+            raise
+
+    def delete_by_filter(
+        self,
+        writable_cube_ids: list[str],
+        memory_ids: list[str] | None = None,
+        file_ids: list[str] | None = None,
+        filter: dict | None = None,
+    ) -> int:
+        """Delete memories by filter.
+        Returns:
+            int: Number of nodes deleted.
+        """
+        try:
+            return self.graph_store.delete_node_by_prams(
+                writable_cube_ids=writable_cube_ids,
+                memory_ids=memory_ids,
+                file_ids=file_ids,
+                filter=filter,
+            )
+        except Exception as e:
+            logger.error(f"An error occurred while deleting memories by filter: {e}")
             raise
 
     def load(self, dir: str) -> None:

@@ -30,11 +30,11 @@ from memos.mem_os.utils.reference_utils import (
     prepare_reference_data,
     process_streaming_references_complete,
 )
-from memos.mem_scheduler.schemas.general_schemas import (
-    ANSWER_LABEL,
-    QUERY_LABEL,
-)
 from memos.mem_scheduler.schemas.message_schemas import ScheduleMessageItem
+from memos.mem_scheduler.schemas.task_schemas import (
+    ANSWER_TASK_LABEL,
+    QUERY_TASK_LABEL,
+)
 from memos.templates.mos_prompts import (
     FURTHER_SUGGESTION_PROMPT,
     get_memos_prompt,
@@ -108,11 +108,14 @@ class ChatHandler(BaseHandler):
             HTTPException: If chat fails
         """
         try:
+            # Resolve readable cube IDs (for search)
+            readable_cube_ids = chat_req.readable_cube_ids or [chat_req.user_id]
+
             # Step 1: Search for relevant memories
             search_req = APISearchRequest(
                 query=chat_req.query,
                 user_id=chat_req.user_id,
-                mem_cube_id=chat_req.mem_cube_id,
+                readable_cube_ids=readable_cube_ids,
                 mode=chat_req.mode,
                 internet_search=chat_req.internet_search,
                 top_k=chat_req.top_k,
@@ -139,7 +142,9 @@ class ChatHandler(BaseHandler):
 
             # Step 2: Build system prompt
             system_prompt = self._build_system_prompt(
-                filtered_memories, search_response.data["pref_string"], chat_req.system_prompt
+                filtered_memories,
+                search_response.data.get("pref_string", ""),
+                chat_req.system_prompt,
             )
 
             # Prepare message history
@@ -162,9 +167,11 @@ class ChatHandler(BaseHandler):
 
             # Step 4: start add after chat asynchronously
             if chat_req.add_message_on_answer:
+                # Resolve writable cube IDs (for add)
+                writable_cube_ids = chat_req.writable_cube_ids or [chat_req.user_id]
                 self._start_add_to_memory(
                     user_id=chat_req.user_id,
-                    cube_id=chat_req.mem_cube_id,
+                    writable_cube_ids=writable_cube_ids,
                     session_id=chat_req.session_id or "default_session",
                     query=chat_req.query,
                     full_response=response,
@@ -208,10 +215,15 @@ class ChatHandler(BaseHandler):
             def generate_chat_response() -> Generator[str, None, None]:
                 """Generate chat response as SSE stream."""
                 try:
+                    # Resolve readable cube IDs (for search)
+                    readable_cube_ids = chat_req.readable_cube_ids or (
+                        [chat_req.mem_cube_id] if chat_req.mem_cube_id else [chat_req.user_id]
+                    )
+
                     search_req = APISearchRequest(
                         query=chat_req.query,
                         user_id=chat_req.user_id,
-                        mem_cube_id=chat_req.mem_cube_id,
+                        readable_cube_ids=readable_cube_ids,
                         mode=chat_req.mode,
                         internet_search=chat_req.internet_search,
                         top_k=chat_req.top_k,
@@ -224,11 +236,15 @@ class ChatHandler(BaseHandler):
 
                     search_response = self.search_handler.handle_search_memories(search_req)
 
+                    # Use first readable cube ID for scheduler (backward compatibility)
+                    scheduler_cube_id = (
+                        readable_cube_ids[0] if readable_cube_ids else chat_req.user_id
+                    )
                     self._send_message_to_scheduler(
                         user_id=chat_req.user_id,
-                        mem_cube_id=chat_req.mem_cube_id,
+                        mem_cube_id=scheduler_cube_id,
                         query=chat_req.query,
-                        label=QUERY_LABEL,
+                        label=QUERY_TASK_LABEL,
                     )
                     # Extract memories from search results
                     memories_list = []
@@ -243,7 +259,7 @@ class ChatHandler(BaseHandler):
                     # Step 2: Build system prompt with memories
                     system_prompt = self._build_system_prompt(
                         filtered_memories,
-                        search_response.data["pref_string"],
+                        search_response.data.get("pref_string", ""),
                         chat_req.system_prompt,
                     )
 
@@ -256,7 +272,7 @@ class ChatHandler(BaseHandler):
                     ]
 
                     self.logger.info(
-                        f"user_id: {chat_req.user_id}, cube_id: {chat_req.mem_cube_id}, "
+                        f"user_id: {chat_req.user_id}, readable_cube_ids: {readable_cube_ids}, "
                         f"current_system_prompt: {system_prompt}"
                     )
 
@@ -299,9 +315,13 @@ class ChatHandler(BaseHandler):
 
                     current_messages.append({"role": "assistant", "content": full_response})
                     if chat_req.add_message_on_answer:
+                        # Resolve writable cube IDs (for add)
+                        writable_cube_ids = chat_req.writable_cube_ids or (
+                            [chat_req.mem_cube_id] if chat_req.mem_cube_id else [chat_req.user_id]
+                        )
                         self._start_add_to_memory(
                             user_id=chat_req.user_id,
-                            cube_id=chat_req.mem_cube_id,
+                            writable_cube_ids=writable_cube_ids,
                             session_id=chat_req.session_id or "default_session",
                             query=chat_req.query,
                             full_response=full_response,
@@ -359,12 +379,43 @@ class ChatHandler(BaseHandler):
                     # Step 1: Search for memories using search handler
                     yield f"data: {json.dumps({'type': 'status', 'data': '0'})}\n\n"
 
+                    # Resolve readable cube IDs (for search)
+                    readable_cube_ids = chat_req.readable_cube_ids or (
+                        [chat_req.mem_cube_id] if chat_req.mem_cube_id else [chat_req.user_id]
+                    )
+                    # Resolve writable cube IDs (for add)
+                    writable_cube_ids = chat_req.writable_cube_ids or (
+                        [chat_req.mem_cube_id] if chat_req.mem_cube_id else [chat_req.user_id]
+                    )
+
+                    # for playground, add the query to memory without response
+                    self._start_add_to_memory(
+                        user_id=chat_req.user_id,
+                        writable_cube_ids=writable_cube_ids,
+                        session_id=chat_req.session_id or "default_session",
+                        query=chat_req.query,
+                        full_response=None,
+                        async_mode="sync",
+                    )
+
+                    # Use first readable cube ID for scheduler (backward compatibility)
+                    scheduler_cube_id = (
+                        readable_cube_ids[0] if readable_cube_ids else chat_req.user_id
+                    )
+                    self._send_message_to_scheduler(
+                        user_id=chat_req.user_id,
+                        mem_cube_id=scheduler_cube_id,
+                        query=chat_req.query,
+                        label=QUERY_TASK_LABEL,
+                    )
+
+                    # ====== first search without parse goal ======
                     search_req = APISearchRequest(
                         query=chat_req.query,
                         user_id=chat_req.user_id,
-                        mem_cube_id=chat_req.mem_cube_id,
+                        readable_cube_ids=readable_cube_ids,
                         mode=chat_req.mode,
-                        internet_search=chat_req.internet_search,
+                        internet_search=False,
                         top_k=chat_req.top_k,
                         chat_history=chat_req.history,
                         session_id=chat_req.session_id,
@@ -372,17 +423,11 @@ class ChatHandler(BaseHandler):
                         pref_top_k=chat_req.pref_top_k,
                         filter=chat_req.filter,
                     )
-
                     search_response = self.search_handler.handle_search_memories(search_req)
 
                     yield f"data: {json.dumps({'type': 'status', 'data': '1'})}\n\n"
-                    self._send_message_to_scheduler(
-                        user_id=chat_req.user_id,
-                        mem_cube_id=chat_req.mem_cube_id,
-                        query=chat_req.query,
-                        label=QUERY_LABEL,
-                    )
-                    # Extract memories from search results
+
+                    # Extract memories from search results (first search)
                     memories_list = []
                     if search_response.data and search_response.data.get("text_mem"):
                         text_mem_results = search_response.data["text_mem"]
@@ -390,26 +435,68 @@ class ChatHandler(BaseHandler):
                             memories_list = text_mem_results[0]["memories"]
 
                     # Filter memories by threshold
-                    filtered_memories = self._filter_memories_by_threshold(memories_list)
+                    first_filtered_memories = self._filter_memories_by_threshold(memories_list)
 
-                    # Prepare reference data
+                    # Prepare reference data (first search)
+                    reference = prepare_reference_data(first_filtered_memories)
+                    # get preference string
+                    pref_string = search_response.data.get("pref_string", "")
+
+                    yield f"data: {json.dumps({'type': 'reference', 'data': reference})}\n\n"
+
+                    # Prepare preference markdown string
+                    if chat_req.include_preference:
+                        pref_list = search_response.data.get("pref_mem") or []
+                        pref_memories = pref_list[0].get("memories", []) if pref_list else []
+                        pref_md_string = self._build_pref_md_string_for_playground(pref_memories)
+                        yield f"data: {json.dumps({'type': 'pref_md_string', 'data': pref_md_string})}\n\n"
+
+                    # internet status
+                    yield f"data: {json.dumps({'type': 'status', 'data': 'start_internet_search'})}\n\n"
+
+                    # ====== second search with parse goal ======
+                    search_req = APISearchRequest(
+                        query=chat_req.query,
+                        user_id=chat_req.user_id,
+                        readable_cube_ids=readable_cube_ids,
+                        mode=chat_req.mode,
+                        internet_search=chat_req.internet_search,
+                        top_k=chat_req.top_k,
+                        chat_history=chat_req.history,
+                        session_id=chat_req.session_id,
+                        include_preference=False,
+                        filter=chat_req.filter,
+                        playground_search_goal_parser=True,
+                    )
+                    search_response = self.search_handler.handle_search_memories(search_req)
+
+                    # Extract memories from search results (second search)
+                    memories_list = []
+                    if search_response.data and search_response.data.get("text_mem"):
+                        text_mem_results = search_response.data["text_mem"]
+                        if text_mem_results and text_mem_results[0].get("memories"):
+                            memories_list = text_mem_results[0]["memories"]
+
+                    # Filter memories by threshold
+                    second_filtered_memories = self._filter_memories_by_threshold(memories_list)
+
+                    # dedup and supplement memories
+                    filtered_memories = self._dedup_and_supplement_memories(
+                        first_filtered_memories, second_filtered_memories
+                    )
+
+                    # Prepare remain reference data (second search)
                     reference = prepare_reference_data(filtered_memories)
                     # get internet reference
                     internet_reference = self._get_internet_reference(
                         search_response.data.get("text_mem")[0]["memories"]
                     )
-                    yield f"data: {json.dumps({'type': 'reference', 'data': reference})}\n\n"
 
-                    # Prepare preference markdown string
-                    if chat_req.include_preference:
-                        pref_md_string = self._build_pref_md_string_for_playground(
-                            search_response.data["pref_mem"][0].get("memories", [])
-                        )
-                        yield f"data: {json.dumps({'type': 'pref_md_string', 'data': pref_md_string})}\n\n"
+                    yield f"data: {json.dumps({'type': 'reference', 'data': reference})}\n\n"
 
                     # Step 2: Build system prompt with memories
                     system_prompt = self._build_enhance_system_prompt(
-                        filtered_memories, search_response.data["pref_string"]
+                        filtered_memories, pref_string
                     )
 
                     # Prepare messages
@@ -421,7 +508,7 @@ class ChatHandler(BaseHandler):
                     ]
 
                     self.logger.info(
-                        f"user_id: {chat_req.user_id}, cube_id: {chat_req.mem_cube_id}, "
+                        f"user_id: {chat_req.user_id}, readable_cube_ids: {readable_cube_ids}, "
                         f"current_system_prompt: {system_prompt}"
                     )
 
@@ -496,9 +583,13 @@ class ChatHandler(BaseHandler):
 
                     yield f"data: {json.dumps({'type': 'end'})}\n\n"
 
+                    # Use first readable cube ID for post-processing (backward compatibility)
+                    scheduler_cube_id = (
+                        readable_cube_ids[0] if readable_cube_ids else chat_req.user_id
+                    )
                     self._start_post_chat_processing(
                         user_id=chat_req.user_id,
-                        cube_id=chat_req.mem_cube_id,
+                        cube_id=scheduler_cube_id,
                         session_id=chat_req.session_id or "default_session",
                         query=chat_req.query,
                         full_response=full_response,
@@ -508,10 +599,9 @@ class ChatHandler(BaseHandler):
                         speed_improvement=speed_improvement,
                         current_messages=current_messages,
                     )
-
                     self._start_add_to_memory(
                         user_id=chat_req.user_id,
-                        cube_id=chat_req.mem_cube_id,
+                        writable_cube_ids=writable_cube_ids,
                         session_id=chat_req.session_id or "default_session",
                         query=chat_req.query,
                         full_response=full_response,
@@ -542,6 +632,19 @@ class ChatHandler(BaseHandler):
             self.logger.error(f"Failed to start chat stream: {traceback.format_exc()}")
             raise HTTPException(status_code=500, detail=str(traceback.format_exc())) from err
 
+    def _dedup_and_supplement_memories(
+        self, first_filtered_memories: list, second_filtered_memories: list
+    ) -> list:
+        """Remove memory from second_filtered_memories that already exists in first_filtered_memories, return remaining memories"""
+        # Create a set of IDs from first_filtered_memories for efficient lookup
+        first_memory_ids = {memory["id"] for memory in first_filtered_memories}
+
+        remaining_memories = []
+        for memory in second_filtered_memories:
+            if memory["id"] not in first_memory_ids:
+                remaining_memories.append(memory)
+        return remaining_memories
+
     def _get_internet_reference(
         self, search_response: list[dict[str, any]]
     ) -> list[dict[str, any]]:
@@ -564,17 +667,17 @@ class ChatHandler(BaseHandler):
         explicit = []
         implicit = []
         for pref_mem in pref_mem_list:
-            if pref_mem["metadata"]["preference_type"] == "explicit":
+            if pref_mem["metadata"]["preference_type"] == "explicit_preference":
                 explicit.append(
                     {
-                        "content": pref_mem["preference"],
+                        "content": pref_mem["metadata"]["preference"],
                         "reasoning": pref_mem["metadata"]["reasoning"],
                     }
                 )
-            elif pref_mem["metadata"]["preference_type"] == "implicit":
+            elif pref_mem["metadata"]["preference_type"] == "implicit_preference":
                 implicit.append(
                     {
-                        "content": pref_mem["preference"],
+                        "content": pref_mem["metadata"]["preference"],
                         "reasoning": pref_mem["metadata"]["reasoning"],
                     }
                 )
@@ -859,7 +962,7 @@ class ChatHandler(BaseHandler):
                 content=query,
                 timestamp=datetime.utcnow(),
             )
-            self.mem_scheduler.memos_message_queue.submit_messages(messages=[message_item])
+            self.mem_scheduler.submit_messages(messages=[message_item])
             self.logger.info(f"Sent message to scheduler with label: {label}")
         except Exception as e:
             self.logger.error(f"Failed to send message to scheduler: {e}", exc_info=True)
@@ -867,28 +970,32 @@ class ChatHandler(BaseHandler):
     async def _add_conversation_to_memory(
         self,
         user_id: str,
-        cube_id: str,
+        writable_cube_ids: list[str],
         session_id: str,
         query: str,
-        clean_response: str,
+        clean_response: str | None = None,
         async_mode: Literal["async", "sync"] = "sync",
     ) -> None:
-        add_req = APIADDRequest(
-            user_id=user_id,
-            mem_cube_id=cube_id,
-            session_id=session_id,
-            messages=[
-                {
-                    "role": "user",
-                    "content": query,
-                    "chat_time": str(datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
-                },
+        messages = [
+            {
+                "role": "user",
+                "content": query,
+                "chat_time": str(datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+            }
+        ]
+        if clean_response:
+            messages.append(
                 {
                     "role": "assistant",
                     "content": clean_response,
                     "chat_time": str(datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
-                },
-            ],
+                }
+            )
+        add_req = APIADDRequest(
+            user_id=user_id,
+            writable_cube_ids=writable_cube_ids,
+            session_id=session_id,
+            messages=messages,
             async_mode=async_mode,
         )
 
@@ -984,7 +1091,7 @@ class ChatHandler(BaseHandler):
 
             # Send answer to scheduler
             self._send_message_to_scheduler(
-                user_id=user_id, mem_cube_id=cube_id, query=clean_response, label=ANSWER_LABEL
+                user_id=user_id, mem_cube_id=cube_id, query=clean_response, label=ANSWER_TASK_LABEL
             )
 
             self.logger.info(f"Post-chat processing completed for user {user_id}")
@@ -1090,10 +1197,10 @@ class ChatHandler(BaseHandler):
     def _start_add_to_memory(
         self,
         user_id: str,
-        cube_id: str,
+        writable_cube_ids: list[str],
         session_id: str,
         query: str,
-        full_response: str,
+        full_response: str | None = None,
         async_mode: Literal["async", "sync"] = "sync",
     ) -> None:
         def run_async_in_thread():
@@ -1101,11 +1208,13 @@ class ChatHandler(BaseHandler):
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
                 try:
-                    clean_response, _ = self._extract_references_from_response(full_response)
+                    clean_response = full_response
+                    if full_response:
+                        clean_response, _ = self._extract_references_from_response(full_response)
                     loop.run_until_complete(
                         self._add_conversation_to_memory(
                             user_id=user_id,
-                            cube_id=cube_id,
+                            writable_cube_ids=writable_cube_ids,
                             session_id=session_id,
                             query=query,
                             clean_response=clean_response,
@@ -1122,11 +1231,13 @@ class ChatHandler(BaseHandler):
 
         try:
             asyncio.get_running_loop()
-            clean_response, _ = self._extract_references_from_response(full_response)
+            clean_response = full_response
+            if full_response:
+                clean_response, _ = self._extract_references_from_response(full_response)
             task = asyncio.create_task(
                 self._add_conversation_to_memory(
                     user_id=user_id,
-                    cube_id=cube_id,
+                    writable_cube_ids=writable_cube_ids,
                     session_id=session_id,
                     query=query,
                     clean_response=clean_response,

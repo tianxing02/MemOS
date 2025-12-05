@@ -38,6 +38,7 @@ def mock_init_server():
         "default_cube_config": Mock(),
         "mos_server": Mock(),
         "mem_scheduler": Mock(),
+        "feedback_server": Mock(),
         "naive_mem_cube": Mock(),
         "searcher": Mock(),
         "api_module": Mock(),
@@ -48,6 +49,7 @@ def mock_init_server():
         "pref_mem": None,
         "online_bot": None,
         "chat_llms": Mock(),
+        "redis_client": Mock(),
         "deepsearch_agent": Mock(),
     }
 

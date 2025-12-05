@@ -1,5 +1,6 @@
 import json
 import random
+import textwrap
 
 from datetime import datetime
 from typing import Any, Literal
@@ -87,6 +88,11 @@ def clean_properties(props):
     if not isinstance(props, dict):
         return {}
     return {k: v for k, v in props.items() if k not in vector_keys}
+
+
+def escape_sql_string(value: str) -> str:
+    """Escape single quotes in SQL string."""
+    return value.replace("'", "''")
 
 
 class PolarDBGraphDB(BaseGraphDB):
@@ -497,7 +503,9 @@ class PolarDBGraphDB(BaseGraphDB):
                 cursor.execute(delete_query, delete_params)
                 deleted_count = cursor.rowcount
                 logger.info(
-                    f"Removed {deleted_count} oldest {memory_type} memories, keeping {keep_latest} latest for user {user_name}"
+                    f"Removed {deleted_count} oldest {memory_type} memories, "
+                    f"keeping {keep_latest} latest for user {user_name}, "
+                    f"removed ids: {ids_to_delete}"
                 )
         except Exception as e:
             logger.error(f"[remove_oldest_memory] Failed: {e}", exc_info=True)
@@ -668,7 +676,6 @@ class PolarDBGraphDB(BaseGraphDB):
         valid_rel_types = {"AGGREGATE_TO", "FOLLOWS", "INFERS", "MERGED_TO", "RELATE_TO", "PARENT"}
 
         for label_name in valid_rel_types:
-            print(f"🪶 Creating elabel: {label_name}")
             conn = self._get_connection()
             logger.info(f"Creating elabel: {label_name}")
             try:
@@ -1451,6 +1458,222 @@ class PolarDBGraphDB(BaseGraphDB):
         raise NotImplementedError
 
     @timed
+    def seach_by_keywords(
+        self,
+        query_words: list[str],
+        scope: str | None = None,
+        status: str | None = None,
+        search_filter: dict | None = None,
+        user_name: str | None = None,
+        filter: dict | None = None,
+        knowledgebase_ids: list[str] | None = None,
+        tsvector_field: str = "properties_tsvector_zh",
+        tsquery_config: str = "jiebaqry",
+        **kwargs,
+    ) -> list[dict]:
+        where_clauses = []
+
+        if scope:
+            where_clauses.append(
+                f"ag_catalog.agtype_access_operator(properties, '\"memory_type\"'::agtype) = '\"{scope}\"'::agtype"
+            )
+        if status:
+            where_clauses.append(
+                f"ag_catalog.agtype_access_operator(properties, '\"status\"'::agtype) = '\"{status}\"'::agtype"
+            )
+        else:
+            where_clauses.append(
+                "ag_catalog.agtype_access_operator(properties, '\"status\"'::agtype) = '\"activated\"'::agtype"
+            )
+
+        # Build user_name filter with knowledgebase_ids support (OR relationship) using common method
+        user_name_conditions = self._build_user_name_and_kb_ids_conditions_sql(
+            user_name=user_name,
+            knowledgebase_ids=knowledgebase_ids,
+            default_user_name=self.config.user_name,
+        )
+
+        # Add OR condition if we have any user_name conditions
+        if user_name_conditions:
+            if len(user_name_conditions) == 1:
+                where_clauses.append(user_name_conditions[0])
+            else:
+                where_clauses.append(f"({' OR '.join(user_name_conditions)})")
+
+        # Add search_filter conditions
+        if search_filter:
+            for key, value in search_filter.items():
+                if isinstance(value, str):
+                    where_clauses.append(
+                        f"ag_catalog.agtype_access_operator(properties, '\"{key}\"'::agtype) = '\"{value}\"'::agtype"
+                    )
+                else:
+                    where_clauses.append(
+                        f"ag_catalog.agtype_access_operator(properties, '\"{key}\"'::agtype) = {value}::agtype"
+                    )
+
+        # Build filter conditions using common method
+        filter_conditions = self._build_filter_conditions_sql(filter)
+        where_clauses.extend(filter_conditions)
+        # Add fulltext search condition
+        # Convert query_text to OR query format: "word1 | word2 | word3"
+        tsquery_string = " | ".join(query_words)
+
+        where_clauses.append(f"{tsvector_field} @@ to_tsquery('{tsquery_config}', %s)")
+
+        where_clause = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+
+        # Build fulltext search query
+        query = f"""
+            SELECT
+                ag_catalog.agtype_access_operator(properties, '"id"'::agtype) AS old_id,
+                agtype_object_field_text(properties, 'memory') as memory_text
+            FROM "{self.db_name}_graph"."Memory"
+            {where_clause}
+        """
+
+        params = (tsquery_string,)
+        logger.info(f"[search_by_fulltext] query: {query}, params: {params}")
+        conn = self._get_connection()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(query, params)
+                results = cursor.fetchall()
+                output = []
+                for row in results:
+                    oldid = row[0]
+                    id_val = str(oldid)
+                    output.append({"id": id_val})
+
+                return output
+        finally:
+            self._return_connection(conn)
+
+    @timed
+    def search_by_fulltext(
+        self,
+        query_words: list[str],
+        top_k: int = 10,
+        scope: str | None = None,
+        status: str | None = None,
+        threshold: float | None = None,
+        search_filter: dict | None = None,
+        user_name: str | None = None,
+        filter: dict | None = None,
+        knowledgebase_ids: list[str] | None = None,
+        tsvector_field: str = "properties_tsvector_zh",
+        tsquery_config: str = "jiebaqry",
+        **kwargs,
+    ) -> list[dict]:
+        """
+        Full-text search functionality using PostgreSQL's full-text search capabilities.
+
+        Args:
+            query_text: query text
+            top_k: maximum number of results to return
+            scope: memory type filter (memory_type)
+            status: status filter, defaults to "activated"
+            threshold: similarity threshold filter
+            search_filter: additional property filter conditions
+            user_name: username filter
+            knowledgebase_ids: knowledgebase ids filter
+            filter: filter conditions with 'and' or 'or' logic for search results.
+            tsvector_field: full-text index field name, defaults to properties_tsvector_zh_1
+            tsquery_config: full-text search configuration, defaults to jiebaqry (Chinese word segmentation)
+            **kwargs: other parameters (e.g. cube_name)
+
+        Returns:
+            list[dict]: result list containing id and score
+        """
+        # Build WHERE clause dynamically, same as search_by_embedding
+        where_clauses = []
+
+        if scope:
+            where_clauses.append(
+                f"ag_catalog.agtype_access_operator(properties, '\"memory_type\"'::agtype) = '\"{scope}\"'::agtype"
+            )
+        if status:
+            where_clauses.append(
+                f"ag_catalog.agtype_access_operator(properties, '\"status\"'::agtype) = '\"{status}\"'::agtype"
+            )
+        else:
+            where_clauses.append(
+                "ag_catalog.agtype_access_operator(properties, '\"status\"'::agtype) = '\"activated\"'::agtype"
+            )
+
+        # Build user_name filter with knowledgebase_ids support (OR relationship) using common method
+        user_name_conditions = self._build_user_name_and_kb_ids_conditions_sql(
+            user_name=user_name,
+            knowledgebase_ids=knowledgebase_ids,
+            default_user_name=self.config.user_name,
+        )
+
+        # Add OR condition if we have any user_name conditions
+        if user_name_conditions:
+            if len(user_name_conditions) == 1:
+                where_clauses.append(user_name_conditions[0])
+            else:
+                where_clauses.append(f"({' OR '.join(user_name_conditions)})")
+
+        # Add search_filter conditions
+        if search_filter:
+            for key, value in search_filter.items():
+                if isinstance(value, str):
+                    where_clauses.append(
+                        f"ag_catalog.agtype_access_operator(properties, '\"{key}\"'::agtype) = '\"{value}\"'::agtype"
+                    )
+                else:
+                    where_clauses.append(
+                        f"ag_catalog.agtype_access_operator(properties, '\"{key}\"'::agtype) = {value}::agtype"
+                    )
+
+        # Build filter conditions using common method
+        filter_conditions = self._build_filter_conditions_sql(filter)
+        where_clauses.extend(filter_conditions)
+        # Add fulltext search condition
+        # Convert query_text to OR query format: "word1 | word2 | word3"
+        tsquery_string = " | ".join(query_words)
+
+        where_clauses.append(f"{tsvector_field} @@ to_tsquery('{tsquery_config}', %s)")
+
+        where_clause = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+
+        # Build fulltext search query
+        query = f"""
+            SELECT
+                ag_catalog.agtype_access_operator(properties, '"id"'::agtype) AS old_id,
+                agtype_object_field_text(properties, 'memory') as memory_text,
+                ts_rank({tsvector_field}, to_tsquery('{tsquery_config}', %s)) as rank
+            FROM "{self.db_name}_graph"."Memory"
+            {where_clause}
+            ORDER BY rank DESC
+            LIMIT {top_k};
+        """
+
+        params = [tsquery_string, tsquery_string]
+        logger.info(f"[search_by_fulltext] query: {query}, params: {params}")
+        conn = self._get_connection()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(query, params)
+                results = cursor.fetchall()
+                output = []
+                for row in results:
+                    oldid = row[0]  # old_id
+                    rank = row[2]  # rank score
+
+                    id_val = str(oldid)
+                    score_val = float(rank)
+
+                    # Apply threshold filter if specified
+                    if threshold is None or score_val >= threshold:
+                        output.append({"id": id_val, "score": score_val})
+
+                return output[:top_k]
+        finally:
+            self._return_connection(conn)
+
+    @timed
     def search_by_embedding(
         self,
         vector: list[float],
@@ -1460,12 +1683,17 @@ class PolarDBGraphDB(BaseGraphDB):
         threshold: float | None = None,
         search_filter: dict | None = None,
         user_name: str | None = None,
+        filter: dict | None = None,
+        knowledgebase_ids: list[str] | None = None,
         **kwargs,
     ) -> list[dict]:
         """
         Retrieve node IDs based on vector similarity using PostgreSQL vector operations.
         """
         # Build WHERE clause dynamically like nebular.py
+        logger.info(
+            f"[search_by_embedding] filter: {filter}, knowledgebase_ids: {knowledgebase_ids}"
+        )
         where_clauses = []
         if scope:
             where_clauses.append(
@@ -1490,10 +1718,19 @@ class PolarDBGraphDB(BaseGraphDB):
         #     else:
         #         where_clauses.append(f"ag_catalog.agtype_access_operator(properties, '\"user_name\"'::agtype) = '\"{user_name}\"'::agtype")
         """
-        user_name = user_name if user_name else self.config.user_name
-        where_clauses.append(
-            f"ag_catalog.agtype_access_operator(properties, '\"user_name\"'::agtype) = '\"{user_name}\"'::agtype"
+        # Build user_name filter with knowledgebase_ids support (OR relationship) using common method
+        user_name_conditions = self._build_user_name_and_kb_ids_conditions_sql(
+            user_name=user_name,
+            knowledgebase_ids=knowledgebase_ids,
+            default_user_name=self.config.user_name,
         )
+
+        # Add OR condition if we have any user_name conditions
+        if user_name_conditions:
+            if len(user_name_conditions) == 1:
+                where_clauses.append(user_name_conditions[0])
+            else:
+                where_clauses.append(f"({' OR '.join(user_name_conditions)})")
 
         # Add search_filter conditions like nebular.py
         if search_filter:
@@ -1506,6 +1743,10 @@ class PolarDBGraphDB(BaseGraphDB):
                     where_clauses.append(
                         f"ag_catalog.agtype_access_operator(properties, '\"{key}\"'::agtype) = {value}::agtype"
                     )
+
+        # Build filter conditions using common method
+        filter_conditions = self._build_filter_conditions_sql(filter)
+        where_clauses.extend(filter_conditions)
 
         where_clause = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
 
@@ -1526,12 +1767,47 @@ class PolarDBGraphDB(BaseGraphDB):
                     FROM t
                     WHERE scope > 0.1;
                 """
-        params = [vector]
+        # Convert vector to string format for PostgreSQL vector type
+        # PostgreSQL vector type expects a string format like '[1,2,3]'
+        vector_str = convert_to_vector(vector)
+        # Use string format directly in query instead of parameterized query
+        # Replace %s with the vector string, but need to quote it properly
+        # PostgreSQL vector type needs the string to be quoted
+        query = query.replace("%s::vector(1024)", f"'{vector_str}'::vector(1024)")
+        params = []
+
+        # Split query by lines and wrap long lines to prevent terminal truncation
+        query_lines = query.strip().split("\n")
+        for line in query_lines:
+            # Wrap lines longer than 200 characters to prevent terminal truncation
+            if len(line) > 200:
+                wrapped_lines = textwrap.wrap(
+                    line, width=200, break_long_words=False, break_on_hyphens=False
+                )
+                for _wrapped_line in wrapped_lines:
+                    pass
+            else:
+                pass
+
+        logger.info(f"[search_by_embedding] query: {query}, params: {params}")
 
         conn = self._get_connection()
         try:
             with conn.cursor() as cursor:
-                cursor.execute(query, params)
+                try:
+                    # If params is empty, execute query directly without parameters
+                    if params:
+                        cursor.execute(query, params)
+                    else:
+                        cursor.execute(query)
+                except Exception as e:
+                    logger.error(f"[search_by_embedding] Error executing query: {e}")
+                    logger.error(f"[search_by_embedding] Query length: {len(query)}")
+                    logger.error(
+                        f"[search_by_embedding] Params type: {type(params)}, length: {len(params)}"
+                    )
+                    logger.error(f"[search_by_embedding] Query contains %s: {'%s' in query}")
+                    raise
                 results = cursor.fetchall()
                 output = []
                 for row in results:
@@ -1540,6 +1816,9 @@ class PolarDBGraphDB(BaseGraphDB):
                     properties = row[1]  # properties
                     # embedding = row[3]  # embedding
                     """
+                    if len(row) < 5:
+                        logger.warning(f"Row has {len(row)} columns, expected 5. Row: {row}")
+                        continue
                     oldid = row[3]  # old_id
                     score = row[4]  # scope
                     id_val = str(oldid)
@@ -1553,7 +1832,12 @@ class PolarDBGraphDB(BaseGraphDB):
 
     @timed
     def get_by_metadata(
-        self, filters: list[dict[str, Any]], user_name: str | None = None
+        self,
+        filters: list[dict[str, Any]],
+        user_name: str | None = None,
+        filter: dict | None = None,
+        knowledgebase_ids: list | None = None,
+        user_name_flag: bool = True,
     ) -> list[str]:
         """
         Retrieve node IDs that match given metadata filters.
@@ -1572,6 +1856,8 @@ class PolarDBGraphDB(BaseGraphDB):
         Returns:
             list[str]: Node IDs whose metadata match the filter conditions. (AND logic).
         """
+        logger.info(f"[get_by_metadata] filter: {filter}, knowledgebase_ids: {knowledgebase_ids}")
+
         user_name = user_name if user_name else self._get_config_value("user_name")
 
         # Build WHERE conditions for cypher query
@@ -1617,28 +1903,47 @@ class PolarDBGraphDB(BaseGraphDB):
                 where_conditions.append(f"n.{field} STARTS WITH {escaped_value}")
             elif op == "ends_with":
                 where_conditions.append(f"n.{field} ENDS WITH {escaped_value}")
+            elif op == "like":
+                where_conditions.append(f"n.{field} CONTAINS {escaped_value}")
             elif op in [">", ">=", "<", "<="]:
                 where_conditions.append(f"n.{field} {op} {escaped_value}")
             else:
                 raise ValueError(f"Unsupported operator: {op}")
 
-        # Add user_name filter
-        escaped_user_name = user_name.replace("'", "''")
-        where_conditions.append(f"n.user_name = '{escaped_user_name}'")
+        # Build user_name filter with knowledgebase_ids support (OR relationship) using common method
+        # Build user_name filter with knowledgebase_ids support (OR relationship) using common method
+        # Build user_name filter with knowledgebase_ids support (OR relationship) using common method
+        user_name_conditions = self._build_user_name_and_kb_ids_conditions_cypher(
+            user_name=user_name,
+            knowledgebase_ids=knowledgebase_ids,
+            default_user_name=self._get_config_value("user_name"),
+        )
+        print(f"[111get_by_metadata] user_name_conditions: {user_name_conditions}")
 
-        where_str = " AND ".join(where_conditions)
+        # Add user_name WHERE clause
+        if user_name_conditions:
+            if len(user_name_conditions) == 1:
+                where_conditions.append(user_name_conditions[0])
+            else:
+                where_conditions.append(f"({' OR '.join(user_name_conditions)})")
+
+        # Build filter conditions using common method
+        filter_where_clause = self._build_filter_conditions_cypher(filter)
+
+        where_str = " AND ".join(where_conditions) + filter_where_clause
 
         # Use cypher query
         cypher_query = f"""
-            SELECT * FROM cypher('{self.db_name}_graph', $$
-            MATCH (n:Memory)
-            WHERE {where_str}
-            RETURN n.id AS id
-            $$) AS (id agtype)
-        """
+               SELECT * FROM cypher('{self.db_name}_graph', $$
+               MATCH (n:Memory)
+               WHERE {where_str}
+               RETURN n.id AS id
+               $$) AS (id agtype)
+           """
 
         ids = []
         conn = self._get_connection()
+        logger.info(f"[get_by_metadata] cypher_query: {cypher_query}")
         try:
             with conn.cursor() as cursor:
                 cursor.execute(cypher_query)
@@ -2044,7 +2349,12 @@ class PolarDBGraphDB(BaseGraphDB):
 
     @timed
     def get_all_memory_items(
-        self, scope: str, include_embedding: bool = False, user_name: str | None = None
+        self,
+        scope: str,
+        include_embedding: bool = False,
+        user_name: str | None = None,
+        filter: dict | None = None,
+        knowledgebase_ids: list | None = None,
     ) -> list[dict]:
         """
         Retrieve all memory items of a specific memory_type.
@@ -2057,17 +2367,51 @@ class PolarDBGraphDB(BaseGraphDB):
         Returns:
             list[dict]: Full list of memory items under this scope.
         """
+        logger.info(
+            f"[get_all_memory_items] filter: {filter}, knowledgebase_ids: {knowledgebase_ids}"
+        )
+
         user_name = user_name if user_name else self._get_config_value("user_name")
         if scope not in {"WorkingMemory", "LongTermMemory", "UserMemory", "OuterMemory"}:
             raise ValueError(f"Unsupported memory type scope: {scope}")
 
+        # Build user_name filter with knowledgebase_ids support (OR relationship) using common method
+        user_name_conditions = self._build_user_name_and_kb_ids_conditions_cypher(
+            user_name=user_name,
+            knowledgebase_ids=knowledgebase_ids,
+            default_user_name=self._get_config_value("user_name"),
+        )
+
+        # Build user_name WHERE clause
+        if user_name_conditions:
+            if len(user_name_conditions) == 1:
+                user_name_where = user_name_conditions[0]
+            else:
+                user_name_where = f"({' OR '.join(user_name_conditions)})"
+        else:
+            user_name_where = ""
+
+        # Build filter conditions using common method
+        filter_where_clause = self._build_filter_conditions_cypher(filter)
+
         # Use cypher query to retrieve memory items
         if include_embedding:
+            # Build WHERE clause with user_name/knowledgebase_ids and filter
+            where_parts = [f"n.memory_type = '{scope}'"]
+            if user_name_where:
+                # user_name_where already contains parentheses if it's an OR condition
+                where_parts.append(user_name_where)
+            if filter_where_clause:
+                # filter_where_clause already contains " AND " prefix, so we just append it
+                where_clause = " AND ".join(where_parts) + filter_where_clause
+            else:
+                where_clause = " AND ".join(where_parts)
+
             cypher_query = f"""
                    WITH t as (
                        SELECT * FROM cypher('{self.db_name}_graph', $$
                        MATCH (n:Memory)
-                       WHERE n.memory_type = '{scope}' AND n.user_name = '{user_name}'
+                       WHERE {where_clause}
                        RETURN id(n) as id1,n
                        LIMIT 100
                        $$) AS (id1 agtype,n agtype)
@@ -2110,10 +2454,21 @@ class PolarDBGraphDB(BaseGraphDB):
 
             return nodes
         else:
+            # Build WHERE clause with user_name/knowledgebase_ids and filter
+            where_parts = [f"n.memory_type = '{scope}'"]
+            if user_name_where:
+                # user_name_where already contains parentheses if it's an OR condition
+                where_parts.append(user_name_where)
+            if filter_where_clause:
+                # filter_where_clause already contains " AND " prefix, so we just append it
+                where_clause = " AND ".join(where_parts) + filter_where_clause
+            else:
+                where_clause = " AND ".join(where_parts)
+
             cypher_query = f"""
                    SELECT * FROM cypher('{self.db_name}_graph', $$
                    MATCH (n:Memory)
-                   WHERE n.memory_type = '{scope}' AND n.user_name = '{user_name}'
+                   WHERE {where_clause}
                    RETURN properties(n) as props
                    LIMIT 100
                    $$) AS (nprops agtype)
@@ -2121,6 +2476,7 @@ class PolarDBGraphDB(BaseGraphDB):
 
             nodes = []
             conn = self._get_connection()
+            logger.info(f"[get_all_memory_items] cypher_query: {cypher_query}")
             try:
                 with conn.cursor() as cursor:
                     cursor.execute(cypher_query)
@@ -2449,6 +2805,28 @@ class PolarDBGraphDB(BaseGraphDB):
             if time_field in node and hasattr(node[time_field], "isoformat"):
                 node[time_field] = node[time_field].isoformat()
 
+        # Deserialize sources from JSON strings back to dict objects
+        if "sources" in node and node.get("sources"):
+            sources = node["sources"]
+            if isinstance(sources, list):
+                deserialized_sources = []
+                for source_item in sources:
+                    if isinstance(source_item, str):
+                        # Try to parse JSON string
+                        try:
+                            parsed = json.loads(source_item)
+                            deserialized_sources.append(parsed)
+                        except (json.JSONDecodeError, TypeError):
+                            # If parsing fails, keep as string or create a simple dict
+                            deserialized_sources.append({"type": "doc", "content": source_item})
+                    elif isinstance(source_item, dict):
+                        # Already a dict, keep as is
+                        deserialized_sources.append(source_item)
+                    else:
+                        # Unknown type, create a simple dict
+                        deserialized_sources.append({"type": "doc", "content": str(source_item)})
+                node["sources"] = deserialized_sources
+
         return {"id": node.get("id"), "memory": node.get("memory", ""), "metadata": node}
 
     def _parse_node_new(self, node_data: dict[str, Any]) -> dict[str, Any]:
@@ -2481,6 +2859,28 @@ class PolarDBGraphDB(BaseGraphDB):
             if time_field in node and hasattr(node[time_field], "isoformat"):
                 node[time_field] = node[time_field].isoformat()
 
+        # Deserialize sources from JSON strings back to dict objects
+        if "sources" in node and node.get("sources"):
+            sources = node["sources"]
+            if isinstance(sources, list):
+                deserialized_sources = []
+                for source_item in sources:
+                    if isinstance(source_item, str):
+                        # Try to parse JSON string
+                        try:
+                            parsed = json.loads(source_item)
+                            deserialized_sources.append(parsed)
+                        except (json.JSONDecodeError, TypeError):
+                            # If parsing fails, keep as string or create a simple dict
+                            deserialized_sources.append({"type": "doc", "content": source_item})
+                    elif isinstance(source_item, dict):
+                        # Already a dict, keep as is
+                        deserialized_sources.append(source_item)
+                    else:
+                        # Unknown type, create a simple dict
+                        deserialized_sources.append({"type": "doc", "content": str(source_item)})
+                node["sources"] = deserialized_sources
+
         # Do not remove user_name; keep all fields
 
         return {"id": node.pop("id"), "memory": node.pop("memory", ""), "metadata": node}
@@ -2495,12 +2895,11 @@ class PolarDBGraphDB(BaseGraphDB):
         self, id: str, memory: str, metadata: dict[str, Any], user_name: str | None = None
     ) -> None:
         """Add a memory node to the graph."""
-        logger.info(f"In add node polardb: id-{id} memory-{memory}")
+        logger.info(f"[add_node] id: {id}, memory: {memory}, metadata: {metadata}")
 
         # user_name comes from metadata; fallback to config if missing
         metadata["user_name"] = user_name if user_name else self.config.user_name
 
-        # Safely process metadata
         metadata = _prepare_node_metadata(metadata)
 
         # Merge node and set metadata
@@ -2578,6 +2977,9 @@ class PolarDBGraphDB(BaseGraphDB):
                     cursor.execute(
                         insert_query, (id, json.dumps(properties), json.dumps(embedding_vector))
                     )
+                    logger.info(
+                        f"[add_node] [embedding_vector-true] insert_query: {insert_query}, properties: {json.dumps(properties)}"
+                    )
                 else:
                     insert_query = f"""
                         INSERT INTO {self.db_name}_graph."Memory"(id, properties)
@@ -2587,7 +2989,9 @@ class PolarDBGraphDB(BaseGraphDB):
                         )
                     """
                     cursor.execute(insert_query, (id, json.dumps(properties)))
-                    logger.info(f"Added node {id} to graph '{self.db_name}_graph'.")
+                    logger.info(
+                        f"[add_node] [embedding_vector-false] insert_query: {insert_query}, properties: {json.dumps(properties)}"
+                    )
         finally:
             logger.info(f"In add node polardb: id-{id} memory-{memory} query-{insert_query}")
             self._return_connection(conn)
@@ -3083,3 +3487,837 @@ class PolarDBGraphDB(BaseGraphDB):
         else:
             # Add double quotes
             return f'"{value}"'
+
+    def _build_user_name_and_kb_ids_conditions_cypher(
+        self,
+        user_name: str | None,
+        knowledgebase_ids: list | None,
+        default_user_name: str | None = None,
+    ) -> list[str]:
+        """
+        Build user_name and knowledgebase_ids conditions for Cypher queries.
+
+        Args:
+            user_name: User name for filtering
+            knowledgebase_ids: List of knowledgebase IDs
+            default_user_name: Default user name from config if user_name is None
+
+        Returns:
+            List of condition strings (will be joined with OR)
+        """
+        user_name_conditions = []
+        effective_user_name = user_name if user_name else default_user_name
+        print(f"[delete_node_by_prams] effective_user_name: {effective_user_name}")
+
+        if effective_user_name:
+            escaped_user_name = effective_user_name.replace("'", "''")
+            user_name_conditions.append(f"n.user_name = '{escaped_user_name}'")
+
+        # Add knowledgebase_ids conditions (checking user_name field in the data)
+        if knowledgebase_ids and isinstance(knowledgebase_ids, list) and len(knowledgebase_ids) > 0:
+            for kb_id in knowledgebase_ids:
+                if isinstance(kb_id, str):
+                    escaped_kb_id = kb_id.replace("'", "''")
+                    user_name_conditions.append(f"n.user_name = '{escaped_kb_id}'")
+
+        return user_name_conditions
+
+    def _build_user_name_and_kb_ids_conditions_sql(
+        self,
+        user_name: str | None,
+        knowledgebase_ids: list | None,
+        default_user_name: str | None = None,
+    ) -> list[str]:
+        """
+        Build user_name and knowledgebase_ids conditions for SQL queries.
+
+        Args:
+            user_name: User name for filtering
+            knowledgebase_ids: List of knowledgebase IDs
+            default_user_name: Default user name from config if user_name is None
+
+        Returns:
+            List of condition strings (will be joined with OR)
+        """
+        user_name_conditions = []
+        effective_user_name = user_name if user_name else default_user_name
+
+        if effective_user_name:
+            user_name_conditions.append(
+                f"ag_catalog.agtype_access_operator(properties, '\"user_name\"'::agtype) = '\"{effective_user_name}\"'::agtype"
+            )
+
+        # Add knowledgebase_ids conditions (checking user_name field in the data)
+        if knowledgebase_ids and isinstance(knowledgebase_ids, list) and len(knowledgebase_ids) > 0:
+            for kb_id in knowledgebase_ids:
+                if isinstance(kb_id, str):
+                    user_name_conditions.append(
+                        f"ag_catalog.agtype_access_operator(properties, '\"user_name\"'::agtype) = '\"{kb_id}\"'::agtype"
+                    )
+
+        return user_name_conditions
+
+    def _build_filter_conditions_cypher(
+        self,
+        filter: dict | None,
+    ) -> str:
+        """
+        Build filter conditions for Cypher queries.
+
+        Args:
+            filter: Filter dictionary with "or" or "and" logic
+
+        Returns:
+            Filter WHERE clause string (empty string if no filter)
+        """
+        filter_where_clause = ""
+        filter = self.parse_filter(filter)
+        if filter:
+
+            def escape_cypher_string(value: str) -> str:
+                return value.replace("'", "\\'")
+
+            def build_cypher_filter_condition(condition_dict: dict) -> str:
+                """Build a Cypher WHERE condition for a single filter item."""
+                condition_parts = []
+                for key, value in condition_dict.items():
+                    # Check if value is a dict with comparison operators (gt, lt, gte, lte, =, contains, in, like)
+                    if isinstance(value, dict):
+                        # Handle comparison operators: gt, lt, gte, lte, =, contains, in, like
+                        # Supports multiple operators for the same field, e.g.:
+                        # will generate: n.created_at >= '2025-09-19' AND n.created_at <= '2025-12-31'
+                        for op, op_value in value.items():
+                            if op in ("gt", "lt", "gte", "lte"):
+                                # Map operator to Cypher operator
+                                cypher_op_map = {"gt": ">", "lt": "<", "gte": ">=", "lte": "<="}
+                                cypher_op = cypher_op_map[op]
+
+                                # Check if key starts with "info." prefix (for nested fields like info.A, info.B)
+                                if key.startswith("info."):
+                                    # Nested field access: n.info.field_name
+                                    info_field = key[5:]  # Remove "info." prefix
+                                    if isinstance(op_value, str):
+                                        escaped_value = escape_cypher_string(op_value)
+                                        condition_parts.append(
+                                            f"n.info.{info_field} {cypher_op} '{escaped_value}'"
+                                        )
+                                    else:
+                                        condition_parts.append(
+                                            f"n.info.{info_field} {cypher_op} {op_value}"
+                                        )
+                                else:
+                                    # Direct property access (e.g., "created_at" is directly in n, not in n.info)
+                                    if isinstance(op_value, str):
+                                        escaped_value = escape_cypher_string(op_value)
+                                        condition_parts.append(
+                                            f"n.{key} {cypher_op} '{escaped_value}'"
+                                        )
+                                    else:
+                                        condition_parts.append(f"n.{key} {cypher_op} {op_value}")
+                            elif op == "=":
+                                # Handle equality operator
+                                # For array fields, = means exact match of the entire array (e.g., tags = ['test:zdy'] or tags = ['mode:fast', 'test:zdy'])
+                                # For scalar fields, = means equality
+                                # Check if key starts with "info." prefix
+                                if key.startswith("info."):
+                                    info_field = key[5:]  # Remove "info." prefix
+                                    if isinstance(op_value, str):
+                                        escaped_value = escape_cypher_string(op_value)
+                                        # For array fields, check if array exactly equals [value]
+                                        # For scalar fields, use =
+                                        if info_field in ("tags", "sources"):
+                                            condition_parts.append(
+                                                f"n.info.{info_field} = ['{escaped_value}']"
+                                            )
+                                        else:
+                                            condition_parts.append(
+                                                f"n.info.{info_field} = '{escaped_value}'"
+                                            )
+                                    elif isinstance(op_value, list):
+                                        # For array fields, format list as Cypher array
+                                        if info_field in ("tags", "sources"):
+                                            escaped_items = [
+                                                f"'{escape_cypher_string(str(item))}'"
+                                                for item in op_value
+                                            ]
+                                            array_str = "[" + ", ".join(escaped_items) + "]"
+                                            condition_parts.append(
+                                                f"n.info.{info_field} = {array_str}"
+                                            )
+                                        else:
+                                            condition_parts.append(
+                                                f"n.info.{info_field} = {op_value}"
+                                            )
+                                    else:
+                                        if info_field in ("tags", "sources"):
+                                            condition_parts.append(
+                                                f"n.info.{info_field} = [{op_value}]"
+                                            )
+                                        else:
+                                            condition_parts.append(
+                                                f"n.info.{info_field} = {op_value}"
+                                            )
+                                else:
+                                    # Direct property access
+                                    if isinstance(op_value, str):
+                                        escaped_value = escape_cypher_string(op_value)
+                                        # For array fields, check if array exactly equals [value]
+                                        # For scalar fields, use =
+                                        if key in ("tags", "sources"):
+                                            condition_parts.append(f"n.{key} = ['{escaped_value}']")
+                                        else:
+                                            condition_parts.append(f"n.{key} = '{escaped_value}'")
+                                    elif isinstance(op_value, list):
+                                        # For array fields, format list as Cypher array
+                                        if key in ("tags", "sources"):
+                                            escaped_items = [
+                                                f"'{escape_cypher_string(str(item))}'"
+                                                for item in op_value
+                                            ]
+                                            array_str = "[" + ", ".join(escaped_items) + "]"
+                                            condition_parts.append(f"n.{key} = {array_str}")
+                                        else:
+                                            condition_parts.append(f"n.{key} = {op_value}")
+                                    else:
+                                        if key in ("tags", "sources"):
+                                            condition_parts.append(f"n.{key} = [{op_value}]")
+                                        else:
+                                            condition_parts.append(f"n.{key} = {op_value}")
+                            elif op == "contains":
+                                # Handle contains operator (for array fields)
+                                # Check if key starts with "info." prefix
+                                if key.startswith("info."):
+                                    info_field = key[5:]  # Remove "info." prefix
+                                    if isinstance(op_value, str):
+                                        escaped_value = escape_cypher_string(op_value)
+                                        condition_parts.append(
+                                            f"'{escaped_value}' IN n.info.{info_field}"
+                                        )
+                                    else:
+                                        condition_parts.append(f"{op_value} IN n.info.{info_field}")
+                                else:
+                                    # Direct property access
+                                    if isinstance(op_value, str):
+                                        escaped_value = escape_cypher_string(op_value)
+                                        condition_parts.append(f"'{escaped_value}' IN n.{key}")
+                                    else:
+                                        condition_parts.append(f"{op_value} IN n.{key}")
+                            elif op == "in":
+                                # Handle in operator (for checking if field value is in a list)
+                                # Supports array format: {"field": {"in": ["value1", "value2"]}}
+                                # Generates: n.field IN ['value1', 'value2'] or (n.field = 'value1' OR n.field = 'value2')
+                                if not isinstance(op_value, list):
+                                    raise ValueError(
+                                        f"in operator only supports array format. "
+                                        f"Use {{'{key}': {{'in': ['{op_value}']}}}} instead of {{'{key}': {{'in': '{op_value}'}}}}"
+                                    )
+                                # Check if key starts with "info." prefix
+                                if key.startswith("info."):
+                                    info_field = key[5:]  # Remove "info." prefix
+                                    # Build OR conditions for nested properties (Apache AGE compatibility)
+                                    if len(op_value) == 0:
+                                        # Empty list means no match
+                                        condition_parts.append("false")
+                                    elif len(op_value) == 1:
+                                        # Single value, use equality
+                                        item = op_value[0]
+                                        if isinstance(item, str):
+                                            escaped_value = escape_cypher_string(item)
+                                            condition_parts.append(
+                                                f"n.info.{info_field} = '{escaped_value}'"
+                                            )
+                                        else:
+                                            condition_parts.append(f"n.info.{info_field} = {item}")
+                                    else:
+                                        # Multiple values, use OR conditions instead of IN (Apache AGE compatibility)
+                                        or_conditions = []
+                                        for item in op_value:
+                                            if isinstance(item, str):
+                                                escaped_value = escape_cypher_string(item)
+                                                or_conditions.append(
+                                                    f"n.info.{info_field} = '{escaped_value}'"
+                                                )
+                                            else:
+                                                or_conditions.append(
+                                                    f"n.info.{info_field} = {item}"
+                                                )
+                                        if or_conditions:
+                                            condition_parts.append(
+                                                f"({' OR '.join(or_conditions)})"
+                                            )
+                                else:
+                                    # Direct property access
+                                    # Build array for IN clause or OR conditions
+                                    if len(op_value) == 0:
+                                        # Empty list means no match
+                                        condition_parts.append("false")
+                                    elif len(op_value) == 1:
+                                        # Single value, use equality
+                                        item = op_value[0]
+                                        if isinstance(item, str):
+                                            escaped_value = escape_cypher_string(item)
+                                            condition_parts.append(f"n.{key} = '{escaped_value}'")
+                                        else:
+                                            condition_parts.append(f"n.{key} = {item}")
+                                    else:
+                                        # Multiple values, use IN clause
+                                        escaped_items = [
+                                            f"'{escape_cypher_string(str(item))}'"
+                                            if isinstance(item, str)
+                                            else str(item)
+                                            for item in op_value
+                                        ]
+                                        array_str = "[" + ", ".join(escaped_items) + "]"
+                                        condition_parts.append(f"n.{key} IN {array_str}")
+                            elif op == "like":
+                                # Handle like operator (for fuzzy matching, similar to SQL LIKE '%value%')
+                                # Check if key starts with "info." prefix
+                                if key.startswith("info."):
+                                    info_field = key[5:]  # Remove "info." prefix
+                                    if isinstance(op_value, str):
+                                        escaped_value = escape_cypher_string(op_value)
+                                        condition_parts.append(
+                                            f"n.info.{info_field} CONTAINS '{escaped_value}'"
+                                        )
+                                    else:
+                                        condition_parts.append(
+                                            f"n.info.{info_field} CONTAINS {op_value}"
+                                        )
+                                else:
+                                    # Direct property access
+                                    if isinstance(op_value, str):
+                                        escaped_value = escape_cypher_string(op_value)
+                                        condition_parts.append(
+                                            f"n.{key} CONTAINS '{escaped_value}'"
+                                        )
+                                    else:
+                                        condition_parts.append(f"n.{key} CONTAINS {op_value}")
+                    # Check if key starts with "info." prefix (for simple equality)
+                    elif key.startswith("info."):
+                        info_field = key[5:]
+                        if isinstance(value, str):
+                            escaped_value = escape_cypher_string(value)
+                            condition_parts.append(f"n.info.{info_field} = '{escaped_value}'")
+                        else:
+                            condition_parts.append(f"n.info.{info_field} = {value}")
+                    else:
+                        # Direct property access (simple equality)
+                        if isinstance(value, str):
+                            escaped_value = escape_cypher_string(value)
+                            condition_parts.append(f"n.{key} = '{escaped_value}'")
+                        else:
+                            condition_parts.append(f"n.{key} = {value}")
+                return " AND ".join(condition_parts)
+
+            if isinstance(filter, dict):
+                if "or" in filter:
+                    or_conditions = []
+                    for condition in filter["or"]:
+                        if isinstance(condition, dict):
+                            condition_str = build_cypher_filter_condition(condition)
+                            if condition_str:
+                                or_conditions.append(f"({condition_str})")
+                    if or_conditions:
+                        filter_where_clause = " AND " + f"({' OR '.join(or_conditions)})"
+
+                elif "and" in filter:
+                    and_conditions = []
+                    for condition in filter["and"]:
+                        if isinstance(condition, dict):
+                            condition_str = build_cypher_filter_condition(condition)
+                            if condition_str:
+                                and_conditions.append(f"({condition_str})")
+                    if and_conditions:
+                        filter_where_clause = " AND " + " AND ".join(and_conditions)
+                else:
+                    # Handle simple dict without "and" or "or" (e.g., {"id": "xxx"})
+                    condition_str = build_cypher_filter_condition(filter)
+                    if condition_str:
+                        filter_where_clause = " AND " + condition_str
+
+        return filter_where_clause
+
+    def _build_filter_conditions_sql(
+        self,
+        filter: dict | None,
+    ) -> list[str]:
+        """
+        Build filter conditions for SQL queries.
+
+        Args:
+            filter: Filter dictionary with "or" or "and" logic
+
+        Returns:
+            List of filter WHERE clause strings (empty list if no filter)
+        """
+        filter_conditions = []
+        filter = self.parse_filter(filter)
+        if filter:
+            # Helper function to escape string value for SQL
+            def escape_sql_string(value: str) -> str:
+                """Escape single quotes in SQL string."""
+                return value.replace("'", "''")
+
+            # Helper function to build a single filter condition
+            def build_filter_condition(condition_dict: dict) -> str:
+                """Build a WHERE condition for a single filter item."""
+                condition_parts = []
+                for key, value in condition_dict.items():
+                    # Check if value is a dict with comparison operators (gt, lt, gte, lte, =, contains)
+                    if isinstance(value, dict):
+                        # Handle comparison operators: gt, lt, gte, lte, =, contains
+                        for op, op_value in value.items():
+                            if op in ("gt", "lt", "gte", "lte"):
+                                # Map operator to SQL operator
+                                sql_op_map = {"gt": ">", "lt": "<", "gte": ">=", "lte": "<="}
+                                sql_op = sql_op_map[op]
+
+                                # Check if key starts with "info." prefix (for nested fields like info.A, info.B)
+                                if key.startswith("info."):
+                                    # Nested field access: properties->'info'->'field_name'
+                                    info_field = key[5:]  # Remove "info." prefix
+                                    if isinstance(op_value, str):
+                                        escaped_value = escape_sql_string(op_value)
+                                        condition_parts.append(
+                                            f"ag_catalog.agtype_access_operator(VARIADIC ARRAY[properties, '\"info\"'::ag_catalog.agtype, '\"{info_field}\"'::ag_catalog.agtype]) {sql_op} '\"{escaped_value}\"'::agtype"
+                                        )
+                                    else:
+                                        condition_parts.append(
+                                            f"ag_catalog.agtype_access_operator(VARIADIC ARRAY[properties, '\"info\"'::ag_catalog.agtype, '\"{info_field}\"'::ag_catalog.agtype]) {sql_op} {op_value}::agtype"
+                                        )
+                                else:
+                                    # Direct property access (e.g., "created_at" is directly in properties, not in properties.info)
+                                    if isinstance(op_value, str):
+                                        escaped_value = escape_sql_string(op_value)
+                                        condition_parts.append(
+                                            f"ag_catalog.agtype_access_operator(properties, '\"{key}\"'::agtype) {sql_op} '\"{escaped_value}\"'::agtype"
+                                        )
+                                    else:
+                                        condition_parts.append(
+                                            f"ag_catalog.agtype_access_operator(properties, '\"{key}\"'::agtype) {sql_op} {op_value}::agtype"
+                                        )
+                            elif op == "=":
+                                # Handle equality operator
+                                # For array fields, = means exact match of the entire array (e.g., tags = ['test:zdy'] or tags = ['mode:fast', 'test:zdy'])
+                                # For scalar fields, = means equality
+                                # Check if key starts with "info." prefix
+                                if key.startswith("info."):
+                                    info_field = key[5:]  # Remove "info." prefix
+                                    if isinstance(op_value, str):
+                                        escaped_value = escape_sql_string(op_value)
+                                        # For array fields, check if array exactly equals [value]
+                                        # For scalar fields, use =
+                                        if info_field in ("tags", "sources"):
+                                            condition_parts.append(
+                                                f"ag_catalog.agtype_access_operator(VARIADIC ARRAY[properties, '\"info\"'::ag_catalog.agtype, '\"{info_field}\"'::ag_catalog.agtype]) = '[\"{escaped_value}\"]'::agtype"
+                                            )
+                                        else:
+                                            condition_parts.append(
+                                                f"ag_catalog.agtype_access_operator(VARIADIC ARRAY[properties, '\"info\"'::ag_catalog.agtype, '\"{info_field}\"'::ag_catalog.agtype]) = '\"{escaped_value}\"'::agtype"
+                                            )
+                                    elif isinstance(op_value, list):
+                                        # For array fields, format list as JSON array string
+                                        if info_field in ("tags", "sources"):
+                                            escaped_items = [
+                                                escape_sql_string(str(item)) for item in op_value
+                                            ]
+                                            json_array = json.dumps(escaped_items)
+                                            condition_parts.append(
+                                                f"ag_catalog.agtype_access_operator(VARIADIC ARRAY[properties, '\"info\"'::ag_catalog.agtype, '\"{info_field}\"'::ag_catalog.agtype]) = '{json_array}'::agtype"
+                                            )
+                                        else:
+                                            condition_parts.append(
+                                                f"ag_catalog.agtype_access_operator(VARIADIC ARRAY[properties, '\"info\"'::ag_catalog.agtype, '\"{info_field}\"'::ag_catalog.agtype]) = {op_value}::agtype"
+                                            )
+                                    else:
+                                        if info_field in ("tags", "sources"):
+                                            condition_parts.append(
+                                                f"ag_catalog.agtype_access_operator(VARIADIC ARRAY[properties, '\"info\"'::ag_catalog.agtype, '\"{info_field}\"'::ag_catalog.agtype]) = '[{op_value}]'::agtype"
+                                            )
+                                        else:
+                                            condition_parts.append(
+                                                f"ag_catalog.agtype_access_operator(VARIADIC ARRAY[properties, '\"info\"'::ag_catalog.agtype, '\"{info_field}\"'::ag_catalog.agtype]) = {op_value}::agtype"
+                                            )
+                                else:
+                                    # Direct property access
+                                    if isinstance(op_value, str):
+                                        escaped_value = escape_sql_string(op_value)
+                                        # For array fields, check if array exactly equals [value]
+                                        # For scalar fields, use =
+                                        if key in ("tags", "sources"):
+                                            condition_parts.append(
+                                                f"ag_catalog.agtype_access_operator(properties, '\"{key}\"'::agtype) = '[\"{escaped_value}\"]'::agtype"
+                                            )
+                                        else:
+                                            condition_parts.append(
+                                                f"ag_catalog.agtype_access_operator(properties, '\"{key}\"'::agtype) = '\"{escaped_value}\"'::agtype"
+                                            )
+                                    elif isinstance(op_value, list):
+                                        # For array fields, format list as JSON array string
+                                        if key in ("tags", "sources"):
+                                            escaped_items = [
+                                                escape_sql_string(str(item)) for item in op_value
+                                            ]
+                                            json_array = json.dumps(escaped_items)
+                                            condition_parts.append(
+                                                f"ag_catalog.agtype_access_operator(properties, '\"{key}\"'::agtype) = '{json_array}'::agtype"
+                                            )
+                                        else:
+                                            condition_parts.append(
+                                                f"ag_catalog.agtype_access_operator(properties, '\"{key}\"'::agtype) = {op_value}::agtype"
+                                            )
+                                    else:
+                                        if key in ("tags", "sources"):
+                                            condition_parts.append(
+                                                f"ag_catalog.agtype_access_operator(properties, '\"{key}\"'::agtype) = '[{op_value}]'::agtype"
+                                            )
+                                        else:
+                                            condition_parts.append(
+                                                f"ag_catalog.agtype_access_operator(properties, '\"{key}\"'::agtype) = {op_value}::agtype"
+                                            )
+                            elif op == "contains":
+                                # Handle contains operator (for string fields only)
+                                # Check if agtype contains value (using @> operator)
+                                if not isinstance(op_value, str):
+                                    raise ValueError(
+                                        f"contains operator only supports string format. "
+                                        f"Use {{'{key}': {{'contains': '{op_value}'}}}} instead of {{'{key}': {{'contains': {op_value}}}}}"
+                                    )
+                                # Check if key starts with "info." prefix
+                                if key.startswith("info."):
+                                    info_field = key[5:]  # Remove "info." prefix
+                                    # String contains: use @> operator for agtype contains
+                                    escaped_value = escape_sql_string(op_value)
+                                    condition_parts.append(
+                                        f"ag_catalog.agtype_access_operator(VARIADIC ARRAY[properties, '\"info\"'::ag_catalog.agtype, '\"{info_field}\"'::ag_catalog.agtype]) @> '\"{escaped_value}\"'::agtype"
+                                    )
+                                else:
+                                    # Direct property access
+                                    # String contains: use @> operator for agtype contains
+                                    escaped_value = escape_sql_string(op_value)
+                                    condition_parts.append(
+                                        f"ag_catalog.agtype_access_operator(properties, '\"{key}\"'::agtype) @> '\"{escaped_value}\"'::agtype"
+                                    )
+                            elif op == "like":
+                                # Handle like operator (for fuzzy matching, similar to SQL LIKE '%value%')
+                                # Check if key starts with "info." prefix
+                                if key.startswith("info."):
+                                    info_field = key[5:]  # Remove "info." prefix
+                                    if isinstance(op_value, str):
+                                        # Escape SQL special characters for LIKE: % and _ need to be escaped
+                                        escaped_value = (
+                                            escape_sql_string(op_value)
+                                            .replace("%", "\\%")
+                                            .replace("_", "\\_")
+                                        )
+                                        condition_parts.append(
+                                            f"ag_catalog.agtype_access_operator(VARIADIC ARRAY[properties, '\"info\"'::ag_catalog.agtype, '\"{info_field}\"'::ag_catalog.agtype])::text LIKE '%{escaped_value}%'"
+                                        )
+                                    else:
+                                        condition_parts.append(
+                                            f"ag_catalog.agtype_access_operator(VARIADIC ARRAY[properties, '\"info\"'::ag_catalog.agtype, '\"{info_field}\"'::ag_catalog.agtype])::text LIKE '%{op_value}%'"
+                                        )
+                                else:
+                                    # Direct property access
+                                    if isinstance(op_value, str):
+                                        # Escape SQL special characters for LIKE: % and _ need to be escaped
+                                        escaped_value = (
+                                            escape_sql_string(op_value)
+                                            .replace("%", "\\%")
+                                            .replace("_", "\\_")
+                                        )
+                                        condition_parts.append(
+                                            f"ag_catalog.agtype_access_operator(properties, '\"{key}\"'::agtype)::text LIKE '%{escaped_value}%'"
+                                        )
+                                    else:
+                                        condition_parts.append(
+                                            f"ag_catalog.agtype_access_operator(properties, '\"{key}\"'::agtype)::text LIKE '%{op_value}%'"
+                                        )
+                    # Check if key starts with "info." prefix (for simple equality)
+                    elif key.startswith("info."):
+                        # Extract the field name after "info."
+                        info_field = key[5:]  # Remove "info." prefix (5 characters)
+                        if isinstance(value, str):
+                            escaped_value = escape_sql_string(value)
+                            condition_parts.append(
+                                f"ag_catalog.agtype_access_operator(VARIADIC ARRAY[properties, '\"info\"'::ag_catalog.agtype, '\"{info_field}\"'::ag_catalog.agtype]) = '\"{escaped_value}\"'::agtype"
+                            )
+                        else:
+                            condition_parts.append(
+                                f"ag_catalog.agtype_access_operator(VARIADIC ARRAY[properties, '\"info\"'::ag_catalog.agtype, '\"{info_field}\"'::ag_catalog.agtype]) = '\"{value}\"'::agtype"
+                            )
+                    else:
+                        # Direct property access (simple equality)
+                        if isinstance(value, str):
+                            escaped_value = escape_sql_string(value)
+                            condition_parts.append(
+                                f"ag_catalog.agtype_access_operator(properties, '\"{key}\"'::agtype) = '\"{escaped_value}\"'::agtype"
+                            )
+                        else:
+                            condition_parts.append(
+                                f"ag_catalog.agtype_access_operator(properties, '\"{key}\"'::agtype) = {value}::agtype"
+                            )
+                return " AND ".join(condition_parts)
+
+            # Process filter structure
+            if isinstance(filter, dict):
+                if "or" in filter:
+                    # OR logic: at least one condition must match
+                    or_conditions = []
+                    for condition in filter["or"]:
+                        if isinstance(condition, dict):
+                            condition_str = build_filter_condition(condition)
+                            if condition_str:
+                                or_conditions.append(f"({condition_str})")
+                    if or_conditions:
+                        filter_conditions.append(f"({' OR '.join(or_conditions)})")
+
+                elif "and" in filter:
+                    # AND logic: all conditions must match
+                    for condition in filter["and"]:
+                        if isinstance(condition, dict):
+                            condition_str = build_filter_condition(condition)
+                            if condition_str:
+                                filter_conditions.append(f"({condition_str})")
+                else:
+                    # Handle simple dict without "and" or "or" (e.g., {"id": "xxx"})
+                    condition_str = build_filter_condition(filter)
+                    if condition_str:
+                        filter_conditions.append(condition_str)
+
+        return filter_conditions
+
+    def parse_filter(
+        self,
+        filter_dict: dict | None = None,
+    ):
+        if filter_dict is None:
+            return None
+        full_fields = {
+            "id",
+            "key",
+            "tags",
+            "type",
+            "usage",
+            "memory",
+            "status",
+            "sources",
+            "user_id",
+            "graph_id",
+            "user_name",
+            "background",
+            "confidence",
+            "created_at",
+            "session_id",
+            "updated_at",
+            "memory_type",
+            "node_type",
+            "info",
+            "source",
+        }
+
+        def process_condition(condition):
+            if not isinstance(condition, dict):
+                return condition
+
+            new_condition = {}
+
+            for key, value in condition.items():
+                if key.lower() in ["or", "and"]:
+                    if isinstance(value, list):
+                        processed_items = []
+                        for item in value:
+                            if isinstance(item, dict):
+                                processed_item = {}
+                                for item_key, item_value in item.items():
+                                    if item_key not in full_fields and not item_key.startswith(
+                                        "info."
+                                    ):
+                                        new_item_key = f"info.{item_key}"
+                                    else:
+                                        new_item_key = item_key
+                                    processed_item[new_item_key] = item_value
+                                processed_items.append(processed_item)
+                            else:
+                                processed_items.append(item)
+                        new_condition[key] = processed_items
+                    else:
+                        new_condition[key] = value
+                else:
+                    if key not in full_fields and not key.startswith("info."):
+                        new_key = f"info.{key}"
+                    else:
+                        new_key = key
+
+                    new_condition[new_key] = value
+
+            return new_condition
+
+        return process_condition(filter_dict)
+
+    @timed
+    def delete_node_by_prams(
+        self,
+        writable_cube_ids: list[str],
+        memory_ids: list[str] | None = None,
+        file_ids: list[str] | None = None,
+        filter: dict | None = None,
+    ) -> int:
+        """
+        Delete nodes by memory_ids, file_ids, or filter.
+
+        Args:
+            writable_cube_ids (list[str]): List of cube IDs (user_name) to filter nodes. Required parameter.
+            memory_ids (list[str], optional): List of memory node IDs to delete.
+            file_ids (list[str], optional): List of file node IDs to delete.
+            filter (dict, optional): Filter dictionary to query matching nodes for deletion.
+
+        Returns:
+            int: Number of nodes deleted.
+        """
+        logger.info(
+            f"[delete_node_by_prams] memory_ids: {memory_ids}, file_ids: {file_ids}, filter: {filter}, writable_cube_ids: {writable_cube_ids}"
+        )
+        print(
+            f"[delete_node_by_prams] memory_ids: {memory_ids}, file_ids: {file_ids}, filter: {filter}, writable_cube_ids: {writable_cube_ids}"
+        )
+
+        # Validate writable_cube_ids
+        if not writable_cube_ids or len(writable_cube_ids) == 0:
+            raise ValueError("writable_cube_ids is required and cannot be empty")
+
+        # Build user_name condition from writable_cube_ids (OR relationship - match any cube_id)
+        user_name_conditions = []
+        for cube_id in writable_cube_ids:
+            # Escape single quotes in cube IDs
+            escaped_cube_id = str(cube_id).replace("'", "\\'")
+            user_name_conditions.append(f"n.user_name = '{escaped_cube_id}'")
+
+        # Build WHERE conditions separately for memory_ids and file_ids
+        where_conditions = []
+
+        # Handle memory_ids: query n.id
+        if memory_ids and len(memory_ids) > 0:
+            memory_id_conditions = []
+            for node_id in memory_ids:
+                # Escape single quotes in node IDs
+                escaped_id = str(node_id).replace("'", "\\'")
+                memory_id_conditions.append(f"'{escaped_id}'")
+            if memory_id_conditions:
+                where_conditions.append(f"n.id IN [{', '.join(memory_id_conditions)}]")
+
+        # Handle file_ids: query n.file_ids field
+        # All file_ids must be present in the array field (AND relationship)
+        if file_ids and len(file_ids) > 0:
+            file_id_and_conditions = []
+            for file_id in file_ids:
+                # Escape single quotes in file IDs
+                escaped_id = str(file_id).replace("'", "\\'")
+                # Check if this file_id is in the file_ids array field
+                file_id_and_conditions.append(f"'{escaped_id}' IN n.file_ids")
+            if file_id_and_conditions:
+                # Use AND to require all file_ids to be present
+                where_conditions.append(f"({' OR '.join(file_id_and_conditions)})")
+
+        # Query nodes by filter if provided
+        filter_ids = set()
+        if filter:
+            # Parse filter to validate and transform field names (e.g., add "info." prefix if needed)
+            parsed_filter = self.parse_filter(filter)
+            if parsed_filter:
+                # Use get_by_metadata with empty filters list and parsed filter
+                filter_ids = set(
+                    self.get_by_metadata(
+                        filters=[],
+                        user_name=None,
+                        filter=parsed_filter,
+                        knowledgebase_ids=writable_cube_ids,
+                    )
+                )
+            else:
+                logger.warning(
+                    "[delete_node_by_prams] Filter parsed to None, skipping filter query"
+                )
+
+        # If filter returned IDs, add condition for them
+        if filter_ids:
+            filter_id_conditions = []
+            for node_id in filter_ids:
+                # Escape single quotes in node IDs
+                escaped_id = str(node_id).replace("'", "\\'")
+                filter_id_conditions.append(f"'{escaped_id}'")
+            if filter_id_conditions:
+                where_conditions.append(f"n.id IN [{', '.join(filter_id_conditions)}]")
+
+        # If no conditions (except user_name), return 0
+        if not where_conditions:
+            logger.warning(
+                "[delete_node_by_prams] No nodes to delete (no memory_ids, file_ids, or filter provided)"
+            )
+            return 0
+
+        # Build WHERE clause
+        # First, combine memory_ids, file_ids, and filter conditions with OR (any condition can match)
+        data_conditions = " OR ".join([f"({cond})" for cond in where_conditions])
+
+        # Then, combine with user_name condition using AND (must match user_name AND one of the data conditions)
+        user_name_where = " OR ".join(user_name_conditions)
+        ids_where = f"({user_name_where}) AND ({data_conditions})"
+
+        # Use Cypher DELETE query
+        # First count matching nodes to get accurate count
+        count_query = f"""
+                SELECT * FROM cypher('{self.db_name}_graph', $$
+                MATCH (n:Memory)
+                WHERE {ids_where}
+                RETURN count(n) AS node_count
+                $$) AS (node_count agtype)
+            """
+        logger.info(f"[delete_node_by_prams] count_query: {count_query}")
+        print(f"[delete_node_by_prams] count_query: {count_query}")
+
+        # Then delete nodes
+        delete_query = f"""
+                SELECT * FROM cypher('{self.db_name}_graph', $$
+                MATCH (n:Memory)
+                WHERE {ids_where}
+                DETACH DELETE n
+                $$) AS (result agtype)
+            """
+
+        logger.info(
+            f"[delete_node_by_prams] Deleting nodes - memory_ids: {memory_ids}, file_ids: {file_ids}, filter: {filter}"
+        )
+        print(
+            f"[delete_node_by_prams] Deleting nodes - memory_ids: {memory_ids}, file_ids: {file_ids}, filter: {filter}"
+        )
+        logger.info(f"[delete_node_by_prams] delete_query: {delete_query}")
+        print(f"[delete_node_by_prams] delete_query: {delete_query}")
+
+        conn = self._get_connection()
+        deleted_count = 0
+        try:
+            with conn.cursor() as cursor:
+                # Count nodes before deletion
+                cursor.execute(count_query)
+                count_results = cursor.fetchall()
+                expected_count = 0
+                if count_results and len(count_results) > 0:
+                    count_str = str(count_results[0][0])
+                    count_str = count_str.strip('"').strip("'")
+                    expected_count = int(count_str) if count_str.isdigit() else 0
+
+                # Delete nodes
+                cursor.execute(delete_query)
+                # Use the count from before deletion as the actual deleted count
+                deleted_count = expected_count
+                conn.commit()
+        except Exception as e:
+            logger.error(f"[delete_node_by_prams] Failed to delete nodes: {e}", exc_info=True)
+            conn.rollback()
+            raise
+        finally:
+            self._return_connection(conn)
+
+        logger.info(f"[delete_node_by_prams] Successfully deleted {deleted_count} nodes")
+        return deleted_count
