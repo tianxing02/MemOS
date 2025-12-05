@@ -4,6 +4,7 @@ import sys
 import time
 
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
@@ -189,6 +190,7 @@ def run_ingest_and_eval(
     questions_file: str | Path | None = None,
     top_k: int = 15,
     lib: str = "supermemory",
+    workers: int = 8,
 ) -> None:
     client, oai_client, memos_context_template, add_images_context, get_images = _get_clients()
     if questions_file and Path(questions_file).exists():
@@ -216,94 +218,140 @@ def run_ingest_and_eval(
         results: list[dict] = list(existing)
         ingested_doc_ids: set[str] = set(completed_docs)
 
+        base_dir = Path(ppt_root)
+        all_md_files: list[Path] = []
+        if base_dir.exists():
+            all_md_files = list(base_dir.rglob("*.md"))
+
+        def _find_md_for_doc(doc_id_val: str) -> Path | None:
+            stem = Path(doc_id_val).stem.lower()
+            name = doc_id_val.lower()
+            for md in all_md_files:
+                pstr = str(md).lower()
+                if (stem and stem in pstr) or (name and name in pstr):
+                    return md
+            return None
+
+        to_ingest: list[tuple[str, Path]] = []
+        for did in doc_list:
+            if did and did not in ingested_doc_ids:
+                mdp = _find_md_for_doc(did)
+                if mdp is not None:
+                    to_ingest.append((did, mdp))
+                else:
+                    print(f"[Skip] markdown not found for doc_id={did}")
+
+        if to_ingest:
+            print(f"[Ingest-Concurrent] tasks={len(to_ingest)} from {ppt_root}")
+
+            def _ingest_one(doc_id_local: str, md_path_local: Path, lib_local: str = lib) -> str:
+                user_id_local = doc_id_local
+                c_local = client if lib_local == "memos" else _get_lib_client(lib_local)
+                add_context(c_local, user_id_local, md_path_local, lib=lib_local)
+                return doc_id_local
+
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = [executor.submit(_ingest_one, did, mdp) for did, mdp in to_ingest]
+                for f in as_completed(futures):
+                    try:
+                        done_id = f.result()
+                        ingested_doc_ids.add(done_id)
+                    except Exception as e:
+                        print(f"[Add-Error] {e}")
+
         for doc_id in doc_list:
             if not doc_id:
                 continue
             print(f"\n===== [Doc] {doc_id} =====")
             user_id = doc_id
 
-            # Locate markdown under ppt_test_result for this doc_id
-            md_path = None
-            base = Path(ppt_root)
-            if base.exists():
-                stem = Path(doc_id).stem.lower()
-                name = doc_id.lower()
-                for md in base.rglob("*.md"):
-                    pstr = str(md).lower()
-                    if (stem and stem in pstr) or (name and name in pstr):
-                        md_path = md
-                        break
-
-            # Ingest markdown once per doc
-            if doc_id not in ingested_doc_ids:
-                if md_path is not None:
-                    c = client if lib == "memos" else _get_lib_client(lib)
-                    add_context(c, user_id, md_path, lib=lib)
-                else:
-                    print(f"[Skip] markdown not found for doc_id={doc_id}")
-                ingested_doc_ids.add(doc_id)
-
-            # Evaluate all samples for this doc_id
             doc_samples = [s for s in data if str(s.get("doc_id") or "").strip() == doc_id]
-            for item in doc_samples:
-                question = item["question"]
-                q_norm = " ".join(str(question).split())
-                if (doc_id, q_norm) in completed_pairs:
-                    print(f"[Skip] already done doc_id={doc_id} question={question[:60]}...")
-                    continue
-                if lib == "memos":
+
+            def _process_item(
+                item: dict,
+                doc_id_local: str = doc_id,
+                user_id_local: str = user_id,
+                lib_local: str = lib,
+            ) -> dict:
+                q = item["question"]
+                q_norm_local = " ".join(str(q).split())
+                if (doc_id_local, q_norm_local) in completed_pairs:
+                    return {"skip": True}
+                if lib_local == "memos":
                     memories, images = memos_search(
-                        client, get_images, user_id, question, top_k=top_k
+                        client, get_images, user_id_local, q, top_k=top_k
                     )
-                elif lib == "mem0":
-                    c = _get_lib_client(lib)
-                    memories, images = mem0_search(c, get_images, user_id, question, top_k=top_k)
-                elif lib == "supermemory":
-                    c = _get_lib_client(lib)
+                elif lib_local == "mem0":
+                    c_local = _get_lib_client(lib_local)
+                    memories, images = mem0_search(
+                        c_local, get_images, user_id_local, q, top_k=top_k
+                    )
+                elif lib_local == "supermemory":
+                    c_local = _get_lib_client(lib_local)
                     memories, images = supermemory_search(
-                        c, get_images, user_id, question, top_k=top_k
+                        c_local, get_images, user_id_local, q, top_k=top_k
                     )
-                response = multimodal_answer(
-                    add_images_context, oai_client, memories, question, images
-                )
+                else:
+                    memories, images = [], []
+                resp = multimodal_answer(add_images_context, oai_client, memories, q, images)
                 with open(
                     Path("evaluation/scripts/mmlongbench/eval/prompt_for_answer_extraction.md"),
                     encoding="utf-8",
                 ) as f:
-                    prompt = f.read()
-                extracted_res = extract_answer(question, response, prompt)
+                    prompt_local = f.read()
+                extracted_res_local = extract_answer(q, resp, prompt_local)
                 try:
-                    pred_ans = (
-                        extracted_res.split("Answer format:")[0]
+                    pred_ans_local = (
+                        extracted_res_local.split("Answer format:")[0]
                         .split("Extracted answer:")[1]
                         .strip()
                     )
                 except Exception:
-                    pred_ans = response.strip()
-                score = eval_score(item.get("answer"), pred_ans, item.get("answer_format", "Str"))
-                print("[images used]:", images)
-                print(f"[QA] doc_id={doc_id} images={len(images)} score={score}")
-
-                sample_res = dict(item)
-                sample_res["response"] = response
-                sample_res["extracted_res"] = extracted_res
-                sample_res["pred"] = pred_ans
-                sample_res["score"] = score
-                results.append(sample_res)
-                completed_pairs.add((doc_id, q_norm))
-
-                print("[Question]:", question)
-                print("[Answer]:", pred_ans)
-                print("[Ground truth]:", item.get("answer"))
-                print("[Score]:", score)
-                out_json = Path("evaluation/data/mmlongbench/test_results.json")
-                out_json.parent.mkdir(parents=True, exist_ok=True)
-                out_json.write_text(
-                    json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8"
+                    pred_ans_local = resp.strip()
+                score_local = eval_score(
+                    item.get("answer"), pred_ans_local, item.get("answer_format", "Str")
                 )
-                acc, f1 = eval_acc_and_f1(results)
-                total_target = sum(1 for s in data if str(s.get("doc_id") or "") in doc_list)
-                print(f"[Metric] acc={acc} f1={f1} processed={len(results)}/{total_target}")
+                sr = dict(item)
+                sr["response"] = resp
+                sr["extracted_res"] = extracted_res_local
+                sr["pred"] = pred_ans_local
+                sr["score"] = score_local
+                sr["q_norm"] = q_norm_local
+                sr["images"] = images
+                return sr
+
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = [executor.submit(_process_item, it) for it in doc_samples]
+                for f in as_completed(futures):
+                    try:
+                        res = f.result()
+                        if res.get("skip"):
+                            continue
+                        print("[images used]:", res.get("images") or [])
+                        print(
+                            f"[QA] doc_id={doc_id} images={len(res.get('images') or [])} score={res.get('score')}"
+                        )
+                        results.append(
+                            {k: v for k, v in res.items() if k not in ("q_norm", "images")}
+                        )
+                        completed_pairs.add((doc_id, res.get("q_norm") or ""))
+
+                        print("[Question]:", res.get("question"))
+                        print("[Answer]:", res.get("pred"))
+                        print("[Ground truth]:", res.get("answer"))
+                        print("[Score]:", res.get("score"))
+                        out_json = Path("evaluation/data/mmlongbench/test_results.json")
+                        out_json.parent.mkdir(parents=True, exist_ok=True)
+                        out_json.write_text(
+                            json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8"
+                        )
+                        acc, f1 = eval_acc_and_f1(results)
+                        total_target = sum(
+                            1 for s in data if str(s.get("doc_id") or "") in doc_list
+                        )
+                        print(f"[Metric] acc={acc} f1={f1} processed={len(results)}/{total_target}")
+                    except Exception as e:
+                        print(f"[Error] processing item: {e}")
 
         report_path = Path("evaluation/data/mmlongbench/test_results_report.txt")
         show_results(results, show_path=str(report_path))
