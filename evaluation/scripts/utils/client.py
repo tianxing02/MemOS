@@ -156,8 +156,6 @@ class MemosApiClient:
                     "conversation_id": conv_id,
                 }
             )
-            print(payload)
-            print(self.headers)
             response = requests.request("POST", url, data=payload, headers=self.headers)
             assert response.status_code == 200, response.text
             assert json.loads(response.text)["message"] == "Memory added successfully", (
