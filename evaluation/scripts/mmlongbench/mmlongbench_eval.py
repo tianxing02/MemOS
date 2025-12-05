@@ -5,11 +5,13 @@ import time
 
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 from pathlib import Path
 
 from dotenv import load_dotenv
 from eval.eval_score import eval_acc_and_f1, eval_score, show_results  # type: ignore
 from eval.extract_answer import extract_answer  # type: ignore
+from langchain_text_splitters import Language, RecursiveCharacterTextSplitter
 from openai import OpenAI
 
 
@@ -47,6 +49,20 @@ def _get_clients():
     return memos_client, openai_client, MEMOS_CONTEXT_TEMPLATE, add_images_context, get_images
 
 
+def _get_lib_client(lib: str):
+    if lib == "mem0":
+        from utils.client import Mem0Client  # type: ignore
+
+        return Mem0Client(enable_graph=False)
+    if lib == "supermemory":
+        from utils.client import SupermemoryClient  # type: ignore
+
+        return SupermemoryClient()
+    from utils.client import MemosApiClient  # type: ignore
+
+    return MemosApiClient()
+
+
 def _load_existing_results():
     completed_pairs: set[tuple[str, str]] = set()
     completed_docs: set[str] = set()
@@ -70,12 +86,14 @@ def _load_existing_results():
     return existing, completed_pairs, completed_docs
 
 
-def register_and_add_markdown(client, user_id: str, md_path: Path) -> None:
-    client.register_user(user_id=user_id, user_name=user_id, mem_cube_id=user_id)
+def add_context(client, user_id: str, md_path: Path, lib) -> None:
     # Read markdown and add per paragraph
     text = md_path.read_text(encoding="utf-8", errors="ignore")
-    # Simple paragraph split: double newline blocks
-    paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
+    # Chunk by langchain text splitters (align with sentence_chunker style)
+    chunker = RecursiveCharacterTextSplitter.from_language(
+        language=Language.PYTHON, chunk_size=512, chunk_overlap=128
+    )
+    paragraphs = [p for p in chunker.split_text(text) if p.strip()]
     print(f"[Ingest] doc_id={user_id} paragraphs={len(paragraphs)} path={md_path}")
 
     def _add_one(content: str) -> None:
@@ -89,40 +107,44 @@ def register_and_add_markdown(client, user_id: str, md_path: Path) -> None:
                 else:
                     raise
 
-    with ThreadPoolExecutor(max_workers=8) as executor:
-        futures = {executor.submit(_add_one, p): i for i, p in enumerate(paragraphs)}
-        success_count = 0
-        failure_count = 0
-        for f in as_completed(futures):
-            try:
-                f.result()
-                success_count += 1
-            except Exception:
-                failure_count += 1
-    print(
-        f"[Add] user={user_id} success={success_count} fail={failure_count} total={len(paragraphs)}"
-    )
+    if lib == "memos":
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            futures = {executor.submit(_add_one, p): i for i, p in enumerate(paragraphs)}
+            success_count = 0
+            failure_count = 0
+            for f in as_completed(futures):
+                try:
+                    f.result()
+                    success_count += 1
+                except Exception:
+                    failure_count += 1
+        print(
+            f"[Add] user={user_id} success={success_count} fail={failure_count} total={len(paragraphs)}"
+        )
+    elif lib == "mem0":
+        messages = [{"role": "user", "content": p} for p in paragraphs]
+        ts = int(time.time())
+        try:
+            client.add(messages=messages, user_id=user_id, timestamp=ts, batch_size=10)
+            print(f"[Add-mem0] user={user_id} total={len(messages)}")
+        except Exception as e:
+            print(f"[Add-mem0] failed: {e}")
+    elif lib == "supermemory":
+        iso = datetime.utcnow().isoformat() + "Z"
+        messages = [{"role": "user", "content": p, "chat_time": iso} for p in paragraphs]
+        try:
+            client.add(messages=messages, user_id=user_id)
+            print(f"[Add-supermemory] user={user_id} total={len(messages)}")
+        except Exception as e:
+            print(f"[Add-supermemory] failed: {e}")
 
 
 def memos_search(
-    client, memos_context_template, get_images, user_id: str, query: str, top_k: int = 15
-) -> tuple[str, list[str]]:
-    results = None
-    for attempt in range(max_retries):
-        try:
-            results = client.search(query=query, user_id=user_id, top_k=top_k)
-            break
-        except Exception:
-            if attempt < max_retries - 1:
-                time.sleep(2**attempt)
-            else:
-                raise
+    client, get_images, user_id: str, query: str, top_k: int = 15
+) -> tuple[list[str], list[str]]:
+    results = client.search(query=query, user_id=user_id, top_k=top_k)
     memories = results["text_mem"][0]["memories"]
     mem_texts = [m["memory"] for m in memories]
-    for memory in mem_texts[:5]:
-        print(memory)
-    context = "\n".join(mem_texts) + f"\n{results.get('pref_string', '')}"
-    context = memos_context_template.format(user_id=user_id, memories=context)
 
     # Collect possible image paths from memory texts (and any source content if present)
     sources_texts: list[str] = []
@@ -137,14 +159,41 @@ def memos_search(
     print(
         f"[Search] user={user_id} top_k={top_k} memories={len(memories)} images={len(image_paths)}"
     )
-    return context, image_paths
+    return mem_texts, image_paths
+
+
+def mem0_search(
+    client, get_images, user_id: str, query: str, top_k: int = 15
+) -> tuple[list[str], list[str]]:
+    res = client.search(query, user_id, top_k)
+    results = res.get("results", [])
+    mem_texts = [m.get("memory", "") for m in results if m.get("memory")]
+    image_paths = get_images(mem_texts)
+    print(
+        f"[Search] user={user_id} top_k={top_k} memories={len(results)} images={len(image_paths)}"
+    )
+    return mem_texts, image_paths
+
+
+def supermemory_search(
+    client, get_images, user_id: str, query: str, top_k: int = 15
+) -> tuple[list[str], list[str]]:
+    chunk_list = client.search(query, user_id, top_k)
+    image_paths = get_images(chunk_list)
+    print(
+        f"[Search] user={user_id} top_k={top_k} memories={len(chunk_list)} images={len(image_paths)}"
+    )
+    return chunk_list, image_paths
 
 
 def multimodal_answer(
-    add_images_context, oai_client, context: str, question: str, image_paths: list[str]
+    add_images_context, oai_client, memories: list[str], question: str, image_paths: list[str]
 ) -> str:
-    # Build messages with multimodal user content (align with eval_docs: use question only, no extra system prompt)
-    messages = [{"role": "user", "content": question + "\n\n" + context}]
+    from memos.mem_os.core import MOSCore  # type: ignore
+
+    system_prompt = MOSCore._build_system_prompt(MOSCore.__new__(MOSCore), memories)
+
+    messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": question}]
     add_images_context(messages, image_paths)
     resp = oai_client.chat.completions.create(
         model=os.getenv("CHAT_MODEL"), messages=messages, temperature=0
@@ -156,6 +205,7 @@ def run_ingest_and_eval(
     ppt_root: str | Path = "ppt_test_result",
     questions_file: str | Path | None = None,
     top_k: int = 15,
+    lib: str = "supermemory",
 ) -> None:
     client, oai_client, memos_context_template, add_images_context, get_images = _get_clients()
     if questions_file and Path(questions_file).exists():
@@ -204,7 +254,8 @@ def run_ingest_and_eval(
             # Ingest markdown once per doc
             if doc_id not in ingested_doc_ids:
                 if md_path is not None:
-                    register_and_add_markdown(client, user_id, md_path)
+                    c = client if lib == "memos" else _get_lib_client(lib)
+                    add_context(c, user_id, md_path, lib=lib)
                 else:
                     print(f"[Skip] markdown not found for doc_id={doc_id}")
                 ingested_doc_ids.add(doc_id)
@@ -217,11 +268,20 @@ def run_ingest_and_eval(
                 if (doc_id, q_norm) in completed_pairs:
                     print(f"[Skip] already done doc_id={doc_id} question={question[:60]}...")
                     continue
-                context, images = memos_search(
-                    client, memos_context_template, get_images, user_id, question, top_k=top_k
-                )
+                if lib == "memos":
+                    memories, images = memos_search(
+                        client, get_images, user_id, question, top_k=top_k
+                    )
+                elif lib == "mem0":
+                    c = _get_lib_client(lib)
+                    memories, images = mem0_search(c, get_images, user_id, question, top_k=top_k)
+                elif lib == "supermemory":
+                    c = _get_lib_client(lib)
+                    memories, images = supermemory_search(
+                        c, get_images, user_id, question, top_k=top_k
+                    )
                 response = multimodal_answer(
-                    add_images_context, oai_client, context, question, images
+                    add_images_context, oai_client, memories, question, images
                 )
                 with open(
                     Path("evaluation/scripts/mmlongbench/eval/prompt_for_answer_extraction.md"),
@@ -238,6 +298,7 @@ def run_ingest_and_eval(
                 except Exception:
                     pred_ans = response.strip()
                 score = eval_score(item.get("answer"), pred_ans, item.get("answer_format", "Str"))
+                print("[images used]:", images)
                 print(f"[QA] doc_id={doc_id} images={len(images)} score={score}")
 
                 sample_res = dict(item)

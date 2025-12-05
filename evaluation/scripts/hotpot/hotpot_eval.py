@@ -35,8 +35,6 @@ def add_context_memories(user_id: str, ctx: dict | list | None):
     titles = ctx.get("title") or []
     sentences_list = ctx.get("sentences") or []
 
-    client.register_user(user_id=user_id, user_name=user_id, mem_cube_id=user_id)
-
     tasks = []
     for title, sentences in zip(titles, sentences_list, strict=False):
         for idx, sentence in enumerate(sentences):
@@ -65,22 +63,14 @@ def add_context_memories(user_id: str, ctx: dict | list | None):
 
 
 def memos_search(user_id: str, query: str, top_k):
-    results = None
-    for attempt in range(max_retries):
-        try:
-            results = client.search(query=query, user_id=user_id, top_k=top_k)
-            break
-        except Exception as e:
-            if attempt < max_retries - 1:
-                time.sleep(2**attempt)
-            else:
-                raise e
+    results = client.search(query=query, user_id=user_id, top_k=top_k)
     memories = results["text_mem"][0]["memories"]
     print("Search memories:", len(memories))
 
     # Build readable context
     for memory in memories[:3]:
         print("memory content:", memory["memory"])
+        print("memory details:", memory["metadata"]["sources"])
 
     context = "\n".join([i["memory"] for i in memories]) + f"\n{results.get('pref_string', '')}"
     context = MEMOS_CONTEXT_TEMPLATE.format(user_id=user_id, memories=context)
@@ -105,7 +95,7 @@ def memos_search(user_id: str, query: str, top_k):
     return context, dedup_sp
 
 
-def lme_response(context: str, question: str, question_date: str | None = None) -> str:
+def llm_response(context: str, question: str, question_date: str | None = None) -> str:
     prompt = LME_ANSWER_PROMPT.format(
         question=question, question_date=question_date or "", context=context
     )
@@ -171,7 +161,7 @@ def build_and_ask(item):
 
     try:
         context, sp_list = memos_search(qid, question, top_k=7)
-        raw_answer = lme_response(context=context, question=question, question_date="")
+        raw_answer = llm_response(context=context, question=question, question_date="")
         answer = extract_answer(question, raw_answer) or ""
         print("Question:", question)
         print("Answer (raw):", raw_answer)
