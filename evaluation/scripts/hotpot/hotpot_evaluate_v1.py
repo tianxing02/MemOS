@@ -96,6 +96,9 @@ def eval(prediction_file, gold_file):
     with open(gold_file) as f:
         gold = json.load(f)
 
+    evaluated_ids = set((prediction.get("answer") or {}).keys())
+    gold = [dp for dp in gold if (dp.get("_id") or dp.get("id")) in evaluated_ids]
+
     metrics = {
         "em": 0,
         "f1": 0,
@@ -138,11 +141,14 @@ def eval(prediction_file, gold_file):
             metrics["joint_prec"] += joint_prec
             metrics["joint_recall"] += joint_recall
 
+    print("=========Eval Results===========")
     n = len(gold)
-    for k in metrics:
-        metrics[k] /= n
-
-    print(metrics)
+    if n > 0:
+        for k in metrics:
+            metrics[k] /= n
+        print(metrics)
+    else:
+        print(metrics)
 
 
 if __name__ == "__main__":
