@@ -238,7 +238,7 @@ def main():
     processed_ids = set()
     if out_json.exists():
         try:
-            with open(out_json, "r", encoding="utf-8") as f:
+            with open(out_json, encoding="utf-8") as f:
                 existing_results = json.load(f)
                 if isinstance(existing_results, list):
                     results = existing_results
@@ -249,7 +249,8 @@ def main():
 
     # Filter dataset to skip processed samples
     remaining_dataset = [
-        s for s in dataset
+        s
+        for s in dataset
         if (s.get("_id") or s.get("id") or str(dataset.index(s))) not in processed_ids
     ]
 
@@ -265,17 +266,15 @@ def main():
 
     with ThreadPoolExecutor(max_workers=8) as executor:
         # Phase 1: Ingestion
-        # print("Phase 1: Ingesting context...")
-        # ingest_futures = [
-        #     executor.submit(ingest_sample, client, sample) for sample in remaining_dataset
-        # ]
-        # for f in tqdm(
-        #     as_completed(ingest_futures), total=len(ingest_futures), desc="Ingesting"
-        # ):
-        #     try:
-        #         f.result()
-        #     except Exception as e:
-        #         print(f"Ingestion Error: {e}")
+        print("Phase 1: Ingesting context...")
+        ingest_futures = [
+            executor.submit(ingest_sample, client, sample) for sample in remaining_dataset
+        ]
+        for f in tqdm(as_completed(ingest_futures), total=len(ingest_futures), desc="Ingesting"):
+            try:
+                f.result()
+            except Exception as e:
+                print(f"Ingestion Error: {e}")
 
         # Phase 2: Evaluation
         print("Phase 2: Evaluating...")
@@ -300,9 +299,7 @@ def main():
                 print(f"Evaluation Error: {e}")
 
     # Final save
-    out_json.write_text(
-        json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    out_json.write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"Saved {len(results)} results to {out_json}")
     print_metrics(results)
 

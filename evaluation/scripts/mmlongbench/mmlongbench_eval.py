@@ -250,14 +250,14 @@ def run_ingest_and_eval(
                 add_context(c_local, user_id_local, md_path_local, lib=lib_local)
                 return doc_id_local
 
-            # with ThreadPoolExecutor(max_workers=workers) as executor:
-            #     futures = [executor.submit(_ingest_one, did, mdp) for did, mdp in to_ingest]
-            #     for f in as_completed(futures):
-            #         try:
-            #             done_id = f.result()
-            #             ingested_doc_ids.add(done_id)
-            #         except Exception as e:
-            #             print(f"[Add-Error] {e}")
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = [executor.submit(_ingest_one, did, mdp) for did, mdp in to_ingest]
+                for f in as_completed(futures):
+                    try:
+                        done_id = f.result()
+                        ingested_doc_ids.add(done_id)
+                    except Exception as e:
+                        print(f"[Add-Error] {e}")
 
         for doc_id in doc_list:
             if not doc_id:
