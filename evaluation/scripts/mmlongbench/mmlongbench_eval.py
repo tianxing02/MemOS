@@ -189,8 +189,8 @@ def run_ingest_and_eval(
     ppt_root: str | Path = "ppt_test_result",
     questions_file: str | Path | None = None,
     top_k: int = 15,
-    lib: str = "supermemory",
-    workers: int = 8,
+    lib: str = "memos",
+    workers: int = 2,
 ) -> None:
     client, oai_client, memos_context_template, add_images_context, get_images = _get_clients()
     if questions_file and Path(questions_file).exists():
