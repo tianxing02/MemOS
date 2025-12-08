@@ -79,7 +79,7 @@ def _dump_dataset_to_local():
 def add_context(client, user_id: str, context: str) -> None:
     iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     chunker = RecursiveCharacterTextSplitter.from_language(
-        language=Language.PYTHON, chunk_size=512, chunk_overlap=128
+        language=Language.PYTHON, chunk_size=5120, chunk_overlap=128
     )
     paragraphs = [p for p in chunker.split_text(context or "") if p.strip()]
 
@@ -88,7 +88,7 @@ def add_context(client, user_id: str, context: str) -> None:
     print(f"[memos-add]: successfully added {len(messages)} chunks to user {user_id}")
 
 
-def memos_search(client, user_id: str, query: str, top_k: int = 10) -> list[str]:
+def memos_search(client, user_id: str, query: str, top_k: int = 30) -> list[str]:
     results = client.search(query=query, user_id=user_id, top_k=top_k)
     memories = results["text_mem"][0]["memories"]
     mem_texts = [m["memory"] for m in memories]
@@ -131,18 +131,16 @@ def llm_answer(oai_client, memories: list[str], question: str, choices: dict) ->
     return resp.choices[0].message.content or ""
 
 
-def process_sample(client, oai_client, sample, top_k: int) -> dict:
-    sample_id = str(
-        sample.get("_id")
-        or sample.get("id")
-        or sample.get("qid")
-        or sample.get("name")
-        or sample.get("task")
-        or "sample"
-    )
+def ingest_sample(client, sample: dict) -> None:
+    sample_id = str(sample.get("_id"))
     user_id = sample_id
     context = sample.get("context") or ""
     add_context(client, user_id, str(context))
+
+
+def evaluate_sample(client, oai_client, sample: dict, top_k: int) -> dict:
+    sample_id = str(sample.get("_id"))
+    user_id = sample_id
     question = sample.get("question") or ""
     choices = {
         "A": sample.get("choice_A") or "",
@@ -171,7 +169,6 @@ def process_sample(client, oai_client, sample, top_k: int) -> dict:
         "choice_C": choices["C"],
         "choice_D": choices["D"],
         "answer": sample.get("answer"),
-        "context": context,
         "memories_used": memories,
         "response": response,
         "pred": pred,
@@ -237,17 +234,57 @@ def main():
     os.makedirs("evaluation/data/longbenchV2", exist_ok=True)
     out_json = Path("evaluation/data/longbenchV2/memos_results.json")
 
+    # Checkpoint loading
+    processed_ids = set()
+    if out_json.exists():
+        try:
+            with open(out_json, encoding="utf-8") as f:
+                existing_results = json.load(f)
+                if isinstance(existing_results, list):
+                    results = existing_results
+                    processed_ids = {r.get("_id") for r in results if r.get("_id")}
+                    print(f"Loaded {len(results)} existing results from checkpoint.")
+        except Exception as e:
+            print(f"Error loading checkpoint: {e}")
+
+    # Filter dataset to skip processed samples
+    remaining_dataset = [
+        s
+        for s in dataset
+        if (s.get("_id") or s.get("id") or str(dataset.index(s))) not in processed_ids
+    ]
+
     # Concurrency settings
-    print(f"Starting evaluation dataset length: {len(dataset)}")
+    print(f"Total dataset size: {len(dataset)}")
+    print(f"Already processed: {len(processed_ids)}")
+    print(f"Remaining to process: {len(remaining_dataset)}")
+
+    if not remaining_dataset:
+        print("All samples have been processed.")
+        print_metrics(results)
+        return
 
     with ThreadPoolExecutor(max_workers=8) as executor:
+        # Phase 1: Ingestion
+        print("Phase 1: Ingesting context...")
+        ingest_futures = [
+            executor.submit(ingest_sample, client, sample) for sample in remaining_dataset
+        ]
+        for f in tqdm(as_completed(ingest_futures), total=len(ingest_futures), desc="Ingesting"):
+            try:
+                f.result()
+            except Exception as e:
+                print(f"Ingestion Error: {e}")
+
+        # Phase 2: Evaluation
+        print("Phase 2: Evaluating...")
         futures = [
-            executor.submit(process_sample, client, oai_client, dataset[i], 15)
-            for i in range(len(dataset))
+            executor.submit(evaluate_sample, client, oai_client, sample, 30)
+            for sample in remaining_dataset
         ]
 
         # Use tqdm for progress bar
-        for f in tqdm(as_completed(futures), total=len(futures), desc="Processing"):
+        for f in tqdm(as_completed(futures), total=len(futures), desc="Evaluating"):
             try:
                 res = f.result()
                 results.append(res)
@@ -259,7 +296,7 @@ def main():
                     )
                     print_metrics(results)
             except Exception as e:
-                print(f"Error: {e}")
+                print(f"Evaluation Error: {e}")
 
     # Final save
     out_json.write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
