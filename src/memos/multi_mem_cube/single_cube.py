@@ -30,6 +30,7 @@ from memos.types.general_types import (
     SearchMode,
     UserContext,
 )
+from memos.utils import timed
 
 
 logger = get_logger(__name__)
@@ -93,7 +94,11 @@ class SingleCubeView(MemCubeView):
         for item in pref_results:
             item["cube_id"] = self.cube_id
 
-        return text_results + pref_results
+        all_memories = text_results + pref_results
+
+        # TODO: search existing memories and compare
+
+        return all_memories
 
     def search_memories(self, search_req: APISearchRequest) -> dict[str, Any]:
         # Create UserContext object
@@ -157,9 +162,8 @@ class SingleCubeView(MemCubeView):
                     content=feedback_req_str,
                     timestamp=datetime.utcnow(),
                 )
-                self.mem_scheduler.memos_message_queue.submit_messages(
-                    messages=[message_item_feedback]
-                )
+                # Use scheduler submission to ensure tracking and metrics
+                self.mem_scheduler.submit_messages(messages=[message_item_feedback])
                 self.logger.info(f"[SingleCubeView] cube={self.cube_id} Submitted FEEDBACK async")
             except Exception as e:
                 self.logger.error(
@@ -179,8 +183,9 @@ class SingleCubeView(MemCubeView):
                 async_mode=feedback_req.async_mode,
                 corrected_answer=feedback_req.corrected_answer,
                 task_id=feedback_req.task_id,
+                info=feedback_req.info,
             )
-            self.logger.info(f"Feedback memories result: {feedback_result}")
+            self.logger.info(f"[Feedback memories result:] {feedback_result}")
         return feedback_result
 
     def _get_search_mode(self, mode: str) -> str:
@@ -195,6 +200,7 @@ class SingleCubeView(MemCubeView):
         """
         return mode
 
+    @timed
     def _search_text(
         self,
         search_req: APISearchRequest,
@@ -360,6 +366,7 @@ class SingleCubeView(MemCubeView):
 
         return formatted_memories
 
+    @timed
     def _search_pref(
         self,
         search_req: APISearchRequest,
@@ -426,6 +433,7 @@ class SingleCubeView(MemCubeView):
             top_k=search_req.top_k,
             mode=SearchMode.FAST,
             manual_close_internet=not search_req.internet_search,
+            memory_type=search_req.search_memory_type,
             search_filter=search_filter,
             search_priority=search_priority,
             info={
@@ -436,8 +444,6 @@ class SingleCubeView(MemCubeView):
             plugin=plugin,
             search_tool_memory=search_req.search_tool_memory,
             tool_mem_top_k=search_req.tool_mem_top_k,
-            # TODO: tmp field for playground search goal parser, will be removed later
-            playground_search_goal_parser=search_req.playground_search_goal_parser,
         )
 
         formatted_memories = [format_memory_item(data) for data in search_results]
@@ -663,6 +669,13 @@ class SingleCubeView(MemCubeView):
             mode=extract_mode,
         )
         flattened_local = [mm for m in memories_local for mm in m]
+
+        # Explicitly set source_doc_id to metadata if present in info
+        source_doc_id = (add_req.info or {}).get("source_doc_id")
+        if source_doc_id:
+            for memory in flattened_local:
+                memory.metadata.source_doc_id = source_doc_id
+
         self.logger.info(f"Memory extraction completed for user {add_req.user_id}")
 
         # Add memories to text_mem
@@ -683,7 +696,7 @@ class SingleCubeView(MemCubeView):
             sync_mode=sync_mode,
         )
 
-        return [
+        text_memories = [
             {
                 "memory": memory.memory,
                 "memory_id": memory_id,
@@ -691,3 +704,5 @@ class SingleCubeView(MemCubeView):
             }
             for memory_id, memory in zip(mem_ids_local, flattened_local, strict=False)
         ]
+
+        return text_memories

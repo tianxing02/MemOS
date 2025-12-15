@@ -417,3 +417,36 @@ IMAGE_ANALYSIS_PROMPT_ZH = """您是一个智能记忆助手。请分析提供�
 - `memory_type` 保持英文。
 
 专注于从图像中提取事实性、可观察的信息。除非与用户记忆明显相关，否则避免推测。"""
+
+
+SIMPLE_STRUCT_HALLUCINATION_FILTER_PROMPT = """
+You are a strict memory validator.
+
+Task:
+Check each memory against the user messages (ground truth). Do not modify the original text. Generate ONLY a suffix to append.
+
+Rules:
+- Append " [Source:] Inference by assistant." if the memory contains assistant inference (not directly stated by the user).
+- Otherwise output an empty suffix.
+- No other commentary or formatting.
+
+Inputs:
+messages:
+{messages_inline}
+
+memories:
+{memories_inline}
+
+Output JSON:
+- Keys: same indices as input ("0", "1", ...).
+- Values: {{ "need_rewrite": boolean, "rewritten_suffix": string, "reason": string }}
+- need_rewrite = true only when assistant inference is detected.
+- rewritten_suffix = " [Source:] Inference by assistant." or "".
+- reason: brief, e.g., "assistant inference detected" or "explicit user statement".
+"""
+
+
+# Prompt mapping for specialized tasks (e.g., hallucination filtering)
+PROMPT_MAPPING = {
+    "hallucination_filter": SIMPLE_STRUCT_HALLUCINATION_FILTER_PROMPT,
+}

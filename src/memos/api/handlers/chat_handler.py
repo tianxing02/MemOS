@@ -22,6 +22,7 @@ from memos.api.product_models import (
     APIADDRequest,
     APIChatCompleteRequest,
     APISearchRequest,
+    ChatPlaygroundRequest,
     ChatRequest,
 )
 from memos.context.context import ContextThread
@@ -30,6 +31,7 @@ from memos.mem_os.utils.reference_utils import (
     prepare_reference_data,
     process_streaming_references_complete,
 )
+from memos.mem_reader.read_multi_modal.utils import detect_lang
 from memos.mem_scheduler.schemas.message_schemas import ScheduleMessageItem
 from memos.mem_scheduler.schemas.task_schemas import (
     ANSWER_TASK_LABEL,
@@ -91,6 +93,7 @@ class ChatHandler(BaseHandler):
         self.enable_mem_scheduler = (
             hasattr(dependencies, "enable_mem_scheduler") and dependencies.enable_mem_scheduler
         )
+        self.dependencies = dependencies
 
     def handle_chat_complete(self, chat_req: APIChatCompleteRequest) -> dict[str, Any]:
         """
@@ -159,9 +162,11 @@ class ChatHandler(BaseHandler):
 
             # Step 3: Generate complete response from LLM
             if chat_req.model_name_or_path and chat_req.model_name_or_path not in self.chat_llms:
-                return {
-                    "message": f"Model {chat_req.model_name_or_path} not suport, choose from {list(self.chat_llms.keys())}"
-                }
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Model {chat_req.model_name_or_path} not suport, choose from {list(self.chat_llms.keys())}",
+                )
+
             model = chat_req.model_name_or_path or next(iter(self.chat_llms.keys()))
             response = self.chat_llms[model].generate(current_messages, model_name_or_path=model)
 
@@ -281,9 +286,11 @@ class ChatHandler(BaseHandler):
                         chat_req.model_name_or_path
                         and chat_req.model_name_or_path not in self.chat_llms
                     ):
-                        return {
-                            "message": f"Model {chat_req.model_name_or_path} not suport, choose from {list(self.chat_llms.keys())}"
-                        }
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"Model {chat_req.model_name_or_path} not suport, choose from {list(self.chat_llms.keys())}",
+                        )
+
                     model = chat_req.model_name_or_path or next(iter(self.chat_llms.keys()))
                     response_stream = self.chat_llms[model].generate_stream(
                         current_messages, model_name_or_path=model
@@ -352,7 +359,7 @@ class ChatHandler(BaseHandler):
             self.logger.error(f"Failed to start chat stream: {traceback.format_exc()}")
             raise HTTPException(status_code=500, detail=str(traceback.format_exc())) from err
 
-    def handle_chat_stream_playground(self, chat_req: ChatRequest) -> StreamingResponse:
+    def handle_chat_stream_playground(self, chat_req: ChatPlaygroundRequest) -> StreamingResponse:
         """
         Chat with MemOS via Server-Sent Events (SSE) stream using search/add handlers.
 
@@ -398,32 +405,25 @@ class ChatHandler(BaseHandler):
                         async_mode="sync",
                     )
 
-                    # Use first readable cube ID for scheduler (backward compatibility)
-                    scheduler_cube_id = (
-                        readable_cube_ids[0] if readable_cube_ids else chat_req.user_id
-                    )
-                    self._send_message_to_scheduler(
-                        user_id=chat_req.user_id,
-                        mem_cube_id=scheduler_cube_id,
-                        query=chat_req.query,
-                        label=QUERY_TASK_LABEL,
-                    )
-
-                    # ====== first search without parse goal ======
+                    # ====== first search text mem with parse goal ======
                     search_req = APISearchRequest(
                         query=chat_req.query,
                         user_id=chat_req.user_id,
                         readable_cube_ids=readable_cube_ids,
-                        mode=chat_req.mode,
+                        mode="fast",
                         internet_search=False,
-                        top_k=chat_req.top_k,
+                        top_k=5,
                         chat_history=chat_req.history,
                         session_id=chat_req.session_id,
-                        include_preference=chat_req.include_preference,
+                        include_preference=True,
                         pref_top_k=chat_req.pref_top_k,
                         filter=chat_req.filter,
+                        search_tool_memory=False,
                     )
+                    start_time = time.time()
                     search_response = self.search_handler.handle_search_memories(search_req)
+                    end_time = time.time()
+                    self.logger.info(f"first search time: {end_time - start_time}")
 
                     yield f"data: {json.dumps({'type': 'status', 'data': '1'})}\n\n"
 
@@ -435,10 +435,10 @@ class ChatHandler(BaseHandler):
                             memories_list = text_mem_results[0]["memories"]
 
                     # Filter memories by threshold
-                    first_filtered_memories = self._filter_memories_by_threshold(memories_list)
+                    filtered_memories = self._filter_memories_by_threshold(memories_list)
 
                     # Prepare reference data (first search)
-                    reference = prepare_reference_data(first_filtered_memories)
+                    reference = prepare_reference_data(filtered_memories)
                     # get preference string
                     pref_string = search_response.data.get("pref_string", "")
 
@@ -449,26 +449,62 @@ class ChatHandler(BaseHandler):
                         pref_list = search_response.data.get("pref_mem") or []
                         pref_memories = pref_list[0].get("memories", []) if pref_list else []
                         pref_md_string = self._build_pref_md_string_for_playground(pref_memories)
-                        yield f"data: {json.dumps({'type': 'pref_md_string', 'data': pref_md_string})}\n\n"
+                        yield f"data: {json.dumps({'type': 'pref_md_string', 'data': pref_md_string}, ensure_ascii=False)}\n\n"
 
-                    # internet status
-                    yield f"data: {json.dumps({'type': 'status', 'data': 'start_internet_search'})}\n\n"
-
-                    # ====== second search with parse goal ======
-                    search_req = APISearchRequest(
+                    # Use first readable cube ID for scheduler (backward compatibility)
+                    scheduler_cube_id = (
+                        readable_cube_ids[0] if readable_cube_ids else chat_req.user_id
+                    )
+                    self._send_message_to_scheduler(
+                        user_id=chat_req.user_id,
+                        mem_cube_id=scheduler_cube_id,
                         query=chat_req.query,
+                        label=QUERY_TASK_LABEL,
+                    )
+
+                    # parse goal for internet search
+                    searcher = self.dependencies.searcher
+                    parsed_goal = searcher.task_goal_parser.parse(
+                        task_description=chat_req.query,
+                        context="\n".join(
+                            [memory.get("memory", "") for memory in filtered_memories]
+                        ),
+                        conversation=chat_req.history,
+                        mode="fine",
+                    )
+
+                    if chat_req.beginner_guide_step == "first":
+                        chat_req.internet_search = False
+                        parsed_goal.internet_search = False
+                    elif chat_req.beginner_guide_step == "second":
+                        chat_req.internet_search = True
+                        parsed_goal.internet_search = True
+
+                    if chat_req.internet_search or parsed_goal.internet_search:
+                        # internet status
+                        yield f"data: {json.dumps({'type': 'status', 'data': 'start_internet_search'})}\n\n"
+
+                    # ======  second deep search  ======
+                    search_req = APISearchRequest(
+                        query=parsed_goal.rephrased_query
+                        or chat_req.query + (f"{parsed_goal.tags}" if parsed_goal.tags else ""),
                         user_id=chat_req.user_id,
                         readable_cube_ids=readable_cube_ids,
-                        mode=chat_req.mode,
-                        internet_search=chat_req.internet_search,
-                        top_k=chat_req.top_k,
+                        mode="fast",
+                        internet_search=chat_req.internet_search or parsed_goal.internet_search,
+                        top_k=100,  # for playground, we need to search more memories
                         chat_history=chat_req.history,
                         session_id=chat_req.session_id,
                         include_preference=False,
+                        pref_top_k=chat_req.pref_top_k,
                         filter=chat_req.filter,
-                        playground_search_goal_parser=True,
+                        search_memory_type="All",
+                        search_tool_memory=False,
                     )
+                    start_time = time.time()
                     search_response = self.search_handler.handle_search_memories(search_req)
+                    end_time = time.time()
+                    self.logger.info(f"second search time: {end_time - start_time}")
 
                     # Extract memories from search results (second search)
                     memories_list = []
@@ -477,13 +513,18 @@ class ChatHandler(BaseHandler):
                         if text_mem_results and text_mem_results[0].get("memories"):
                             memories_list = text_mem_results[0]["memories"]
 
-                    # Filter memories by threshold
-                    second_filtered_memories = self._filter_memories_by_threshold(memories_list)
+                    # Filter memories by threshold, min_num is the min number of memories for playground
+                    second_filtered_memories = self._filter_memories_by_threshold(
+                        memories_list, min_num=35
+                    )
 
                     # dedup and supplement memories
-                    filtered_memories = self._dedup_and_supplement_memories(
-                        first_filtered_memories, second_filtered_memories
-                    )
+                    fast_length = len(filtered_memories)
+                    supplement_length = max(0, 50 - fast_length)  # 50 is the max mem for playground
+                    second_dedup_memories = self._dedup_and_supplement_memories(
+                        filtered_memories, second_filtered_memories
+                    )[:supplement_length]
+                    filtered_memories = filtered_memories + second_dedup_memories
 
                     # Prepare remain reference data (second search)
                     reference = prepare_reference_data(filtered_memories)
@@ -491,12 +532,12 @@ class ChatHandler(BaseHandler):
                     internet_reference = self._get_internet_reference(
                         search_response.data.get("text_mem")[0]["memories"]
                     )
-
                     yield f"data: {json.dumps({'type': 'reference', 'data': reference})}\n\n"
 
                     # Step 2: Build system prompt with memories
+                    lang = detect_lang(chat_req.query)
                     system_prompt = self._build_enhance_system_prompt(
-                        filtered_memories, pref_string
+                        filtered_memories, pref_string, lang=lang
                     )
 
                     # Prepare messages
@@ -513,60 +554,66 @@ class ChatHandler(BaseHandler):
                     )
 
                     # Step 3: Generate streaming response from LLM
-                    if (
-                        chat_req.model_name_or_path
-                        and chat_req.model_name_or_path not in self.chat_llms
-                    ):
-                        return {
-                            "message": f"Model {chat_req.model_name_or_path} not suport, choose from {list(self.chat_llms.keys())}"
-                        }
-                    model = chat_req.model_name_or_path or next(iter(self.chat_llms.keys()))
-                    response_stream = self.chat_llms[model].generate_stream(
-                        current_messages, model_name_or_path=model
-                    )
-
-                    # Stream the response
-                    buffer = ""
-                    full_response = ""
-                    in_think = False
-
-                    for chunk in response_stream:
-                        if chunk == "<think>":
-                            in_think = True
-                            yield f"data: {json.dumps({'type': 'status', 'data': 'reasoning'})}\n\n"
-                            continue
-                        if chunk == "</think>":
-                            in_think = False
-                            yield f"data: {json.dumps({'type': 'status', 'data': '2'})}\n\n"
-                            continue
-
-                        if in_think:
-                            chunk_data = f"data: {json.dumps({'type': 'reasoning', 'data': chunk}, ensure_ascii=False)}\n\n"
-                            yield chunk_data
-                            continue
-
-                        buffer += chunk
-                        full_response += chunk
-
-                        # Process buffer to ensure complete reference tags
-                        processed_chunk, remaining_buffer = process_streaming_references_complete(
-                            buffer
+                    try:
+                        model = next(iter(self.chat_llms.keys()))
+                        response_stream = self.chat_llms[model].generate_stream(
+                            current_messages, model_name_or_path=model
                         )
 
-                        if processed_chunk:
-                            chunk_data = f"data: {json.dumps({'type': 'text', 'data': processed_chunk}, ensure_ascii=False)}\n\n"
-                            yield chunk_data
-                            buffer = remaining_buffer
+                        # Stream the response
+                        buffer = ""
+                        full_response = ""
+                        in_think = False
 
-                    # Process any remaining buffer
-                    if buffer:
-                        processed_chunk, _ = process_streaming_references_complete(buffer)
-                        if processed_chunk:
-                            chunk_data = f"data: {json.dumps({'type': 'text', 'data': processed_chunk}, ensure_ascii=False)}\n\n"
-                            yield chunk_data
+                        for chunk in response_stream:
+                            if chunk == "<think>":
+                                in_think = True
+                                yield f"data: {json.dumps({'type': 'status', 'data': 'reasoning'})}\n\n"
+                                continue
+                            if chunk == "</think>":
+                                in_think = False
+                                yield f"data: {json.dumps({'type': 'status', 'data': '2'})}\n\n"
+                                continue
 
-                    # Yield internet reference after text response
-                    yield f"data: {json.dumps({'type': 'internet_reference', 'data': internet_reference})}\n\n"
+                            if in_think:
+                                chunk_data = f"data: {json.dumps({'type': 'reasoning', 'data': chunk}, ensure_ascii=False)}\n\n"
+                                yield chunk_data
+                                continue
+
+                            buffer += chunk
+                            full_response += chunk
+
+                            # Process buffer to ensure complete reference tags
+                            processed_chunk, remaining_buffer = (
+                                process_streaming_references_complete(buffer)
+                            )
+
+                            if processed_chunk:
+                                chunk_data = f"data: {json.dumps({'type': 'text', 'data': processed_chunk}, ensure_ascii=False)}\n\n"
+                                yield chunk_data
+                                buffer = remaining_buffer
+
+                        # Process any remaining buffer
+                        if buffer:
+                            processed_chunk, _ = process_streaming_references_complete(buffer)
+                            if processed_chunk:
+                                chunk_data = f"data: {json.dumps({'type': 'text', 'data': processed_chunk}, ensure_ascii=False)}\n\n"
+                                yield chunk_data
+
+                    except Exception as llm_error:
+                        # Log the error
+                        self.logger.error(
+                            f"Error during LLM generation: {llm_error}", exc_info=True
+                        )
+                        # Send error message to client
+                        error_msg = f"模型生成错误: {llm_error!s}"
+                        yield f"data: {json.dumps({'type': 'error', 'data': error_msg}, ensure_ascii=False)}\n\n"
+                        # Re-raise to let outer exception handler process it
+                        raise
+
+                    if chat_req.internet_search or parsed_goal.internet_search:
+                        # Yield internet reference after text response
+                        yield f"data: {json.dumps({'type': 'internet_reference', 'data': internet_reference})}\n\n"
 
                     # Calculate timing
                     time_end = time.time()
@@ -735,6 +782,7 @@ class ChatHandler(BaseHandler):
         self,
         memories_list: list,
         pref_string: str = "",
+        lang: str = "en",
         tone: str = "friendly",
         verbosity: str = "mid",
     ) -> str:
@@ -751,9 +799,9 @@ class ChatHandler(BaseHandler):
             System prompt string
         """
         now = datetime.now()
-        formatted_date = now.strftime("%Y-%m-%d (%A)")
+        formatted_date = now.strftime("%Y-%m-%d %H:%M (%A)")
         sys_body = get_memos_prompt(
-            date=formatted_date, tone=tone, verbosity=verbosity, mode="enhance"
+            date=formatted_date, tone=tone, verbosity=verbosity, mode="enhance", lang=lang
         )
 
         # Format memories
@@ -763,7 +811,7 @@ class ChatHandler(BaseHandler):
             sys_body
             + "\n\n# Memories\n## PersonalMemory (ordered)\n"
             + mem_block_p
-            + "\n## OuterMemory (ordered)\n"
+            + "\n## OuterMemory (from Internet Search, ordered)\n"
             + mem_block_o
             + f"\n\n{pref_string}"
         )
@@ -793,6 +841,15 @@ class ChatHandler(BaseHandler):
             memory_content = m.get("memory", "")
             metadata = m.get("metadata", {})
             memory_type = metadata.get("memory_type", "")
+            created_time = metadata.get("updated_at", "") or metadata.get("created_at", "")
+
+            # format time to YYYY-MM-DD HH:MM (ISO 8601 -> YYYY-MM-DD HH:MM)
+            if created_time and isinstance(created_time, str):
+                try:
+                    dt = datetime.fromisoformat(created_time)
+                    created_time = dt.strftime("%Y-%m-%d %H:%M")
+                except ValueError:
+                    pass  # keep original value
 
             tag = "O" if "Outer" in str(memory_type) else "P"
             txt = memory_content.replace("\n", " ").strip()
@@ -803,6 +860,7 @@ class ChatHandler(BaseHandler):
             if tag == "O":
                 lines_o.append(f"[{idx}:{mid}] :: [{tag}] {txt}\n")
             elif tag == "P":
+                txt = f"(CreatedTime: {created_time}) {txt}"
                 lines_p.append(f"[{idx}:{mid}] :: [{tag}] {txt}")
 
         return "\n".join(lines_o), "\n".join(lines_p)
