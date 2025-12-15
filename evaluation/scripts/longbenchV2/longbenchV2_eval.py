@@ -1,10 +1,13 @@
+import argparse
 import json
 import os
 import re
 import sys
 import time
+import traceback
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -37,14 +40,26 @@ sys.path.append(str(SRC_ROOT))
 load_dotenv()
 
 
-def _get_clients():
-    from utils.client import MemosApiClient
+def _get_lib_client(lib: str):
+    if lib == "mem0":
+        from utils.client import Mem0Client  # type: ignore
 
-    memos_client = MemosApiClient()
+        return Mem0Client(enable_graph=False)
+    if lib == "supermemory":
+        from utils.client import SupermemoryClient  # type: ignore
+
+        return SupermemoryClient()
+    from utils.client import MemosApiClient  # type: ignore
+
+    return MemosApiClient()
+
+
+def _get_clients(lib: str = "memos"):
+    client = _get_lib_client(lib)
     openai_client = OpenAI(
         api_key=os.getenv("CHAT_MODEL_API_KEY"), base_url=os.getenv("CHAT_MODEL_BASE_URL")
     )
-    return memos_client, openai_client
+    return client, openai_client
 
 
 def _dump_dataset_to_local():
@@ -76,24 +91,59 @@ def _dump_dataset_to_local():
     return dataset
 
 
-def add_context(client, user_id: str, context: str) -> None:
+def add_context(client, user_id: str, context: str, lib: str) -> None:
     iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     chunker = RecursiveCharacterTextSplitter.from_language(
         language=Language.PYTHON, chunk_size=5120, chunk_overlap=128
     )
     paragraphs = [p for p in chunker.split_text(context or "") if p.strip()]
 
-    messages = [{"role": "user", "content": p, "created_at": iso} for p in paragraphs]
-    client.add(messages=messages, user_id=user_id, conv_id=user_id)
-    print(f"[memos-add]: successfully added {len(messages)} chunks to user {user_id}")
+    if lib == "memos":
+        messages = [{"role": "user", "content": p, "created_at": iso} for p in paragraphs]
+        try:
+            client.add(messages=messages, user_id=user_id, conv_id=user_id)
+            print(f"[Add-memos]: successfully added {len(messages)} chunks to user {user_id}")
+        except Exception as e:
+            print(f"[Add-memos] failed: {e}")
+
+    elif lib == "mem0":
+        messages = [{"role": "user", "content": p} for p in paragraphs]
+        ts = int(time.time())
+        try:
+            client.add(messages=messages, user_id=user_id, timestamp=ts, batch_size=10)
+            print(f"[Add-mem0] user={user_id} total={len(messages)}")
+        except Exception as e:
+            print(f"[Add-mem0] failed: {e}")
+
+    elif lib == "supermemory":
+        iso = datetime.utcnow().isoformat() + "Z"
+        try:
+            client.add(content=context, user_id=user_id)
+            print(f"[Add-supermemory] user={user_id}")
+        except Exception as e:
+            print(f"[Add-supermemory] failed: {e}")
 
 
 def memos_search(client, user_id: str, query: str, top_k: int = 30) -> list[str]:
     results = client.search(query=query, user_id=user_id, top_k=top_k)
     memories = results["text_mem"][0]["memories"]
     mem_texts = [m["memory"] for m in memories]
-    print(f"[memos-search] user={user_id} top_k={top_k} memories={len(memories)}")
+    print(f"[Search-memos] user={user_id} top_k={top_k} memories={len(memories)}")
     return mem_texts
+
+
+def mem0_search(client, user_id: str, query: str, top_k: int = 30) -> list[str]:
+    res = client.search(query, user_id, top_k)
+    results = res.get("results", [])
+    mem_texts = [m.get("memory", "") for m in results if m.get("memory")]
+    print(f"[Search-mem0] user={user_id} top_k={top_k} memories={len(mem_texts)}")
+    return mem_texts
+
+
+def supermemory_search(client, user_id: str, query: str, top_k: int = 30) -> list[str]:
+    chunk_list = client.search(query, user_id, top_k)
+    print(f"[Search-supermemory] user={user_id} top_k={top_k} memories={len(chunk_list)}")
+    return chunk_list
 
 
 def extract_answer(response: str) -> str | None:
@@ -126,19 +176,19 @@ def llm_answer(oai_client, memories: list[str], question: str, choices: dict) ->
         {"role": "user", "content": prompt},
     ]
     resp = oai_client.chat.completions.create(
-        model=os.getenv("CHAT_MODEL"), messages=messages, temperature=0.1, max_tokens=128
+        model=os.getenv("CHAT_MODEL"), messages=messages, temperature=0.1, max_tokens=12800
     )
     return resp.choices[0].message.content or ""
 
 
-def ingest_sample(client, sample: dict) -> None:
+def ingest_sample(client, sample: dict, lib: str) -> None:
     sample_id = str(sample.get("_id"))
     user_id = sample_id
     context = sample.get("context") or ""
-    add_context(client, user_id, str(context))
+    add_context(client, user_id, str(context), lib)
 
 
-def evaluate_sample(client, oai_client, sample: dict, top_k: int) -> dict:
+def evaluate_sample(client, oai_client, sample: dict, top_k: int, lib: str) -> dict:
     sample_id = str(sample.get("_id"))
     user_id = sample_id
     question = sample.get("question") or ""
@@ -148,7 +198,16 @@ def evaluate_sample(client, oai_client, sample: dict, top_k: int) -> dict:
         "C": sample.get("choice_C") or "",
         "D": sample.get("choice_D") or "",
     }
-    memories = memos_search(client, user_id, str(question), top_k=top_k)
+
+    if lib == "memos":
+        memories = memos_search(client, user_id, str(question), top_k=top_k)
+    elif lib == "mem0":
+        memories = mem0_search(client, user_id, str(question), top_k=top_k)
+    elif lib == "supermemory":
+        memories = supermemory_search(client, user_id, str(question), top_k=top_k)
+    else:
+        memories = []
+
     response = llm_answer(oai_client, memories, str(question), choices)
     pred = extract_answer(response)
     judge = pred == sample.get("answer")
@@ -177,7 +236,7 @@ def evaluate_sample(client, oai_client, sample: dict, top_k: int) -> dict:
     return out
 
 
-def print_metrics(results: list[dict]) -> None:
+def print_metrics(results: list[dict], duration: float) -> None:
     easy, hard, short, medium, long = 0, 0, 0, 0, 0
     easy_acc, hard_acc, short_acc, medium_acc, long_acc = 0, 0, 0, 0, 0
 
@@ -224,15 +283,29 @@ def print_metrics(results: list[dict]) -> None:
     print(f"{'Short':<15} | {short:<10} | {s_acc:<10}")
     print(f"{'Medium':<15} | {medium:<10} | {m_acc:<10}")
     print(f"{'Long':<15} | {long:<10} | {l_acc:<10}")
+    print("-" * 60)
+    print(f"Total Duration: {duration:.2f} seconds")
     print("=" * 60 + "\n")
 
 
 def main():
-    client, oai_client = _get_clients()
+    parser = argparse.ArgumentParser(description="Evaluate LongBench-v2 with different backends.")
+    parser.add_argument(
+        "--lib",
+        type=str,
+        default="memos",
+        choices=["memos", "mem0", "supermemory"],
+        help="Backend library to use (default: memos)",
+    )
+    args = parser.parse_args()
+
+    start_time = time.time()
+
+    client, oai_client = _get_clients(lib=args.lib)
     dataset = _dump_dataset_to_local()
     results: list[dict] = []
     os.makedirs("evaluation/data/longbenchV2", exist_ok=True)
-    out_json = Path("evaluation/data/longbenchV2/memos_results.json")
+    out_json = Path(f"evaluation/data/longbenchV2/{args.lib}_results.json")
 
     # Checkpoint loading
     processed_ids = set()
@@ -255,20 +328,22 @@ def main():
     ]
 
     # Concurrency settings
+    max_workers = 4
+    print(f"Starting evaluation with {max_workers} workers using backend: {args.lib}")
     print(f"Total dataset size: {len(dataset)}")
     print(f"Already processed: {len(processed_ids)}")
     print(f"Remaining to process: {len(remaining_dataset)}")
 
     if not remaining_dataset:
         print("All samples have been processed.")
-        print_metrics(results)
+        print_metrics(results, time.time() - start_time)
         return
 
-    with ThreadPoolExecutor(max_workers=8) as executor:
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
         # Phase 1: Ingestion
         print("Phase 1: Ingesting context...")
         ingest_futures = [
-            executor.submit(ingest_sample, client, sample) for sample in remaining_dataset
+            executor.submit(ingest_sample, client, sample, args.lib) for sample in remaining_dataset
         ]
         for f in tqdm(as_completed(ingest_futures), total=len(ingest_futures), desc="Ingesting"):
             try:
@@ -279,7 +354,7 @@ def main():
         # Phase 2: Evaluation
         print("Phase 2: Evaluating...")
         futures = [
-            executor.submit(evaluate_sample, client, oai_client, sample, 30)
+            executor.submit(evaluate_sample, client, oai_client, sample, 30, args.lib)
             for sample in remaining_dataset
         ]
 
@@ -294,14 +369,15 @@ def main():
                     out_json.write_text(
                         json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8"
                     )
-                    print_metrics(results)
+                    print_metrics(results, time.time() - start_time)
             except Exception as e:
                 print(f"Evaluation Error: {e}")
+                traceback.print_exc()
 
     # Final save
     out_json.write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"Saved {len(results)} results to {out_json}")
-    print_metrics(results)
+    print_metrics(results, time.time() - start_time)
 
 
 if __name__ == "__main__":
