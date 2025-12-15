@@ -5,7 +5,6 @@ import time
 
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -114,11 +113,9 @@ def add_context(client, user_id: str, md_path: Path, lib) -> None:
         except Exception as e:
             print(f"[Add-mem0] failed: {e}")
     elif lib == "supermemory":
-        iso = datetime.utcnow().isoformat() + "Z"
-        messages = [{"role": "user", "content": p, "chat_time": iso} for p in paragraphs]
         try:
-            client.add(messages=messages, user_id=user_id)
-            print(f"[Add-supermemory] user={user_id} total={len(messages)}")
+            client.add(content=text, user_id=user_id)
+            print(f"[Add-supermemory] user={user_id}")
         except Exception as e:
             print(f"[Add-supermemory] failed: {e}")
 
@@ -189,7 +186,7 @@ def run_ingest_and_eval(
     ppt_root: str | Path = "ppt_test_result",
     questions_file: str | Path | None = None,
     top_k: int = 15,
-    lib: str = "memos",
+    lib: str = "supermemory",
     workers: int = 2,
 ) -> None:
     client, oai_client, memos_context_template, add_images_context, get_images = _get_clients()

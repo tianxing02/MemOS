@@ -1,7 +1,5 @@
 import traceback
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
-
 from memos.context.context import ContextThreadPoolExecutor
 from memos.embedders.factory import OllamaEmbedder
 from memos.graph_dbs.factory import Neo4jGraphDB
@@ -422,10 +420,6 @@ class Searcher:
             use_fast_graph=self.use_fast_graph,
         )
         all_items = list(items)
-        with ThreadPoolExecutor(max_workers=16) as executor:
-            futures = [executor.submit(self._process_result, item) for item in items]
-            for f in as_completed(futures):
-                all_items.append(f.result())
 
         return self.reranker.rerank(
             query=query,
@@ -504,10 +498,6 @@ class Searcher:
                 results.extend(task.result())
 
         all_results = list(results)
-        with ThreadPoolExecutor(max_workers=16) as executor:
-            futures = [executor.submit(self._process_result, r) for r in results]
-            for f in as_completed(futures):
-                all_results.append(f.result())
 
         return self.reranker.rerank(
             query=query,

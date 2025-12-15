@@ -270,6 +270,10 @@ class MemosApiOnlineClient:
 class SupermemoryClient:
     def __init__(self):
         self.api_key = os.getenv("SUPERMEMORY_API_KEY")
+        if not self.api_key:
+            raise ValueError(
+                "SUPERMEMORY_API_KEY environment variable is not set. Please set it in your .env file or environment."
+            )
         self.add_url = "https://api.supermemory.ai/v3/documents"
         self.search_url = "https://api.supermemory.ai/v3/search"
 
@@ -285,13 +289,7 @@ class SupermemoryClient:
             t = f"tag_{t}" if t else "tag_default"
         return t
 
-    def add(self, messages, user_id):
-        content = "\n".join(
-            [
-                f"{msg.get('chat_time', '')} {msg.get('role', '')}: {msg.get('content', '')}"
-                for msg in messages
-            ]
-        )
+    def add(self, content: str, user_id: str):
         payload = {
             "content": content,
             "raw": content,

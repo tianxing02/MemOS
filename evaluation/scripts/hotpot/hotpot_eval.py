@@ -28,7 +28,6 @@ client = MemosApiClient()
 oai_client = OpenAI(
     api_key=os.getenv("CHAT_MODEL_API_KEY"), base_url=os.getenv("CHAT_MODEL_BASE_URL")
 )
-max_retries = 5
 
 
 def add_context_memories(user_id: str, ctx: dict | list | None):
@@ -41,25 +40,9 @@ def add_context_memories(user_id: str, ctx: dict | list | None):
             memory_content = f"{title}: {sentence} [#{idx}]"
             tasks.append(memory_content)
 
-    def _add_one_memory(content: str):
-        for attempt in range(max_retries):
-            try:
-                client.add(memory_content=content, user_id=user_id, conv_id=user_id)
-                return True
-            except Exception as e:
-                if attempt < max_retries - 1:
-                    time.sleep(2**attempt)
-                else:
-                    print(f"[FAILED] {content}, error={e}")
-                    raise e
-
-    with ThreadPoolExecutor(max_workers=8) as executor:
-        futures = {executor.submit(_add_one_memory, m): m for m in tasks}
-        for future in as_completed(futures):
-            try:
-                future.result()
-            except Exception as e:
-                print("线程执行失败:", e)
+    iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    messages = [{"role": "user", "content": content, "created_at": iso} for content in tasks]
+    client.add(messages=messages, user_id=user_id, conv_id=user_id)
 
 
 def memos_search(user_id: str, query: str, top_k):
