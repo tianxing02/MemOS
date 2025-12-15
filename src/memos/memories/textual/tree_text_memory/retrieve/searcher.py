@@ -526,18 +526,19 @@ class Searcher:
         if self.manual_close_internet and not parsed_goal.internet_search:
             logger.info(f"[PATH-C] '{query}' Skipped (no retriever, fast mode)")
             return []
-        if memory_type not in ["All"]:
+        if memory_type not in ["All", "OuterMemory"]:
+            logger.info(f"[PATH-C] '{query}' Skipped (memory_type does not match)")
             return []
         logger.info(f"[PATH-C] '{query}' Retrieving from internet...")
         items = self.internet_retriever.retrieve_from_internet(
-            query=query, top_k=top_k, parsed_goal=parsed_goal, info=info
+            query=query, top_k=2 * top_k, parsed_goal=parsed_goal, info=info, mode=mode
         )
         logger.info(f"[PATH-C] '{query}' Retrieved from internet {len(items)} items: {items}")
         return self.reranker.rerank(
             query=query,
             query_embedding=query_embedding[0],
             graph_results=items,
-            top_k=min(top_k, 5),
+            top_k=top_k,
             parsed_goal=parsed_goal,
         )
 
@@ -695,15 +696,35 @@ class Searcher:
         """Sort results by score and trim to top_k"""
         final_items = []
         if search_tool_memory:
-            tool_results = [
+            tool_schema_results = [
                 (item, score)
                 for item, score in results
-                if item.metadata.memory_type in ["ToolSchemaMemory", "ToolTrajectoryMemory"]
+                if item.metadata.memory_type == "ToolSchemaMemory"
             ]
-            sorted_tool_results = sorted(tool_results, key=lambda pair: pair[1], reverse=True)[
-                :tool_mem_top_k
+            sorted_tool_schema_results = sorted(
+                tool_schema_results, key=lambda pair: pair[1], reverse=True
+            )[:tool_mem_top_k]
+            for item, score in sorted_tool_schema_results:
+                if plugin and round(score, 2) == 0.00:
+                    continue
+                meta_data = item.metadata.model_dump()
+                meta_data["relativity"] = score
+                final_items.append(
+                    TextualMemoryItem(
+                        id=item.id,
+                        memory=item.memory,
+                        metadata=SearchedTreeNodeTextualMemoryMetadata(**meta_data),
+                    )
+                )
+            tool_trajectory_results = [
+                (item, score)
+                for item, score in results
+                if item.metadata.memory_type == "ToolTrajectoryMemory"
             ]
-            for item, score in sorted_tool_results:
+            sorted_tool_trajectory_results = sorted(
+                tool_trajectory_results, key=lambda pair: pair[1], reverse=True
+            )[:tool_mem_top_k]
+            for item, score in sorted_tool_trajectory_results:
                 if plugin and round(score, 2) == 0.00:
                     continue
                 meta_data = item.metadata.model_dump()

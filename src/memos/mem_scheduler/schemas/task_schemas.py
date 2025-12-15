@@ -1,3 +1,5 @@
+import os
+
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
@@ -42,6 +44,40 @@ DEFAULT_MAX_QUERY_KEY_WORDS = 1000
 LONG_TERM_MEMORY_TYPE = "LongTermMemory"
 USER_INPUT_TYPE = "UserInput"
 NOT_APPLICABLE_TYPE = "NotApplicable"
+
+
+# scheduler daemon defaults
+# Interval in seconds for periodically releasing stale pending messages
+DEFAULT_PENDING_REQUEUE_INTERVAL_SEC = 30.0
+
+# Interval in seconds for refreshing cached Redis stream keys
+DEFAULT_STREAM_KEYS_REFRESH_INTERVAL_SEC = 30.0
+
+# Interval in seconds for batching and cleaning up deletions (xdel)
+DEFAULT_DELETE_CLEANUP_INTERVAL_SEC = 30.0
+
+# pending claim configuration
+# Only claim pending messages whose idle time exceeds this threshold.
+# Unit: milliseconds. Default: 1 hour.
+DEFAULT_PENDING_CLAIM_MIN_IDLE_MS = 3_600_000
+
+
+# Recency threshold for active streams
+# Consider a stream "active" if its last message is within this window.
+# Unit: seconds. Default: 1 hours.
+DEFAULT_STREAM_RECENT_ACTIVE_SECONDS = 3_600.0
+
+
+# Inactivity threshold for stream deletion
+# Delete streams whose last message ID timestamp is older than this threshold.
+# Unit: seconds. Default: 2 hour.
+DEFAULT_STREAM_INACTIVITY_DELETE_SECONDS = 7_200.0
+
+
+# task queue
+DEFAULT_STREAM_KEY_PREFIX = os.getenv(
+    "MEMSCHEDULER_STREAM_KEY_PREFIX", "scheduler:messages:stream:v2.0"
+)
 
 
 # ============== Running Tasks ==============
