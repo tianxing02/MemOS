@@ -395,16 +395,6 @@ class ChatHandler(BaseHandler):
                         [chat_req.mem_cube_id] if chat_req.mem_cube_id else [chat_req.user_id]
                     )
 
-                    # for playground, add the query to memory without response
-                    self._start_add_to_memory(
-                        user_id=chat_req.user_id,
-                        writable_cube_ids=writable_cube_ids,
-                        session_id=chat_req.session_id or "default_session",
-                        query=chat_req.query,
-                        full_response=None,
-                        async_mode="sync",
-                    )
-
                     # ====== first search text mem with parse goal ======
                     search_req = APISearchRequest(
                         query=chat_req.query,
@@ -506,6 +496,16 @@ class ChatHandler(BaseHandler):
                     end_time = time.time()
                     self.logger.info(f"second search time: {end_time - start_time}")
 
+                    # for playground, add the query to memory without response
+                    self._start_add_to_memory(
+                        user_id=chat_req.user_id,
+                        writable_cube_ids=writable_cube_ids,
+                        session_id=chat_req.session_id or "default_session",
+                        query=chat_req.query,
+                        full_response=None,
+                        async_mode="sync",
+                    )
+
                     # Extract memories from search results (second search)
                     memories_list = []
                     if search_response.data and search_response.data.get("text_mem"):
@@ -536,6 +536,12 @@ class ChatHandler(BaseHandler):
 
                     # Step 2: Build system prompt with memories
                     lang = detect_lang(chat_req.query)
+                    if pref_string:
+                        pref_string += (
+                            "\n# 注意\n- 在思考内容中，不要出现引用序号和id [1,2,3]等标记，否则会导致引用错误。"
+                            if lang == "zh"
+                            else "\n#warning\n- In thinking content, do not appear the reference number and id [1,2,3]etc. otherwise it will cause reference error."
+                        )
                     system_prompt = self._build_enhance_system_prompt(
                         filtered_memories, pref_string, lang=lang
                     )
