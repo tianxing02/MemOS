@@ -47,7 +47,8 @@ def add_context_memories(user_id: str, ctx: dict | list | None):
 
 def memos_search(user_id: str, query: str, top_k):
     results = client.search(query=query, user_id=user_id, top_k=top_k)
-    memories = results["text_mem"][0]["memories"]
+    print(results)
+    memories = results["pref_mem"][0]["memories"]
     print("Search memories:", len(memories))
 
     # Build readable context
