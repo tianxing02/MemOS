@@ -838,35 +838,28 @@ class BaseScheduler(RabbitMQSchedulerModule, RedisSchedulerModule, SchedulerLogg
         Args:
             messages: Single log message or list of log messages
         """
-        messages_list = [messages] if isinstance(messages, ScheduleLogForWebItem) else messages
-        for message in messages_list:
-            logger.info(
-                f"[DIAGNOSTIC] base_scheduler._submit_web_logs called. Message to publish: {message.model_dump_json(indent=2)}"
-            )
-        if self.rabbitmq_config is None:
-            logger.info(
-                "[DIAGNOSTIC] base_scheduler._submit_web_logs: RabbitMQ config not loaded; skipping publish."
-            )
-            return
-
         if isinstance(messages, ScheduleLogForWebItem):
             messages = [messages]  # transform single message to list
 
         for message in messages:
-            if not isinstance(message, ScheduleLogForWebItem):
-                error_msg = f"Invalid message type: {type(message)}, expected ScheduleLogForWebItem"
-                logger.error(error_msg)
-                raise TypeError(error_msg)
+            try:
+                # Always call publish; the publisher now caches when offline and flushes after reconnect
+                logger.info(
+                    f"[DIAGNOSTIC] base_scheduler._submit_web_logs: enqueue publish {message.model_dump_json(indent=2)}"
+                )
+                self.rabbitmq_publish_message(message=message.to_dict())
+                logger.info(
+                    "[DIAGNOSTIC] base_scheduler._submit_web_logs: publish dispatched "
+                    "item_id=%s task_id=%s label=%s",
+                    message.item_id,
+                    message.task_id,
+                    message.label,
+                )
+            except Exception as e:
+                logger.error(
+                    f"[DIAGNOSTIC] base_scheduler._submit_web_logs failed: {e}", exc_info=True
+                )
 
-            self._web_log_message_queue.put(message)
-            message_info = message.debug_info()
-            logger.debug(f"Submitted Scheduling log for web: {message_info}")
-
-            # Always call publish; the publisher now caches when offline and flushes after reconnect
-            logger.info(
-                f"[DIAGNOSTIC] base_scheduler._submit_web_logs: enqueue publish {message_info}"
-            )
-            self.rabbitmq_publish_message(message=message.to_dict())
         logger.debug(
             f"{len(messages)} submitted. {self._web_log_message_queue.qsize()} in queue. additional_log_info: {additional_log_info}"
         )
@@ -1016,14 +1009,24 @@ class BaseScheduler(RabbitMQSchedulerModule, RedisSchedulerModule, SchedulerLogg
                 q_sizes = self.memos_message_queue.qsize()
 
                 for stream_key, queue_length in q_sizes.items():
-                    # Expected format: "memos:stream:{user_id}:{mem_cube_id}" or "{user_id}"
+                    # Skip aggregate keys like 'total_size'
+                    if stream_key == "total_size":
+                        continue
+
+                    # Key format: ...:{user_id}:{mem_cube_id}:{task_label}
+                    # We want to extract user_id, which is the 3rd component from the end.
                     parts = stream_key.split(":")
                     if len(parts) >= 3:
-                        user_id = parts[2]
+                        user_id = parts[-3]
                         self.metrics.update_queue_length(queue_length, user_id)
-                    elif not self.use_redis_queue:  # local queue
-                        user_id = stream_key
-                        self.metrics.update_queue_length(queue_length, user_id)
+                    else:
+                        # Fallback for unexpected key formats (e.g. legacy or testing)
+                        # Try to use the key itself if it looks like a user_id (no colons)
+                        # or just log a warning?
+                        # For now, let's assume if it's not total_size and short, it might be a direct user_id key
+                        # (though that shouldn't happen with current queue implementations)
+                        if ":" not in stream_key:
+                            self.metrics.update_queue_length(queue_length, stream_key)
 
             except Exception as e:
                 logger.error(f"Error in metrics monitor loop: {e}", exc_info=True)
