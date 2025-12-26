@@ -154,6 +154,8 @@ class MemosApiClient:
                     "user_id": user_id,
                     "mem_cube_id": user_id,
                     "conversation_id": conv_id,
+                    "mode": "fine",
+                    "async_mode": "sync",
                 }
             )
             response = requests.request("POST", url, data=payload, headers=self.headers)
@@ -174,7 +176,7 @@ class MemosApiClient:
                 "mem_cube_id": user_id,
                 "conversation_id": "",
                 "top_k": top_k,
-                "mode": os.getenv("SEARCH_MODE", "fast"),
+                "mode": "fine",
                 "include_preference": True,
                 "pref_top_k": 6,
             },

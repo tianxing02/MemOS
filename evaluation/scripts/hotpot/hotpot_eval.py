@@ -29,8 +29,17 @@ oai_client = OpenAI(
     api_key=os.getenv("CHAT_MODEL_API_KEY"), base_url=os.getenv("CHAT_MODEL_BASE_URL")
 )
 
+pred_answers = {}
+pred_sp = {}
+output_dir = "evaluation/data/hotpot/output"
+os.makedirs(output_dir, exist_ok=True)
+pred_path = os.path.join(output_dir, "dev_distractor_pred.json")
+gold_path = os.path.join(output_dir, "dev_distractor_gold.json")
+
 
 def add_context_memories(user_id: str, ctx: dict | list | None):
+    if not isinstance(ctx, dict):
+        return
     titles = ctx.get("title") or []
     sentences_list = ctx.get("sentences") or []
 
@@ -47,14 +56,8 @@ def add_context_memories(user_id: str, ctx: dict | list | None):
 
 def memos_search(user_id: str, query: str, top_k):
     results = client.search(query=query, user_id=user_id, top_k=top_k)
-    print(results)
-    memories = results["pref_mem"][0]["memories"]
+    memories = results["text_mem"][0]["memories"]
     print("Search memories:", len(memories))
-
-    # Build readable context
-    for memory in memories[:3]:
-        print("memory content:", memory["memory"])
-        print("memory details:", memory["metadata"]["sources"])
 
     context = "\n".join([i["memory"] for i in memories]) + f"\n{results.get('pref_string', '')}"
     context = MEMOS_CONTEXT_TEMPLATE.format(user_id=user_id, memories=context)
@@ -137,12 +140,16 @@ def build_context_text(context_list):
     return "\n".join(parts)
 
 
-def build_and_ask(item):
+def ingest_context(item):
     qid = item.get("_id") or item.get("id")
-    question = item["question"]
     ctx = item.get("context")
     add_context_memories(qid, ctx)
+    return qid
 
+
+def search_and_ask(item):
+    qid = item.get("_id") or item.get("id")
+    question = item["question"]
     try:
         context, sp_list = memos_search(qid, question, top_k=7)
         raw_answer = llm_response(context=context, question=question, question_date="")
@@ -150,21 +157,12 @@ def build_and_ask(item):
         print("Question:", question)
         print("Answer (raw):", raw_answer)
         print("Answer (final):", answer)
-        # Persist sp for this qid
         pred_sp[qid] = sp_list
         return qid, answer
     except Exception as e:
         print(f"[Question {qid}] Error:", e)
         traceback.print_exc()
         return qid, ""
-
-
-pred_answers = {}
-pred_sp = {}
-output_dir = "evaluation/data/hotpot/output"
-os.makedirs(output_dir, exist_ok=True)
-pred_path = os.path.join(output_dir, "dev_distractor_pred.json")
-gold_path = os.path.join(output_dir, "dev_distractor_gold.json")
 
 
 def write_gold(data, out_path: str | None = None):
@@ -264,25 +262,39 @@ def main():
         if qid not in pred_answers:
             pending_items.append(it)
 
-    with ThreadPoolExecutor(max_workers=4) as executor:
-        futures = {
-            executor.submit(build_and_ask, item): idx for idx, item in enumerate(pending_items)
-        }
-        for future in tqdm(as_completed(futures), total=len(futures)):
-            try:
-                qid, answer = future.result()
-            except Exception as e:
-                print("线程执行失败:", e)
-                traceback.print_exc()
-                continue
-            pred_answers[qid] = answer
-            processed += 1
-            if processed % 10 == 0:
-                print("已完成:", processed, "剩余:", len(items_list) - processed)
-            save_pred()
-            if processed % interval == 0:
-                print("阶段评估，当前进度:", processed)
-                run_eval()
+    if pending_items:
+        print(f"[Step1：Ingest] start, items={len(pending_items)}")
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            futures = {
+                executor.submit(ingest_context, item): idx for idx, item in enumerate(pending_items)
+            }
+            for future in tqdm(as_completed(futures), total=len(futures), desc="Ingest"):
+                try:
+                    future.result()
+                except Exception as e:
+                    print("Ingest 线程执行失败:", e)
+                    traceback.print_exc()
+
+        print(f"[Step2：QA] start, items={len(pending_items)}")
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            futures = {
+                executor.submit(search_and_ask, item): idx for idx, item in enumerate(pending_items)
+            }
+            for future in tqdm(as_completed(futures), total=len(futures), desc="QA"):
+                try:
+                    qid, answer = future.result()
+                except Exception as e:
+                    print("QA 线程执行失败:", e)
+                    traceback.print_exc()
+                    continue
+                pred_answers[qid] = answer
+                processed += 1
+                if processed % 10 == 0:
+                    print("已完成:", processed, "剩余:", len(items_list) - processed)
+                save_pred()
+                if processed % interval == 0:
+                    print("阶段评估，当前进度:", processed)
+                    run_eval()
 
     run_eval()
 

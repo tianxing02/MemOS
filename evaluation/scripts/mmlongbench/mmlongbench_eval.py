@@ -1,3 +1,4 @@
+import argparse
 import json
 import os
 import sys
@@ -22,7 +23,6 @@ sys.path.append(str(SCRIPTS_ROOT))
 sys.path.append(str(SRC_ROOT))
 load_dotenv()
 max_retries = 5
-RESULTS_PATH = "evaluation/data/mmlongbench/test_results.json"
 
 
 def iter_markdown_files(base_dir: str | Path) -> Iterator[Path]:
@@ -62,11 +62,11 @@ def _get_lib_client(lib: str):
     return MemosApiClient()
 
 
-def _load_existing_results():
+def _load_existing_results(output_path):
     completed_pairs: set[tuple[str, str]] = set()
     completed_docs: set[str] = set()
     existing: list[dict] = []
-    p = Path(RESULTS_PATH)
+    p = Path(output_path)
     if p.exists():
         try:
             existing = json.loads(p.read_text(encoding="utf-8"))
@@ -85,37 +85,40 @@ def _load_existing_results():
     return existing, completed_pairs, completed_docs
 
 
-def add_context(client, user_id: str, md_path: Path, lib) -> None:
-    # Read markdown and add per paragraph
+def add_context(client, doc_id: str, md_path: Path, lib) -> None:
     text = md_path.read_text(encoding="utf-8", errors="ignore")
-    # Chunk by langchain text splitters (align with sentence_chunker style)
+    print(f"[Add context] doc_id={doc_id} path={md_path}")
     chunker = RecursiveCharacterTextSplitter.from_language(
-        language=Language.PYTHON, chunk_size=512, chunk_overlap=128
+        language=Language.PYTHON, chunk_size=5120, chunk_overlap=128
     )
     paragraphs = [p for p in chunker.split_text(text) if p.strip()]
-    print(f"[Ingest] doc_id={user_id} paragraphs={len(paragraphs)} path={md_path}")
+    print(f"[Ingest] doc_id={doc_id} paragraphs={len(paragraphs)} path={md_path}")
 
     if lib == "memos":
         messages = [{"role": "user", "content": p} for p in paragraphs]
-        ts = int(time.time())
         try:
-            client.add(messages=messages, user_id=user_id, conv_id=user_id)
-            print(f"[Add-memos] user={user_id} total={len(messages)}")
+            client.add(messages=messages, user_id=doc_id, conv_id=doc_id)
+            print(f"[Add-memos] user={doc_id} total={len(messages)}")
         except Exception as e:
             print(f"[Add-memos] failed: {e}")
 
     elif lib == "mem0":
+        chunker = RecursiveCharacterTextSplitter.from_language(
+            language=Language.PYTHON, chunk_size=512, chunk_overlap=128
+        )
+        paragraphs = [p for p in chunker.split_text(text) if p.strip()]
+
         messages = [{"role": "user", "content": p} for p in paragraphs]
         ts = int(time.time())
         try:
-            client.add(messages=messages, user_id=user_id, timestamp=ts, batch_size=10)
-            print(f"[Add-mem0] user={user_id} total={len(messages)}")
+            client.add(messages=messages, user_id=doc_id, timestamp=ts, batch_size=10)
+            print(f"[Add-mem0] user={doc_id} total={len(messages)}")
         except Exception as e:
             print(f"[Add-mem0] failed: {e}")
     elif lib == "supermemory":
         try:
-            client.add(content=text, user_id=user_id)
-            print(f"[Add-supermemory] user={user_id}")
+            client.add(content=text, user_id=doc_id)
+            print(f"[Add-supermemory] user={doc_id}")
         except Exception as e:
             print(f"[Add-supermemory] failed: {e}")
 
@@ -135,10 +138,10 @@ def memos_search(
             content = s.get("content") if isinstance(s, dict) else str(s)
             if content:
                 sources_texts.append(content)
-    candidates = mem_texts + sources_texts
-    image_paths = get_images(candidates)
+
+    image_paths = get_images(sources_texts)
     print(
-        f"[Search] user={user_id} top_k={top_k} memories={len(memories)} images={len(image_paths)}"
+        f"[Search] user={user_id} top_k={top_k} memories={len(memories), len(mem_texts)} images={len(image_paths)}"
     )
     return mem_texts, image_paths
 
@@ -169,26 +172,40 @@ def supermemory_search(
 
 def multimodal_answer(
     add_images_context, oai_client, memories: list[str], question: str, image_paths: list[str]
-) -> str:
+) -> tuple[str, int]:
     from memos.mem_os.core import MOSCore  # type: ignore
 
     system_prompt = MOSCore._build_system_prompt(MOSCore.__new__(MOSCore), memories)
 
     messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": question}]
     add_images_context(messages, image_paths)
+    print("[Response model]:", os.getenv("CHAT_MODEL"))
     resp = oai_client.chat.completions.create(
         model=os.getenv("CHAT_MODEL"), messages=messages, temperature=0
     )
-    return resp.choices[0].message.content or ""
+    return resp.choices[0].message.content or "", resp.usage.prompt_tokens
 
 
-def run_ingest_and_eval(
-    ppt_root: str | Path = "ppt_test_result",
-    questions_file: str | Path | None = None,
-    top_k: int = 15,
-    lib: str = "supermemory",
-    workers: int = 2,
-) -> None:
+def main():
+    parser = argparse.ArgumentParser(description="MMLongBench Evaluation Script")
+    parser.add_argument(
+        "--lib",
+        type=str,
+        default="supermemory",
+        help="Backend library to use (memos, mem0, supermemory)",
+    )
+    args = parser.parse_args()
+
+    # Hardcoded parameters
+    ppt_root = "ppt_test_result"
+    questions_file = "evaluation/data/mmlongbench/samples.json"
+    top_k = 15
+    workers = 4
+    lib = args.lib
+
+    print("[Memory util]:", lib)
+
+    start_time = time.time()
     client, oai_client, memos_context_template, add_images_context, get_images = _get_clients()
     if questions_file and Path(questions_file).exists():
         data = json.loads(Path(questions_file).read_text(encoding="utf-8"))
@@ -209,8 +226,13 @@ def run_ingest_and_eval(
         doc_list = [d for d in doc_ids_in_samples if (not allowed_docs or d in allowed_docs)]
         doc_list.sort()
 
+        output_path = f"evaluation/data/mmlongbench/test/{lib}_add_fine_search_fine_results.json"
+        report_path = Path(
+            f"evaluation/data/mmlongbench/test/{lib}_add_fine_search_fine_report.txt"
+        )
+
         # Resume state
-        existing, completed_pairs, completed_docs = _load_existing_results()
+        existing, completed_pairs, completed_docs = _load_existing_results(output_path)
         print(f"[Resume] loaded_results={len(existing)} completed_docs={len(completed_docs)}")
         results: list[dict] = list(existing)
         ingested_doc_ids: set[str] = set(completed_docs)
@@ -238,6 +260,8 @@ def run_ingest_and_eval(
                 else:
                     print(f"[Skip] markdown not found for doc_id={did}")
 
+        # Phase 1: Ingestion
+        print("Phase 1: Ingesting context...")
         if to_ingest:
             print(f"[Ingest-Concurrent] tasks={len(to_ingest)} from {ppt_root}")
 
@@ -256,6 +280,8 @@ def run_ingest_and_eval(
                     except Exception as e:
                         print(f"[Add-Error] {e}")
 
+        # Phase 2: Evaluation
+        print("Phase 2: Evaluating...")
         for doc_id in doc_list:
             if not doc_id:
                 continue
@@ -290,7 +316,9 @@ def run_ingest_and_eval(
                     )
                 else:
                     memories, images = [], []
-                resp = multimodal_answer(add_images_context, oai_client, memories, q, images)
+                resp, prompt_tokens = multimodal_answer(
+                    add_images_context, oai_client, memories, q, images
+                )
                 with open(
                     Path("evaluation/scripts/mmlongbench/eval/prompt_for_answer_extraction.md"),
                     encoding="utf-8",
@@ -315,6 +343,8 @@ def run_ingest_and_eval(
                 sr["score"] = score_local
                 sr["q_norm"] = q_norm_local
                 sr["images"] = images
+                sr["prompt_tokens"] = prompt_tokens
+                sr["memory_used"] = memories
                 return sr
 
             with ThreadPoolExecutor(max_workers=workers) as executor:
@@ -337,7 +367,8 @@ def run_ingest_and_eval(
                         print("[Answer]:", res.get("pred"))
                         print("[Ground truth]:", res.get("answer"))
                         print("[Score]:", res.get("score"))
-                        out_json = Path("evaluation/data/mmlongbench/test_results.json")
+                        print("[Prompt Tokens]:", res.get("prompt_tokens"))
+                        out_json = Path(output_path)
                         out_json.parent.mkdir(parents=True, exist_ok=True)
                         out_json.write_text(
                             json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -346,14 +377,23 @@ def run_ingest_and_eval(
                         total_target = sum(
                             1 for s in data if str(s.get("doc_id") or "") in doc_list
                         )
-                        print(f"[Metric] acc={acc} f1={f1} processed={len(results)}/{total_target}")
+                        total_tokens = sum(r.get("prompt_tokens", 0) for r in results)
+                        avg_tokens = round(total_tokens / len(results), 2) if results else 0
+                        print(
+                            f"[Metric] acc={acc} f1={f1} avg_tokens={avg_tokens} processed={len(results)}/{total_target}"
+                        )
                     except Exception as e:
                         print(f"[Error] processing item: {e}")
 
-        report_path = Path("evaluation/data/mmlongbench/test_results_report.txt")
         show_results(results, show_path=str(report_path))
         print(f"[Report] saved to {report_path}")
 
+        end_time = time.time()
+        total_duration = end_time - start_time
+        with open(report_path, "a", encoding="utf-8") as f:
+            f.write(f"\nTotal Evaluation Time: {total_duration:.2f} seconds\n")
+        print(f"[Time] Total duration: {total_duration:.2f}s")
+
 
 if __name__ == "__main__":
-    run_ingest_and_eval(questions_file=Path("evaluation/data/mmlongbench/samples.json"))
+    main()
