@@ -48,7 +48,6 @@ def format_memory_item(memory_data: Any) -> dict[str, Any]:
 
     memory["ref_id"] = ref_id
     memory["metadata"]["embedding"] = []
-    memory["metadata"]["sources"] = []
     memory["metadata"]["usage"] = []
     memory["metadata"]["ref_id"] = ref_id
     memory["metadata"]["id"] = memory_id
