@@ -335,7 +335,7 @@ def main():
     dataset = _dump_dataset_to_local()
     results: list[dict] = []
     os.makedirs("evaluation/data/longbenchV2", exist_ok=True)
-    out_json = Path(f"evaluation/data/longbenchV2/test/{args.lib}_results.json")
+    out_json = Path(f"evaluation/data/longbenchV2/test/{args.lib}_cot_results.json")
 
     # Checkpoint loading
     processed_ids = set()
