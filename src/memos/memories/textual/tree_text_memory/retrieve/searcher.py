@@ -47,13 +47,16 @@ class Searcher:
         search_strategy: dict | None = None,
         manual_close_internet: bool = True,
         tokenizer: FastTokenizer | None = None,
+        include_embedding: bool = False,
     ):
         self.graph_store = graph_store
         self.embedder = embedder
         self.llm = dispatcher_llm
 
         self.task_goal_parser = TaskGoalParser(dispatcher_llm)
-        self.graph_retriever = GraphMemoryRetriever(graph_store, embedder, bm25_retriever)
+        self.graph_retriever = GraphMemoryRetriever(
+            graph_store, embedder, bm25_retriever, include_embedding=include_embedding
+        )
         self.reranker = reranker
         self.reasoner = MemoryReasoner(dispatcher_llm)
 
@@ -282,6 +285,49 @@ class Searcher:
         return parsed_goal, query_embedding, context, query
 
     @timed
+    def _retrieve_simple(
+        self,
+        query: str,
+        top_k: int,
+        search_filter: dict | None = None,
+        user_name: str | None = None,
+        **kwargs,
+    ):
+        """Retrieve from by keywords and embedding"""
+        query_words = []
+        if self.tokenizer:
+            query_words = self.tokenizer.tokenize_mixed(query)
+        else:
+            query_words = query.strip().split()
+        query_words = [query, *query_words]
+        logger.info(f"[SIMPLESEARCH] Query words: {query_words}")
+        query_embeddings = self.embedder.embed(query_words)
+
+        items = self.graph_retriever.retrieve_from_mixed(
+            top_k=top_k * 2,
+            memory_scope=None,
+            query_embedding=query_embeddings,
+            search_filter=search_filter,
+            user_name=user_name,
+            use_fast_graph=self.use_fast_graph,
+        )
+        logger.info(f"[SIMPLESEARCH] Items count: {len(items)}")
+        documents = [getattr(item, "memory", "") for item in items]
+        documents_embeddings = self.embedder.embed(documents)
+        similarity_matrix = cosine_similarity_matrix(documents_embeddings)
+        selected_indices, _ = find_best_unrelated_subgroup(documents, similarity_matrix)
+        selected_items = [items[i] for i in selected_indices]
+        logger.info(
+            f"[SIMPLESEARCH] after unrelated subgroup selection items count: {len(selected_items)}"
+        )
+        return self.reranker.rerank(
+            query=query,
+            query_embedding=query_embeddings[0],
+            graph_results=selected_items,
+            top_k=top_k,
+        )
+
+    @timed
     def _retrieve_paths(
         self,
         query,
@@ -364,7 +410,6 @@ class Searcher:
                         mode=mode,
                     )
                 )
-
             results = []
             for t in tasks:
                 results.extend(t.result())

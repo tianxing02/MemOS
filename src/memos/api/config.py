@@ -7,16 +7,19 @@ import os
 import re
 import time
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import requests
 
 from dotenv import load_dotenv
 
-from memos.configs.mem_cube import GeneralMemCubeConfig
-from memos.configs.mem_os import MOSConfig
 from memos.context.context import ContextThread
-from memos.mem_cube.general import GeneralMemCube
+
+
+if TYPE_CHECKING:
+    from memos.configs.mem_cube import GeneralMemCubeConfig
+    from memos.configs.mem_os import MOSConfig
+    from memos.mem_cube.general import GeneralMemCube
 
 
 # Load environment variables
@@ -378,8 +381,34 @@ class APIConfig:
             return {
                 "backend": embedder_backend,
                 "config": {
-                    "url": os.getenv("MOS_RERANKER_URL"),
+                    "url": os.getenv("MOS_RERANKER_URL", "localhost:8000/v1/rerank"),
                     "model": os.getenv("MOS_RERANKER_MODEL", "bge-reranker-v2-m3"),
+                    "timeout": 10,
+                    "headers_extra": json.loads(os.getenv("MOS_RERANKER_HEADERS_EXTRA", "{}")),
+                    "rerank_source": os.getenv("MOS_RERANK_SOURCE"),
+                    "reranker_strategy": os.getenv("MOS_RERANKER_STRATEGY", "single_turn"),
+                },
+            }
+        else:
+            return {
+                "backend": "cosine_local",
+                "config": {
+                    "level_weights": {"topic": 1.0, "concept": 1.0, "fact": 1.0},
+                    "level_field": "background",
+                },
+            }
+
+    @staticmethod
+    def get_feedback_reranker_config() -> dict[str, Any]:
+        """Get embedder configuration."""
+        embedder_backend = os.getenv("MOS_FEEDBACK_RERANKER_BACKEND", "http_bge")
+
+        if embedder_backend in ["http_bge", "http_bge_strategy"]:
+            return {
+                "backend": embedder_backend,
+                "config": {
+                    "url": os.getenv("MOS_RERANKER_URL", "localhost:8000/v1/rerank"),
+                    "model": os.getenv("MOS_FEEDBACK_RERANKER_MODEL", "bge-reranker-v2-m3"),
                     "timeout": 10,
                     "headers_extra": json.loads(os.getenv("MOS_RERANKER_HEADERS_EXTRA", "{}")),
                     "rerank_source": os.getenv("MOS_RERANK_SOURCE"),
@@ -442,7 +471,7 @@ class APIConfig:
         return {
             "backend": "bocha",
             "config": {
-                "api_key": os.getenv("BOCHA_API_KEY"),
+                "api_key": os.getenv("BOCHA_API_KEY", "bocha"),
                 "max_results": 15,
                 "num_per_request": 10,
                 "reader": {
@@ -645,7 +674,7 @@ class APIConfig:
     @staticmethod
     def is_default_cube_config_enabled() -> bool:
         """Check if default cube config is enabled via environment variable."""
-        return os.getenv("MOS_ENABLE_DEFAULT_CUBE_CONFIG", "false").lower() == "true"
+        return os.getenv("MOS_ENABLE_DEFAULT_CUBE_CONFIG", "true").lower() == "true"
 
     @staticmethod
     def is_dingding_bot_enabled() -> bool:
@@ -779,8 +808,12 @@ class APIConfig:
         return config
 
     @staticmethod
-    def create_user_config(user_name: str, user_id: str) -> tuple[MOSConfig, GeneralMemCube]:
+    def create_user_config(user_name: str, user_id: str) -> tuple["MOSConfig", "GeneralMemCube"]:
         """Create configuration for a specific user."""
+        from memos.configs.mem_cube import GeneralMemCubeConfig
+        from memos.configs.mem_os import MOSConfig
+        from memos.mem_cube.general import GeneralMemCube
+
         openai_config = APIConfig.get_openai_config()
         qwen_config = APIConfig.qwen_config()
         vllm_config = APIConfig.vllm_config()
@@ -887,6 +920,9 @@ class APIConfig:
                                 "bm25": bool(os.getenv("BM25_CALL", "false") == "true"),
                                 "cot": bool(os.getenv("VEC_COT_CALL", "false") == "true"),
                             },
+                            "include_embedding": bool(
+                                os.getenv("INCLUDE_EMBEDDING", "false") == "true"
+                            ),
                         },
                     },
                     "act_mem": {}
@@ -904,12 +940,14 @@ class APIConfig:
         return default_config, default_mem_cube
 
     @staticmethod
-    def get_default_cube_config() -> GeneralMemCubeConfig | None:
+    def get_default_cube_config() -> "GeneralMemCubeConfig | None":
         """Get default cube configuration for product initialization.
 
         Returns:
             GeneralMemCubeConfig | None: Default cube configuration if enabled, None otherwise.
         """
+        from memos.configs.mem_cube import GeneralMemCubeConfig
+
         if not APIConfig.is_default_cube_config_enabled():
             return None
 
@@ -960,6 +998,9 @@ class APIConfig:
                                 "cot": bool(os.getenv("VEC_COT_CALL", "false") == "true"),
                             },
                             "mode": os.getenv("ASYNC_MODE", "sync"),
+                            "include_embedding": bool(
+                                os.getenv("INCLUDE_EMBEDDING", "false") == "true"
+                            ),
                         },
                     },
                     "act_mem": {}
