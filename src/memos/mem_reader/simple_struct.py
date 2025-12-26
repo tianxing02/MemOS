@@ -2,7 +2,6 @@ import concurrent.futures
 import copy
 import json
 import os
-import re
 import traceback
 
 from abc import ABC
@@ -18,6 +17,13 @@ from memos.embedders.factory import EmbedderFactory
 from memos.llms.factory import LLMFactory
 from memos.mem_reader.base import BaseMemReader
 from memos.mem_reader.read_multi_modal import coerce_scene_data, detect_lang
+from memos.mem_reader.utils import (
+    count_tokens_text,
+    derive_key,
+    parse_json_result,
+    parse_keep_filter_response,
+    parse_rewritten_response,
+)
 from memos.memories.textual.item import (
     SourceMessage,
     TextualMemoryItem,
@@ -26,6 +32,8 @@ from memos.memories.textual.item import (
 from memos.templates.mem_reader_prompts import (
     CUSTOM_TAGS_INSTRUCTION,
     CUSTOM_TAGS_INSTRUCTION_ZH,
+    GENERAL_STRUCT_STRING_READER_PROMPT,
+    GENERAL_STRUCT_STRING_READER_PROMPT_ZH,
     PROMPT_MAPPING,
     SIMPLE_STRUCT_DOC_READER_PROMPT,
     SIMPLE_STRUCT_DOC_READER_PROMPT_ZH,
@@ -79,29 +87,12 @@ PROMPT_DICT = {
         "zh_example": SIMPLE_STRUCT_MEM_READER_EXAMPLE_ZH,
     },
     "doc": {"en": SIMPLE_STRUCT_DOC_READER_PROMPT, "zh": SIMPLE_STRUCT_DOC_READER_PROMPT_ZH},
+    "general_string": {
+        "en": GENERAL_STRUCT_STRING_READER_PROMPT,
+        "zh": GENERAL_STRUCT_STRING_READER_PROMPT_ZH,
+    },
     "custom_tags": {"en": CUSTOM_TAGS_INSTRUCTION, "zh": CUSTOM_TAGS_INSTRUCTION_ZH},
 }
-
-
-try:
-    import tiktoken
-
-    try:
-        _ENC = tiktoken.encoding_for_model("gpt-4o-mini")
-    except Exception:
-        _ENC = tiktoken.get_encoding("cl100k_base")
-
-    def _count_tokens_text(s: str) -> int:
-        return len(_ENC.encode(s or "", disallowed_special=()))
-except Exception:
-    # Heuristic fallback: zh chars ~1 token, others ~1 token per ~4 chars
-    def _count_tokens_text(s: str) -> int:
-        if not s:
-            return 0
-        zh_chars = re.findall(r"[\u4e00-\u9fff]", s)
-        zh = len(zh_chars)
-        rest = len(s) - zh
-        return zh + max(1, rest // 4)
 
 
 def _build_node(idx, message, info, source_info, llm, parse_json_result, embedder):
@@ -166,14 +157,6 @@ def _build_node(idx, message, info, source_info, llm, parse_json_result, embedde
         return None
 
 
-def _derive_key(text: str, max_len: int = 80) -> str:
-    """default key when without LLM: first max_len words"""
-    if not text:
-        return ""
-    sent = re.split(r"[。！？!?]\s*|\n", text.strip())[0]
-    return (sent[:max_len]).strip()
-
-
 class SimpleStructMemReader(BaseMemReader, ABC):
     """Naive implementation of MemReader."""
 
@@ -191,7 +174,8 @@ class SimpleStructMemReader(BaseMemReader, ABC):
         self.memory_max_length = 8000
         # Use token-based windowing; default to ~5000 tokens if not configured
         self.chat_window_max_tokens = getattr(self.config, "chat_window_max_tokens", 1024)
-        self._count_tokens = _count_tokens_text
+        self._count_tokens = count_tokens_text
+        self.searcher = None
 
     def _make_memory_item(
         self,
@@ -218,7 +202,7 @@ class SimpleStructMemReader(BaseMemReader, ABC):
                 memory_type=memory_type,
                 status="activated",
                 tags=tags or [],
-                key=key if key is not None else _derive_key(value),
+                key=key if key is not None else derive_key(value),
                 embedding=self.embedder.embed([value])[0],
                 usage=[],
                 sources=sources or [],
@@ -248,7 +232,7 @@ class SimpleStructMemReader(BaseMemReader, ABC):
         messages = [{"role": "user", "content": prompt}]
         try:
             response_text = self.llm.generate(messages)
-            response_json = self.parse_json_result(response_text)
+            response_json = parse_json_result(response_text)
         except Exception as e:
             logger.error(f"[LLM] Exception during chat generation: {e}")
             response_json = {
@@ -450,53 +434,81 @@ class SimpleStructMemReader(BaseMemReader, ABC):
         standard_scene_data = coerce_scene_data(scene_data, type)
         return self._read_memory(standard_scene_data, type, info, mode)
 
-    @staticmethod
-    def _parse_hallucination_filter_response(text: str) -> tuple[bool, dict[int, dict]]:
-        """Parse index-keyed JSON from hallucination filter response.
-        Expected shape: { "0": {"need_rewrite": bool, "rewritten_suffix": str, "reason": str}, ... }
-        Returns (success, parsed_dict) with int keys.
-        """
+    def rewrite_memories(
+        self, messages: list[dict], memory_list: list[TextualMemoryItem], user_only: bool = True
+    ) -> list[TextualMemoryItem]:
+        # Build input objects with memory text and metadata (timestamps, sources, etc.)
+        if user_only:
+            template = PROMPT_MAPPING["rewrite_user_only"]
+            filtered_messages = [m for m in messages if m.get("role") != "assistant"]
+            if len(filtered_messages) < 1:
+                return memory_list
+        else:
+            template = PROMPT_MAPPING["rewrite"]
+            filtered_messages = messages
+            if len(filtered_messages) < 2:
+                return memory_list
+
+        prompt_args = {
+            "messages_inline": "\n".join(
+                [f"- [{message['role']}]: {message['content']}" for message in filtered_messages]
+            ),
+            "memories_inline": json.dumps(
+                {idx: mem.memory for idx, mem in enumerate(memory_list)},
+                ensure_ascii=False,
+                indent=2,
+            ),
+        }
+        prompt = template.format(**prompt_args)
+
+        # Optionally run filter and parse the output
         try:
-            data = json.loads(text)
-        except Exception:
-            return False, {}
+            raw = self.llm.generate([{"role": "user", "content": prompt}])
+            success, parsed = parse_rewritten_response(raw)
+            logger.info(
+                f"[rewrite_memories] Hallucination filter parsed successfully: {success}；prompt: {prompt}"
+            )
+            if success:
+                logger.info(f"Rewrite filter result: {parsed}")
 
-        if not isinstance(data, dict):
-            return False, {}
+                new_memory_list = []
+                for mem_idx, content in parsed.items():
+                    if mem_idx < 0 or mem_idx >= len(memory_list):
+                        logger.warning(
+                            f"[rewrite_memories] Invalid memory index {mem_idx} for memory_list {len(memory_list)}, skipping."
+                        )
+                        continue
 
-        result: dict[int, dict] = {}
-        for k, v in data.items():
-            try:
-                idx = int(k)
-            except Exception:
-                # allow integer keys as-is
-                if isinstance(k, int):
-                    idx = k
-                else:
-                    continue
-            if not isinstance(v, dict):
-                continue
-            need_rewrite = v.get("need_rewrite")
-            rewritten_suffix = v.get("rewritten_suffix", "")
-            reason = v.get("reason", "")
-            if (
-                isinstance(need_rewrite, bool)
-                and isinstance(rewritten_suffix, str)
-                and isinstance(reason, str)
-            ):
-                result[idx] = {
-                    "need_rewrite": need_rewrite,
-                    "rewritten_suffix": rewritten_suffix,
-                    "reason": reason,
-                }
+                    need_rewrite = content.get("need_rewrite", False)
+                    rewritten_text = content.get("rewritten", "")
+                    reason = content.get("reason", "")
+                    original_text = memory_list[mem_idx].memory
 
-        return (len(result) > 0), result
+                    # Replace memory text with rewritten content when rewrite is needed
+                    if need_rewrite and isinstance(rewritten_text, str):
+                        logger.info(
+                            f"[rewrite_memories] index={mem_idx}, need_rewrite={need_rewrite}, rewritten='{rewritten_text}', reason='{reason}', original memory='{original_text}', action='replace_text'"
+                        )
+                        if len(rewritten_text.strip()) != 0:
+                            memory_list[mem_idx].memory = rewritten_text
+                            new_memory_list.append(memory_list[mem_idx])
+                    else:
+                        new_memory_list.append(memory_list[mem_idx])
+                return new_memory_list
+            else:
+                logger.warning("Rewrite filter parsing failed or returned empty result.")
+        except Exception as e:
+            logger.error(f"Rewrite filter execution error: {e}", stack_info=True)
+
+        return memory_list
 
     def filter_hallucination_in_memories(
         self, messages: list[dict], memory_list: list[TextualMemoryItem]
     ) -> list[TextualMemoryItem]:
         # Build input objects with memory text and metadata (timestamps, sources, etc.)
         template = PROMPT_MAPPING["hallucination_filter"]
+        if len(messages) < 2:
+            return memory_list
         prompt_args = {
             "messages_inline": "\n".join(
                 [f"- [{message['role']}]: {message['content']}" for message in messages]
@@ -512,37 +524,32 @@ class SimpleStructMemReader(BaseMemReader, ABC):
         # Optionally run filter and parse the output
         try:
             raw = self.llm.generate([{"role": "user", "content": prompt}])
-            success, parsed = self._parse_hallucination_filter_response(raw)
+            success, parsed = parse_keep_filter_response(raw)
             logger.info(
-                f"[filter_hallucination_in_memories] Hallucination filter parsed successfully: {success}"
+                f"[filter_hallucination_in_memories] Hallucination filter parsed successfully: {success}；prompt: {prompt}"
             )
             if success:
-                new_mem_list = []
                 logger.info(f"Hallucination filter result: {parsed}")
-                assert len(parsed) == len(memory_list)
-                for mem_idx, content in parsed.items():
-                    need_rewrite = content.get("need_rewrite", False)
-                    rewritten_suffix = content.get("rewritten_suffix", "")
+
+                filtered_list = []
+                for mem_idx, mem in enumerate(memory_list):
+                    content = parsed.get(mem_idx)
+                    if not content:
+                        logger.warning(f"No verdict for memory {mem_idx}, keeping it.")
+                        filtered_list.append(mem)
+                        continue
+
+                    keep = content.get("keep", True)
                     reason = content.get("reason", "")
 
-                    # Append a new memory item instead of replacing the original
-                    if (
-                        need_rewrite
-                        and isinstance(rewritten_suffix, str)
-                        and len(rewritten_suffix.strip()) > 0
-                    ):
-                        original_text = memory_list[mem_idx].memory
-
+                    if keep:
+                        filtered_list.append(mem)
+                    else:
                         logger.info(
-                            f"[filter_hallucination_in_memories] index={mem_idx}, need_rewrite={need_rewrite}, rewritten_suffix='{rewritten_suffix}', reason='{reason}', original memory='{original_text}', action='append_suffix'"
+                            f"[filter_hallucination_in_memories] Dropping memory index={mem_idx}, reason='{reason}', memory='{mem.memory}'"
                         )
 
-                        # Append only the suffix to the original memory text
-                        memory_list[mem_idx].memory = original_text + rewritten_suffix
-                        new_mem_list.append(memory_list[mem_idx])
-                    else:
-                        new_mem_list.append(memory_list[mem_idx])
-                return new_mem_list
+                return filtered_list
             else:
                 logger.warning("Hallucination filter parsing failed or returned empty result.")
         except Exception as e:
@@ -597,13 +604,44 @@ class SimpleStructMemReader(BaseMemReader, ABC):
 
         if os.getenv("SIMPLE_STRUCT_ADD_FILTER", "false") == "true":
             # Build inputs
-            new_memory_list = []
-            for unit_messages, unit_memory_list in zip(messages, memory_list, strict=False):
-                unit_memory_list = self.filter_hallucination_in_memories(
-                    messages=unit_messages, memory_list=unit_memory_list
-                )
-                new_memory_list.append(unit_memory_list)
-            memory_list = new_memory_list
+            combined_messages = []
+            for group_messages in messages:
+                combined_messages.extend(group_messages)
+
+            for group_id in range(len(memory_list)):
+                try:
+                    original_memory_group = copy.deepcopy(memory_list[group_id])
+                    serialized_origin_memories = json.dumps(
+                        [one.memory for one in original_memory_group], indent=2
+                    )
+                    revised_memory_list = self.rewrite_memories(
+                        messages=combined_messages,
+                        memory_list=original_memory_group,
+                        user_only=os.getenv("SIMPLE_STRUCT_REWRITE_USER_ONLY", "true").lower()
+                        == "true",
+                    )
+                    serialized_revised_memories = json.dumps(
+                        [one.memory for one in revised_memory_list], indent=2
+                    )
+                    if serialized_origin_memories != serialized_revised_memories:
+                        memory_list[group_id] = revised_memory_list
+                        logger.info(
+                            f"[SIMPLE_STRUCT_ADD_FILTER] Modified the list for group_id={group_id}: "
+                            f"\noriginal={serialized_origin_memories},"
+                            f"\nrevised={serialized_revised_memories}"
+                        )
+
+                except Exception as e:
+                    group_serialized = [
+                        one.memory if hasattr(one, "memory") else str(one)
+                        for one in memory_list[group_id]
+                    ]
+                    logger.error(
+                        f"There is an exception while filtering group_id={group_id}: {e}\n"
+                        f"messages: {combined_messages}\n"
+                        f"memory_list(serialized): {group_serialized}",
+                        exc_info=True,
+                    )
         return memory_list
 
     def fine_transfer_simple_mem(
@@ -811,7 +849,7 @@ class SimpleStructMemReader(BaseMemReader, ABC):
                     info,
                     source_info_list,
                     self.llm,
-                    self.parse_json_result,
+                    parse_json_result,
                     self.embedder,
                 ): idx
                 for idx, msg in enumerate(messages)
@@ -834,44 +872,3 @@ class SimpleStructMemReader(BaseMemReader, ABC):
         self, raw_node: TextualMemoryItem, custom_tags: list[str] | None = None
     ):
         raise NotImplementedError
-
-    def parse_json_result(self, response_text: str) -> dict:
-        s = (response_text or "").strip()
-
-        m = re.search(r"```(?:json)?\s*([\s\S]*?)```", s, flags=re.I)
-        s = (m.group(1) if m else s.replace("```", "")).strip()
-
-        i = s.find("{")
-        if i == -1:
-            return {}
-        s = s[i:].strip()
-
-        try:
-            return json.loads(s)
-        except json.JSONDecodeError:
-            pass
-
-        j = max(s.rfind("}"), s.rfind("]"))
-        if j != -1:
-            try:
-                return json.loads(s[: j + 1])
-            except json.JSONDecodeError:
-                pass
-
-        def _cheap_close(t: str) -> str:
-            t += "}" * max(0, t.count("{") - t.count("}"))
-            t += "]" * max(0, t.count("[") - t.count("]"))
-            return t
-
-        t = _cheap_close(s)
-        try:
-            return json.loads(t)
-        except json.JSONDecodeError as e:
-            if "Invalid \\escape" in str(e):
-                s = s.replace("\\", "\\\\")
-                return json.loads(s)
-            logger.error(
-                f"[JSONParse] Failed to decode JSON: {e}\nTail: Raw {response_text} \
-                json: {s}"
-            )
-            return {}
