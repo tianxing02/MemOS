@@ -20,10 +20,12 @@ from evaluation.scripts.utils.prompts import HOTPOT_ANSWER_PROMPT
 load_dotenv()
 
 
-def llm_response(oai_client, context: str, question: str, question_date: str | None = None) -> str:
+def llm_response(
+    oai_client, chat_model: str, context: str, question: str, question_date: str | None = None
+) -> str:
     prompt = HOTPOT_ANSWER_PROMPT.format(question=question, context=context)
     resp = oai_client.chat.completions.create(
-        model=os.getenv("CHAT_MODEL"),
+        model=chat_model,
         messages=[{"role": "system", "content": prompt}],
         temperature=0,
     )
@@ -55,26 +57,47 @@ def _save_pred(
     os.replace(tmp, pred_path)
 
 
-def write_gold(gold_path: Path) -> None:
-    load_hotpot_data(gold_path.parent)
-
-
 def run_eval(pred_path: Path, gold_path: Path):
     spec = importlib.util.spec_from_file_location(
         "hotpot_eval_v1", "evaluation/scripts/hotpot/hotpot_evaluate_v1.py"
     )
     m = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(m)
-    m.eval(str(pred_path), str(gold_path))
+    metrics = m.eval(str(pred_path), str(gold_path))
+
+    # Save metrics to pred_path (beginning of file)
+    try:
+        results_path = pred_path
+        current_data = {}
+        if results_path.exists():
+            with open(results_path, encoding="utf-8") as f:
+                current_data = json.load(f)
+
+        if isinstance(current_data, list):
+            new_data = [metrics, *current_data]
+
+        elif isinstance(current_data, dict):
+            # Put metrics at the beginning
+            new_data = metrics.copy()
+            for k, v in current_data.items():
+                if k not in new_data:
+                    new_data[k] = v
+        else:
+            new_data = metrics
+
+        with open(results_path, "w", encoding="utf-8") as f:
+            json.dump(new_data, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        print(f"Failed to save metrics to {results_path}: {e}")
 
 
-def evaluate_one(oai_client, row: dict) -> tuple[str, str, list]:
+def evaluate_one(oai_client, row: dict, chat_model: str) -> tuple[str, str, list]:
     qid = str(row.get("_id"))
     question = row.get("question") or ""
     context = row.get("context") or ""
     sp_list = row.get("sp") or []
 
-    raw_answer = llm_response(oai_client, context=context, question=question)
+    raw_answer = llm_response(oai_client, chat_model, context=context, question=question)
     extracted_res = extract_answer(question, raw_answer)
     answer = parse_extracted_answer(extracted_res, raw_answer)
     return qid, answer, sp_list
@@ -92,36 +115,28 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--max_samples", type=int, default=None)
-    parser.add_argument("--search_results_path", type=str, default=None)
     parser.add_argument("--version-dir", "-v", default=None, help="Version directory name")
-    parser.add_argument(
-        "--chat-model", default=None, help="Chat model name (overrides CHAT_MODEL env var)"
-    )
+    parser.add_argument("--chat-model", default=None, help="Chat model name")
+    parser.add_argument("--search-mode", default="fine", help="Search mode")
+
     args = parser.parse_args(argv)
 
-    if args.search_results_path:
-        search_path = Path(args.search_results_path)
-    elif args.version_dir:
-        search_path = Path(
-            f"evaluation/data/hotpot/{args.version_dir}/{args.lib}_search_results.json"
-        )
+    output_dir = Path(f"evaluation/data/hotpot/{args.version_dir}")
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    if args.lib == "memos":
+        search_path = output_dir / f"{args.lib}_{args.search_mode}_search_results.json"
+        pred_path = output_dir / f"{args.lib}_{args.search_mode}_search_eval_results.json"
     else:
-        search_path = Path(f"evaluation/data/hotpot/intermediate/{args.lib}_search_results.json")
+        search_path = output_dir / f"{args.lib}_search_results.json"
+        pred_path = output_dir / f"{args.lib}_eval_results.json"
+    gold_path = Path("evaluation/data/hotpot/dev_distractor_gold.json")
 
     if not search_path.exists():
         raise FileNotFoundError(f"Search results not found: {search_path}")
 
-    if args.version_dir:
-        output_dir = Path(f"evaluation/data/hotpot/{args.version_dir}")
-    else:
-        output_dir = Path("evaluation/data/hotpot/output")
-
-    output_dir.mkdir(parents=True, exist_ok=True)
-    pred_path = output_dir / f"{args.lib}_dev_distractor_pred.json"
-    gold_path = output_dir / "dev_distractor_gold.json"
-
     if not gold_path.exists():
-        write_gold(gold_path)
+        load_hotpot_data("evaluation/data/hotpot")
 
     pred_answers: dict[str, str] = {}
     pred_sp: dict[str, list] = {}
@@ -154,12 +169,13 @@ def main(argv: list[str] | None = None) -> None:
     metrics = Metrics()
     start_time = time.time()
 
+    print("[Response model]: ", args.chat_model)
     with ThreadPoolExecutor(max_workers=args.workers) as executor:
 
         def do_eval(row):
             st = time.perf_counter()
             try:
-                res = evaluate_one(oai_client, row)
+                res = evaluate_one(oai_client, row, args.chat_model)
                 dur = time.perf_counter() - st
                 metrics.record(dur, True)
                 return res
@@ -179,12 +195,10 @@ def main(argv: list[str] | None = None) -> None:
                 processed += 1
                 if idx % 20 == 0:
                     _save_pred(pred_path, pred_answers, pred_sp)
-                    run_eval(pred_path, gold_path)
             except Exception as e:
                 print(f"[Eval] Error: {e}")
 
     _save_pred(pred_path, pred_answers, pred_sp)
-    run_eval(pred_path, gold_path)
 
     # Save performance metrics (merge into pred json)
     total_duration = time.time() - start_time
@@ -199,24 +213,13 @@ def main(argv: list[str] | None = None) -> None:
         },
     }
     _save_pred(pred_path, pred_answers, pred_sp, perf=perf_obj)
+    run_eval(pred_path, gold_path)
 
     print("\n" + "=" * 60)
     print("Evaluation finished! Statistics:")
     print("=" * 60)
     print(f"Total duration: {total_duration:.2f}s")
     print(f"Success: {summary['counts']['success']} / Failed: {summary['counts']['failed']}")
-
-    if summary["stats"]:
-        stats = summary["stats"]
-        qps = stats["count"] / total_duration if total_duration > 0 else 0
-        print(f"QPS: {qps:.2f}")
-        print("Latency stats (ms):")
-        print(f"  Mean: {stats['mean']:.2f}")
-        print(f"  Median: {stats['median']:.2f}")
-        print(f"  Min: {stats['min']:.2f}")
-        print(f"  Max: {stats['max']:.2f}")
-        print(f"  P95: {stats['p95']:.2f}")
-        print(f"  P99: {stats['p99']:.2f}")
 
     if summary["errors"]:
         print("\nError stats:")

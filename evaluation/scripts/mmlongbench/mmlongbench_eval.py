@@ -224,7 +224,7 @@ def multimodal_answer(
             )
 
     resp = oai_client.chat.completions.create(
-        model=os.getenv("CHAT_MODEL", "gpt-4o-mini"), messages=messages, temperature=0
+        model=args.chat_model, messages=messages, temperature=0
     )
     return resp.choices[0].message.content or "", resp.usage.prompt_tokens
 
@@ -290,6 +290,7 @@ def process_single_item(item: dict, index: int, top_k: int = 20) -> dict:
 def run_eval(
     questions_file: str | Path,
     output_file: str | Path | None = None,
+    version_dir: str | Path | None = None,
     max_workers: int = 10,
     top_k: int = 20,
 ) -> None:
@@ -297,6 +298,7 @@ def run_eval(
     Run evaluation
 
     Args:
+        version_dir: version directory
         questions_file: Input questions file path
         output_file: Output file path, overwrites input file if None
         max_workers: Number of concurrent workers
@@ -401,12 +403,13 @@ def run_eval(
     print(f"{'=' * 60}")
 
     # Generate detailed report
-    report_path = output_file.with_suffix(".report.txt")
+    report_path = version_dir / f"{args.lib}_eval_results.txt"
     show_results(eval_results, show_path=str(report_path))
     print(f"[Report] Detailed report saved to: {report_path}")
 
     # Save concise metrics file
-    metrics_path = output_file.with_suffix(".metrics.json")
+    metrics_path = report_path.with_name(report_path.stem + "_metrics.json")
+
     metrics = {
         "accuracy": acc,
         "f1_score": f1,
@@ -433,6 +436,7 @@ if __name__ == "__main__":
         "--top-k", "-k", type=int, default=20, help="Top K results to use (default: 20)"
     )
     parser.add_argument("--version-dir", "-v", default=None, help="Version directory name")
+    parser.add_argument("--chat-model", "-m", default=None, help="chat model name")
 
     args = parser.parse_args()
 
@@ -455,10 +459,12 @@ if __name__ == "__main__":
 
     print(f"[Info] Input file: {input_path}")
     print(f"[Info] Output file: {output_path}")
+    print(f"[Response Model]: {args.chat_model}")
 
     run_eval(
         questions_file=input_path,
         output_file=output_path,
+        version_dir=version_dir,
         max_workers=args.workers,
         top_k=args.top_k,
     )
