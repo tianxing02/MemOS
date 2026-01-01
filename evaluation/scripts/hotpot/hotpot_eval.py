@@ -1,91 +1,27 @@
+import argparse
 import importlib.util
 import json
 import os
-import sys
 import time
-import traceback
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 
 from datasets import load_dataset
 from dotenv import load_dotenv
 from openai import OpenAI
 from tqdm import tqdm
 
-
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from utils.client import MemosApiClient
-from utils.prompts import LME_ANSWER_PROMPT, MEMOS_CONTEXT_TEMPLATE
-
-from memos.reranker.strategies.dialogue_common import extract_texts_and_sp_from_sources
+from evaluation.scripts.utils.extract_answer import extract_answer, parse_extracted_answer
+from evaluation.scripts.utils.metrics import Metrics
+from evaluation.scripts.utils.prompts import HOTPOT_ANSWER_PROMPT
 
 
 load_dotenv()
-os.environ["SEARCH_MODE"] = os.environ.get("SEARCH_MODE", "fine")
-data = load_dataset("hotpotqa/hotpot_qa", "distractor")
-client = MemosApiClient()
-oai_client = OpenAI(
-    api_key=os.getenv("CHAT_MODEL_API_KEY"), base_url=os.getenv("CHAT_MODEL_BASE_URL")
-)
-
-pred_answers = {}
-pred_sp = {}
-output_dir = "evaluation/data/hotpot/output"
-os.makedirs(output_dir, exist_ok=True)
-pred_path = os.path.join(output_dir, "dev_distractor_pred.json")
-gold_path = os.path.join(output_dir, "dev_distractor_gold.json")
 
 
-def add_context_memories(user_id: str, ctx: dict | list | None):
-    if not isinstance(ctx, dict):
-        return
-    titles = ctx.get("title") or []
-    sentences_list = ctx.get("sentences") or []
-
-    tasks = []
-    for title, sentences in zip(titles, sentences_list, strict=False):
-        for idx, sentence in enumerate(sentences):
-            memory_content = f"{title}: {sentence} [#{idx}]"
-            tasks.append(memory_content)
-
-    iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    messages = [{"role": "user", "content": content, "created_at": iso} for content in tasks]
-    client.add(messages=messages, user_id=user_id, conv_id=user_id)
-
-
-def memos_search(user_id: str, query: str, top_k):
-    results = client.search(query=query, user_id=user_id, top_k=top_k)
-    memories = results["text_mem"][0]["memories"]
-    print("Search memories:", len(memories))
-
-    context = "\n".join([i["memory"] for i in memories]) + f"\n{results.get('pref_string', '')}"
-    context = MEMOS_CONTEXT_TEMPLATE.format(user_id=user_id, memories=context)
-
-    # Extract supporting facts (sp) from raw sources
-    sp_list: list[list[str | int]] = []
-    for m in memories:
-        sources = (m.get("metadata", {}) or {}).get("sources") or []
-        texts, sps = extract_texts_and_sp_from_sources(sources)
-        for t, s in sps:
-            sp_list.append([t, s])
-
-    # De-duplicate while preserving order
-    seen = set()
-    dedup_sp = []
-    for t, s in sp_list:
-        key = (t, s)
-        if key not in seen:
-            seen.add(key)
-            dedup_sp.append([t, s])
-
-    return context, dedup_sp
-
-
-def llm_response(context: str, question: str, question_date: str | None = None) -> str:
-    prompt = LME_ANSWER_PROMPT.format(
-        question=question, question_date=question_date or "", context=context
-    )
+def llm_response(oai_client, context: str, question: str, question_date: str | None = None) -> str:
+    prompt = HOTPOT_ANSWER_PROMPT.format(question=question, context=context)
     resp = oai_client.chat.completions.create(
         model=os.getenv("CHAT_MODEL"),
         messages=[{"role": "system", "content": prompt}],
@@ -94,78 +30,33 @@ def llm_response(context: str, question: str, question_date: str | None = None) 
     return resp.choices[0].message.content or ""
 
 
-def extract_answer(question: str, output: str, model_name: str | None = None) -> str:
-    try:
-        response = oai_client.chat.completions.create(
-            model=model_name or os.getenv("CHAT_MODEL"),
-            messages=[
-                {
-                    "role": "user",
-                    "content": (
-                        "You are an answer extractor. Given a question and a verbose response, "
-                        "return ONLY the concise final answer suitable for HotpotQA exact match.\n\n"
-                        "Rules:\n"
-                        "- If the question asks yes/no, answer strictly 'yes' or 'no'.\n"
-                        "- Otherwise, output the shortest noun phrase/entity/date/number that answers the question.\n"
-                        "- No explanations, no punctuation beyond what's necessary for the answer.\n\n"
-                        f"Question: {question}\nVerbose response: {output}\nFinal answer:"
-                    ),
-                }
-            ],
-            temperature=0.0,
-            max_tokens=64,
-            top_p=1,
-        )
-        ans = (response.choices[0].message.content or "").strip()
-        return ans
-    except Exception:
-        text = (output or "").lower()
-        if " yes" in text or text.startswith("yes"):
-            return "yes"
-        if " no" in text or text.startswith("no"):
-            return "no"
-        for sep in ["\n", ". ", ".", "?", "!"]:
-            if sep in output:
-                cand = output.split(sep)[0].strip()
-                if cand:
-                    return cand
-        return (output or "").strip()
+def _load_json_list(path: Path) -> list[dict]:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict) and isinstance(data.get("results"), list):
+        return data.get("results") or []
+    raise ValueError(f"Invalid json format: {path}")
 
 
-def build_context_text(context_list):
-    parts = []
-    for title, sentences in context_list:
-        text = " ".join(s.strip() for s in sentences if s.strip())
-        parts.append(f"{title}: {text}")
-    return "\n".join(parts)
+def _save_pred(
+    pred_path: Path, pred_answers: dict, pred_sp: dict, perf: dict | None = None
+) -> None:
+    pred_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = pred_path.with_suffix(pred_path.suffix + ".tmp")
+    safe_pred_answers = {
+        k: (v if isinstance(v, str) else ("" if v is None else str(v)))
+        for k, v in pred_answers.items()
+    }
+    obj = {"answer": safe_pred_answers, "sp": pred_sp}
+    if perf is not None:
+        obj["perf"] = perf
+    tmp.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, pred_path)
 
 
-def ingest_context(item):
-    qid = item.get("_id") or item.get("id")
-    ctx = item.get("context")
-    add_context_memories(qid, ctx)
-    return qid
-
-
-def search_and_ask(item):
-    qid = item.get("_id") or item.get("id")
-    question = item["question"]
-    try:
-        context, sp_list = memos_search(qid, question, top_k=7)
-        raw_answer = llm_response(context=context, question=question, question_date="")
-        answer = extract_answer(question, raw_answer) or ""
-        print("Question:", question)
-        print("Answer (raw):", raw_answer)
-        print("Answer (final):", answer)
-        pred_sp[qid] = sp_list
-        return qid, answer
-    except Exception as e:
-        print(f"[Question {qid}] Error:", e)
-        traceback.print_exc()
-        return qid, ""
-
-
-def write_gold(data, out_path: str | None = None):
+def write_gold(gold_path: Path) -> None:
+    data = load_dataset("hotpotqa/hotpot_qa", "distractor")
     split = data.get("validation")
     items_list = [split[i] for i in range(len(split))]
     out = []
@@ -194,109 +85,175 @@ def write_gold(data, out_path: str | None = None):
                 "context": ctx_list,
             }
         )
-    target_path = out_path or gold_path
-    tmp_path = target_path + ".tmp"
-    try:
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(out, f, ensure_ascii=False)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp_path, target_path)
-    except Exception as e:
-        print("保存gold失败:", e)
+    gold_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = gold_path.with_suffix(gold_path.suffix + ".tmp")
+    tmp.write_text(json.dumps(out, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, gold_path)
 
 
-def run_eval(pred_file: str | None = None, gold_file: str | None = None):
+def run_eval(pred_path: Path, gold_path: Path):
     spec = importlib.util.spec_from_file_location(
         "hotpot_eval_v1", "evaluation/scripts/hotpot/hotpot_evaluate_v1.py"
     )
     m = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(m)
-    m.eval(pred_file or pred_path, gold_file or gold_path)
+    m.eval(str(pred_path), str(gold_path))
 
 
-def save_pred():
-    tmp_path = pred_path + ".tmp"
-    try:
-        safe_pred_answers = {
-            k: (v if isinstance(v, str) else ("" if v is None else str(v)))
-            for k, v in pred_answers.items()
-        }
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump({"answer": safe_pred_answers, "sp": pred_sp}, f, ensure_ascii=False, indent=2)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp_path, pred_path)
-    except Exception as e:
-        print("保存失败:", e)
+def evaluate_one(oai_client, row: dict) -> tuple[str, str, list]:
+    qid = str(row.get("_id"))
+    question = row.get("question") or ""
+    context = row.get("context") or ""
+    sp_list = row.get("sp") or []
+
+    raw_answer = llm_response(oai_client, context=context, question=question)
+    extracted_res = extract_answer(question, raw_answer)
+    answer = parse_extracted_answer(extracted_res, raw_answer)
+    return qid, answer, sp_list
 
 
-def main():
-    interval = 10
-    split = data.get("validation")
-    items_list = [split[i] for i in range(len(split))]
-    write_gold(data)
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(
+        description="HotpotQA eval (OpenAI only, read search results)."
+    )
+    parser.add_argument(
+        "--lib",
+        type=str,
+        default="memos",
+        choices=["memos", "mem0", "supermemory"],
+    )
+    parser.add_argument("--workers", type=int, default=8)
+    parser.add_argument("--max_samples", type=int, default=None)
+    parser.add_argument("--search_results_path", type=str, default=None)
+    parser.add_argument("--version-dir", "-v", default=None, help="Version directory name")
+    parser.add_argument(
+        "--chat-model", default=None, help="Chat model name (overrides CHAT_MODEL env var)"
+    )
+    args = parser.parse_args(argv)
 
-    if os.path.exists(pred_path):
+    if args.search_results_path:
+        search_path = Path(args.search_results_path)
+    elif args.version_dir:
+        search_path = Path(
+            f"evaluation/data/hotpot/{args.version_dir}/{args.lib}_search_results.json"
+        )
+    else:
+        search_path = Path(f"evaluation/data/hotpot/intermediate/{args.lib}_search_results.json")
+
+    if not search_path.exists():
+        raise FileNotFoundError(f"Search results not found: {search_path}")
+
+    if args.version_dir:
+        output_dir = Path(f"evaluation/data/hotpot/{args.version_dir}")
+    else:
+        output_dir = Path("evaluation/data/hotpot/output")
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    pred_path = output_dir / f"{args.lib}_dev_distractor_pred.json"
+    gold_path = output_dir / "dev_distractor_gold.json"
+
+    if not gold_path.exists():
+        write_gold(gold_path)
+
+    pred_answers: dict[str, str] = {}
+    pred_sp: dict[str, list] = {}
+    if pred_path.exists():
         try:
-            with open(pred_path, encoding="utf-8") as f:
-                prev = json.load(f)
+            prev = json.loads(pred_path.read_text(encoding="utf-8"))
             if isinstance(prev, dict) and isinstance(prev.get("answer"), dict):
-                prev_ans = {
-                    k: (v if isinstance(v, str) else ("" if v is None else str(v)))
-                    for k, v in prev["answer"].items()
-                }
-                pred_answers.update(prev_ans)
+                pred_answers.update(prev["answer"])
             if isinstance(prev, dict) and isinstance(prev.get("sp"), dict):
                 pred_sp.update(prev["sp"])
         except Exception as e:
-            print("读取历史预测失败:", e)
+            print(f"[Eval] failed to load existing pred: {e}")
+
+    rows = _load_json_list(search_path)
+    if args.max_samples is not None:
+        rows = rows[: args.max_samples]
+
+    pending = [r for r in rows if str(r.get("_id")) not in pred_answers]
+    print(f"[Eval] lib={args.lib} total={len(rows)} pending={len(pending)} workers={args.workers}")
+    if not pending:
+        run_eval(pred_path, gold_path)
+        return
+
+    oai_client = OpenAI(
+        api_key=os.getenv("CHAT_MODEL_API_KEY"), base_url=os.getenv("CHAT_MODEL_BASE_URL")
+    )
 
     processed = len(pred_answers)
-    print("开始评估，总样本:", len(items_list))
-    print("已存在预测:", processed)
 
-    pending_items = []
-    for it in items_list:
-        qid = it.get("_id") or it.get("id")
-        if qid not in pred_answers:
-            pending_items.append(it)
+    metrics = Metrics()
+    start_time = time.time()
 
-    if pending_items:
-        print(f"[Step1：Ingest] start, items={len(pending_items)}")
-        with ThreadPoolExecutor(max_workers=8) as executor:
-            futures = {
-                executor.submit(ingest_context, item): idx for idx, item in enumerate(pending_items)
-            }
-            for future in tqdm(as_completed(futures), total=len(futures), desc="Ingest"):
-                try:
-                    future.result()
-                except Exception as e:
-                    print("Ingest 线程执行失败:", e)
-                    traceback.print_exc()
+    with ThreadPoolExecutor(max_workers=args.workers) as executor:
 
-        print(f"[Step2：QA] start, items={len(pending_items)}")
-        with ThreadPoolExecutor(max_workers=8) as executor:
-            futures = {
-                executor.submit(search_and_ask, item): idx for idx, item in enumerate(pending_items)
-            }
-            for future in tqdm(as_completed(futures), total=len(futures), desc="QA"):
-                try:
-                    qid, answer = future.result()
-                except Exception as e:
-                    print("QA 线程执行失败:", e)
-                    traceback.print_exc()
-                    continue
+        def do_eval(row):
+            st = time.perf_counter()
+            try:
+                res = evaluate_one(oai_client, row)
+                dur = time.perf_counter() - st
+                metrics.record(dur, True)
+                return res
+            except Exception as e:
+                dur = time.perf_counter() - st
+                metrics.record(dur, False, str(e))
+                raise e
+
+        futures = [executor.submit(do_eval, row) for row in pending]
+        for idx, f in enumerate(
+            tqdm(as_completed(futures), total=len(futures), desc="Evaluating"), 1
+        ):
+            try:
+                qid, answer, sp_list = f.result()
                 pred_answers[qid] = answer
+                pred_sp[qid] = sp_list
                 processed += 1
-                if processed % 10 == 0:
-                    print("已完成:", processed, "剩余:", len(items_list) - processed)
-                save_pred()
-                if processed % interval == 0:
-                    print("阶段评估，当前进度:", processed)
-                    run_eval()
+                if idx % 20 == 0:
+                    _save_pred(pred_path, pred_answers, pred_sp)
+                    run_eval(pred_path, gold_path)
+            except Exception as e:
+                print(f"[Eval] Error: {e}")
 
-    run_eval()
+    _save_pred(pred_path, pred_answers, pred_sp)
+    run_eval(pred_path, gold_path)
+
+    # Save performance metrics (merge into pred json)
+    total_duration = time.time() - start_time
+    summary = metrics.summary()
+    perf_obj = {
+        "summary": summary,
+        "total_duration": total_duration,
+        "config": {
+            "workers": args.workers,
+            "chat_model": args.chat_model or os.getenv("CHAT_MODEL"),
+            "lib": args.lib,
+        },
+    }
+    _save_pred(pred_path, pred_answers, pred_sp, perf=perf_obj)
+
+    print("\n" + "=" * 60)
+    print("Evaluation finished! Statistics:")
+    print("=" * 60)
+    print(f"Total duration: {total_duration:.2f}s")
+    print(f"Success: {summary['counts']['success']} / Failed: {summary['counts']['failed']}")
+
+    if summary["stats"]:
+        stats = summary["stats"]
+        qps = stats["count"] / total_duration if total_duration > 0 else 0
+        print(f"QPS: {qps:.2f}")
+        print("Latency stats (ms):")
+        print(f"  Mean: {stats['mean']:.2f}")
+        print(f"  Median: {stats['median']:.2f}")
+        print(f"  Min: {stats['min']:.2f}")
+        print(f"  Max: {stats['max']:.2f}")
+        print(f"  P95: {stats['p95']:.2f}")
+        print(f"  P99: {stats['p99']:.2f}")
+
+    if summary["errors"]:
+        print("\nError stats:")
+        for error, count in sorted(summary["errors"].items(), key=lambda x: x[1], reverse=True)[:5]:
+            print(f"  [{count} times] {error[:100]}...")
 
 
 if __name__ == "__main__":
