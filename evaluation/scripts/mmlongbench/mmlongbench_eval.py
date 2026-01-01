@@ -1,399 +1,464 @@
-import argparse
+import base64
 import json
+import mimetypes
 import os
+import re
 import sys
 import time
+import traceback
 
-from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 from pathlib import Path
+from typing import Any
+
+import openai
 
 from dotenv import load_dotenv
-from eval.eval_score import eval_acc_and_f1, eval_score, show_results  # type: ignore
-from eval.extract_answer import extract_answer  # type: ignore
-from langchain_text_splitters import Language, RecursiveCharacterTextSplitter
-from openai import OpenAI
+from tqdm import tqdm
+
+from evaluation.scripts.utils.eval_score import eval_acc_and_f1, eval_score, show_results
+from evaluation.scripts.utils.extract_answer import extract_answer
+from evaluation.scripts.utils.prompts import MMLONGBENCH_ANSWER_PROMPT
+from memos.log import get_logger
 
 
-# Ensure project paths for imports
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
-SCRIPTS_ROOT = Path(__file__).resolve().parents[1]
-SRC_ROOT = PROJECT_ROOT / "src"
-sys.path.append(str(SCRIPTS_ROOT))
-sys.path.append(str(SRC_ROOT))
+logger = get_logger(__name__)
+
+
 load_dotenv()
-max_retries = 5
+
+# Initialize OpenAI Client
+oai_client = openai.Client(
+    api_key=os.getenv("OPENAI_API_KEY", "sk-xxxxx"),
+    base_url=os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1"),
+)
 
 
-def iter_markdown_files(base_dir: str | Path) -> Iterator[Path]:
-    base = Path(base_dir)
-    if not base.exists():
-        return
-    # glob all 'auto/*.md'
-    for md in base.rglob("auto/*.md"):
-        if md.is_file():
-            yield md
+def _encode_image_to_data_url(image_path: str) -> str | None:
+    """Encode local image file to base64 data URL for OpenAI-compatible image messages.
+
+    Returns a data URL like: data:image/jpeg;base64,<...>
+    """
+    try:
+        mime, _ = mimetypes.guess_type(image_path)
+        if not mime:
+            # default to jpeg
+            mime = "image/jpeg"
+        with open(image_path, "rb") as f:
+            b64 = base64.b64encode(f.read()).decode("ascii")
+        return f"data:{mime};base64,{b64}"
+    except Exception as e:
+        logger.warning(f"Failed to encode image '{image_path}' to data URL: {e}")
+        return None
 
 
-def _get_clients():
-    from utils.client import MemosApiClient  # type: ignore
-    from utils.prompts import MEMOS_CONTEXT_TEMPLATE  # type: ignore
+# @lru_cache(maxsize=1)
+def build_images_index() -> dict[str, str]:
+    """Scan `./ppt_test_result` recursively and index images by filename.
 
-    from memos.mem_os.core import add_images_context, get_images  # type: ignore
+    New structure example:
+    ./ppt_test_result/<pdf-name>/extracted/file_*/<pdf-name>/auto/images/*.{png,jpg,jpeg,webp,gif}
 
-    memos_client = MemosApiClient()
-    openai_client = OpenAI(
-        api_key=os.getenv("CHAT_MODEL_API_KEY"), base_url=os.getenv("CHAT_MODEL_BASE_URL")
+    Also compatible with previous layouts. Returns mapping:
+    basename (e.g. img_123.jpg) -> absolute path
+    """
+    base_dir = Path("/Users/tianxingshi/Desktop/lcy/ppt_test_result")
+    index: dict[str, str] = {}
+    if not base_dir.exists():
+        return index
+
+    # Recursively find any `auto/images` directories under ppt_test_result
+    for images_dir in base_dir.rglob("auto/images"):
+        if images_dir.is_dir():
+            for img_file in images_dir.iterdir():
+                if img_file.is_file():
+                    index[img_file.name] = str(img_file.resolve())
+    return index
+
+
+index_dict = build_images_index()
+
+
+def get_images(sources: list) -> list[str]:
+    """Extract image absolute paths from metadata sources.
+
+    Supports patterns like: ![](images/<hash>.jpg) or any 'images/...jpg' substring.
+    Falls back to scanning the ppt_test_result index to resolve basenames.
+    """
+    if not sources:
+        return []
+
+    # Ensure index exists
+
+    found: list[str] = []
+
+    md_img_pattern = re.compile(r"\[Image: images/\s*(.+?)\s*-")
+    images_substr_pattern = re.compile(r"images/[^\s)]+\.(?:png|jpg|jpeg|webp)", re.IGNORECASE)
+    for src in sources:
+        if not src:
+            continue
+        # 1) markdown image syntax
+        for m in md_img_pattern.findall(src):
+            candidate = m.strip()
+            # if it's a relative like 'images/xxx.jpg', resolve via index
+            basename = os.path.basename(candidate)
+            if basename in index_dict:
+                found.append(index_dict[basename])
+            else:
+                # try direct path (absolute or relative)
+                p = Path(candidate)
+                if not p.is_absolute():
+                    p = Path.cwd() / p
+                if p.exists():
+                    found.append(str(p.resolve()))
+
+        # 2) any 'images/xxx.jpg' substring
+        for m in images_substr_pattern.findall(src):
+            candidate = m.strip()
+            basename = os.path.basename(candidate)
+            if basename in index_dict:
+                found.append(index_dict[basename])
+            else:
+                p = Path(candidate)
+                if not p.is_absolute():
+                    p = Path.cwd() / p
+                if p.exists():
+                    found.append(str(p.resolve()))
+
+    # Deduplicate preserving order
+    dedup: list[str] = []
+    seen = set()
+    for path in found:
+        if path not in seen:
+            dedup.append(path)
+            seen.add(path)
+    return dedup
+
+
+def add_images_context(
+    current_messages: list[dict[str, Any]], images: list[str]
+) -> list[dict[str, Any]]:
+    """Append images in OpenAI-compatible multi-part format and ensure message structure.
+
+    - Deduplicates image paths.
+    - Ensures a system message exists with a concise CN vision instruction.
+    - Ensures the last user message has multi-part content: [text, image_url...].
+    - Uses base64 data URLs. Limits to 6 images.
+    - In-place modification of `current_messages`.
+    """
+    if not images:
+        return current_messages
+
+    # Deduplicate images while preserving order
+    unique_images: list[str] = []
+    seen_paths: set[str] = set()
+    for p in images:
+        if p not in seen_paths:
+            unique_images.append(p)
+            seen_paths.add(p)
+
+    # Locate or create the last user message
+    user_idx = None
+    for i in range(len(current_messages) - 1, -1, -1):
+        if current_messages[i].get("role") == "user":
+            user_idx = i
+            break
+
+    user_msg = current_messages[user_idx]
+    orig_content = user_msg.get("content", "")
+
+    # Normalize user content to multi-part format using original query as text (no fallback)
+    content_parts: list[dict[str, Any]]
+    if isinstance(orig_content, str):
+        content_parts = [{"type": "text", "text": orig_content}]
+    elif isinstance(orig_content, list):
+        content_parts = orig_content
+    else:
+        content_parts = [{"type": "text", "text": str(orig_content)}]
+
+    # 5) Append up to 3 images as data URLs
+    limit = 6
+    count = 0
+
+    for img_path in unique_images:
+        if count >= limit:
+            break
+        data_url = _encode_image_to_data_url(img_path)
+        if data_url:
+            content_parts.append({"type": "image_url", "image_url": {"url": data_url}})
+            count += 1
+    user_msg["content"] = content_parts
+    current_messages[user_idx] = user_msg
+    logger.info(
+        f"Attached {count} images to user message (deduplicated from {len(images)}), {json.dumps(current_messages, ensure_ascii=False, indent=2)}"
     )
-    return memos_client, openai_client, MEMOS_CONTEXT_TEMPLATE, add_images_context, get_images
-
-
-def _get_lib_client(lib: str):
-    if lib == "mem0":
-        from utils.client import Mem0Client  # type: ignore
-
-        return Mem0Client(enable_graph=False)
-    if lib == "supermemory":
-        from utils.client import SupermemoryClient  # type: ignore
-
-        return SupermemoryClient()
-    from utils.client import MemosApiClient  # type: ignore
-
-    return MemosApiClient()
-
-
-def _load_existing_results(output_path):
-    completed_pairs: set[tuple[str, str]] = set()
-    completed_docs: set[str] = set()
-    existing: list[dict] = []
-    p = Path(output_path)
-    if p.exists():
-        try:
-            existing = json.loads(p.read_text(encoding="utf-8"))
-            for r in existing:
-                did = str(r.get("doc_id") or "").strip()
-                q = str(r.get("question") or "").strip()
-                # normalize whitespace for robust resume
-                did_norm = did
-                q_norm = " ".join(q.split())
-                if did:
-                    completed_docs.add(did)
-                if did_norm and q_norm:
-                    completed_pairs.add((did_norm, q_norm))
-        except Exception:
-            existing = []
-    return existing, completed_pairs, completed_docs
-
-
-def add_context(client, doc_id: str, md_path: Path, lib) -> None:
-    text = md_path.read_text(encoding="utf-8", errors="ignore")
-    print(f"[Add context] doc_id={doc_id} path={md_path}")
-    chunker = RecursiveCharacterTextSplitter.from_language(
-        language=Language.PYTHON, chunk_size=5120, chunk_overlap=128
-    )
-    paragraphs = [p for p in chunker.split_text(text) if p.strip()]
-    print(f"[Ingest] doc_id={doc_id} paragraphs={len(paragraphs)} path={md_path}")
-
-    if lib == "memos":
-        messages = [{"role": "user", "content": p} for p in paragraphs]
-        try:
-            client.add(messages=messages, user_id=doc_id, conv_id=doc_id)
-            print(f"[Add-memos] user={doc_id} total={len(messages)}")
-        except Exception as e:
-            print(f"[Add-memos] failed: {e}")
-
-    elif lib == "mem0":
-        chunker = RecursiveCharacterTextSplitter.from_language(
-            language=Language.PYTHON, chunk_size=512, chunk_overlap=128
-        )
-        paragraphs = [p for p in chunker.split_text(text) if p.strip()]
-
-        messages = [{"role": "user", "content": p} for p in paragraphs]
-        ts = int(time.time())
-        try:
-            client.add(messages=messages, user_id=doc_id, timestamp=ts, batch_size=10)
-            print(f"[Add-mem0] user={doc_id} total={len(messages)}")
-        except Exception as e:
-            print(f"[Add-mem0] failed: {e}")
-    elif lib == "supermemory":
-        try:
-            client.add(content=text, user_id=doc_id)
-            print(f"[Add-supermemory] user={doc_id}")
-        except Exception as e:
-            print(f"[Add-supermemory] failed: {e}")
-
-
-def memos_search(
-    client, get_images, user_id: str, query: str, top_k: int = 15
-) -> tuple[list[str], list[str]]:
-    results = client.search(query=query, user_id=user_id, top_k=top_k)
-    memories = results["text_mem"][0]["memories"]
-    mem_texts = [m["memory"] for m in memories]
-
-    # Collect possible image paths from memory texts (and any source content if present)
-    sources_texts: list[str] = []
-    for m in memories:
-        srcs = (m.get("metadata", {}) or {}).get("sources") or []
-        for s in srcs:
-            content = s.get("content") if isinstance(s, dict) else str(s)
-            if content:
-                sources_texts.append(content)
-
-    image_paths = get_images(sources_texts)
-    print(
-        f"[Search] user={user_id} top_k={top_k} memories={len(memories), len(mem_texts)} images={len(image_paths)}"
-    )
-    return mem_texts, image_paths
-
-
-def mem0_search(
-    client, get_images, user_id: str, query: str, top_k: int = 15
-) -> tuple[list[str], list[str]]:
-    res = client.search(query, user_id, top_k)
-    results = res.get("results", [])
-    mem_texts = [m.get("memory", "") for m in results if m.get("memory")]
-    image_paths = get_images(mem_texts)
-    print(
-        f"[Search] user={user_id} top_k={top_k} memories={len(results)} images={len(image_paths)}"
-    )
-    return mem_texts, image_paths
-
-
-def supermemory_search(
-    client, get_images, user_id: str, query: str, top_k: int = 15
-) -> tuple[list[str], list[str]]:
-    chunk_list = client.search(query, user_id, top_k)
-    image_paths = get_images(chunk_list)
-    print(
-        f"[Search] user={user_id} top_k={top_k} memories={len(chunk_list)} images={len(image_paths)}"
-    )
-    return chunk_list, image_paths
+    return current_messages
 
 
 def multimodal_answer(
-    add_images_context, oai_client, memories: list[str], question: str, image_paths: list[str]
-) -> tuple[str, int]:
-    from memos.mem_os.core import MOSCore  # type: ignore
+    oai_client,
+    memories: list[str],
+    question: str,
+    top_k: int = 15,
+    sources: list | None = None,
+) -> tuple[str, int | None]:
+    sources_texts: list[str] = []
+    for source in sources[:top_k]:
+        source = source[0]
+        content = source.get("content") if isinstance(source, dict) else str(source)
+        if content:
+            sources_texts.append(content)
 
-    system_prompt = MOSCore._build_system_prompt(MOSCore.__new__(MOSCore), memories)
-
+    image_paths = get_images(sources_texts)
+    system_prompt = MMLONGBENCH_ANSWER_PROMPT.format(
+        memories="\n\n".join(memories[:top_k]), question=question
+    )
     messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": question}]
-    add_images_context(messages, image_paths)
-    print("[Response model]:", os.getenv("CHAT_MODEL"))
+    messages = add_images_context(messages, image_paths)
+    for _, msg in enumerate(messages):
+        if msg.get("role") == "user" and isinstance(msg.get("content"), list):
+            img_count = sum(1 for p in msg["content"] if p.get("type") == "image_url")
+            print(
+                f"DEBUG: user message has {len(memories[:top_k])} memories, {img_count} images attached"
+            )
+
     resp = oai_client.chat.completions.create(
-        model=os.getenv("CHAT_MODEL"), messages=messages, temperature=0
+        model=os.getenv("CHAT_MODEL", "gpt-4o-mini"), messages=messages, temperature=0
     )
     return resp.choices[0].message.content or "", resp.usage.prompt_tokens
 
 
-def main():
-    parser = argparse.ArgumentParser(description="MMLongBench Evaluation Script")
-    parser.add_argument(
-        "--lib",
-        type=str,
-        default="supermemory",
-        help="Backend library to use (memos, mem0, supermemory)",
-    )
-    args = parser.parse_args()
+def process_single_item(item: dict, index: int, top_k: int = 20) -> dict:
+    """Process a single evaluation item"""
+    question = item["question"]
+    memories = item.get("memories", [])
+    sources = item.get("sources", [])
+    if not memories:
+        result = {
+            "response": None,
+            "extracted_res": None,
+            "pred": None,
+            "score": 0,
+            "eval_success": False,
+            "eval_error": "",
+        }
+    try:
+        # Get model response
+        response, prompt_tokens = multimodal_answer(oai_client, memories, question, top_k, sources)
 
-    # Hardcoded parameters
-    ppt_root = "ppt_test_result"
-    questions_file = "evaluation/data/mmlongbench/samples.json"
-    top_k = 15
-    workers = 4
-    lib = args.lib
+        # Extract answer
+        extracted_res = extract_answer(question, response)
 
-    print("[Memory util]:", lib)
+        # Parse extracted answer
+        try:
+            pred_ans = (
+                extracted_res.split("Answer format:")[0].split("Extracted answer:")[1].strip()
+            )
+        except Exception as e:
+            print("extract_answer error**********", e)
+            pred_ans = response.strip()
 
+        # Calculate score
+        score = eval_score(item.get("answer"), pred_ans, item.get("answer_format", "Str"))
+
+        # Build result
+        result = {
+            "response": response,
+            "extracted_res": extracted_res,
+            "pred": pred_ans,
+            "score": score,
+            "prompt_tokens": prompt_tokens,
+            "eval_success": True,
+            "eval_error": None,
+        }
+
+    except Exception as e:
+        traceback.print_exc()
+        result = {
+            "response": None,
+            "extracted_res": None,
+            "pred": None,
+            "score": 0,
+            "eval_success": False,
+            "eval_error": str(e),
+        }
+
+    return {"index": index, "result": result}
+
+
+def run_eval(
+    questions_file: str | Path,
+    output_file: str | Path | None = None,
+    max_workers: int = 10,
+    top_k: int = 20,
+) -> None:
+    """
+    Run evaluation
+
+    Args:
+        questions_file: Input questions file path
+        output_file: Output file path, overwrites input file if None
+        max_workers: Number of concurrent workers
+    """
+    questions_file = Path(questions_file)
+    output_file = questions_file if output_file is None else Path(output_file)
+
+    # Read input data
+    with open(questions_file, encoding="utf-8") as f:
+        data = json.load(f)
+
+    items = data["results"]
+    total = len(items)
+    print(f"[Info] Starting evaluation, total {total} items, concurrency: {max_workers}")
+
+    # Concurrent processing
+    results_map = {}
     start_time = time.time()
-    client, oai_client, memos_context_template, add_images_context, get_images = _get_clients()
-    if questions_file and Path(questions_file).exists():
-        data = json.loads(Path(questions_file).read_text(encoding="utf-8"))
-        print(f"[Load] samples={len(data)} file={questions_file}")
 
-        # Build allowed doc list from documents directory (align with eval_docs grouping by doc_id)
-        docs_dir = Path("evaluation/data/mmlongbench/documents")
-        allowed_docs: set[str] = set()
-        if docs_dir.exists():
-            for f in docs_dir.iterdir():
-                if f.is_file():
-                    allowed_docs.add(f.name)
-        if allowed_docs:
-            print(f"[Filter] allowed_docs={len(allowed_docs)} from {docs_dir}")
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(process_single_item, item, i, top_k): i for i, item in enumerate(items)
+        }
 
-        # Determine doc_ids present in samples and apply allowed filter
-        doc_ids_in_samples = {str(s.get("doc_id") or "").strip() for s in data if s.get("doc_id")}
-        doc_list = [d for d in doc_ids_in_samples if (not allowed_docs or d in allowed_docs)]
-        doc_list.sort()
+        # Use tqdm to show progress bar
+        with tqdm(
+            total=total,
+            desc="Evaluation Progress",
+            unit="items",
+            bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]",
+        ) as pbar:
+            for future in as_completed(futures):
+                result_data = future.result()
+                idx = result_data["index"]
+                result = result_data["result"]
+                results_map[idx] = result
 
-        output_path = f"evaluation/data/mmlongbench/test/{lib}_add_fine_search_fine_results.json"
-        report_path = Path(
-            f"evaluation/data/mmlongbench/test/{lib}_add_fine_search_fine_report.txt"
-        )
+                # Update progress bar, show current score
+                score = result.get("score", 0)
+                success = result.get("eval_success", False)
+                status = f"score={score:.2f}" if success else "ERROR"
+                pbar.set_postfix_str(status)
+                pbar.update(1)
 
-        # Resume state
-        existing, completed_pairs, completed_docs = _load_existing_results(output_path)
-        print(f"[Resume] loaded_results={len(existing)} completed_docs={len(completed_docs)}")
-        results: list[dict] = list(existing)
-        ingested_doc_ids: set[str] = set(completed_docs)
+    # Write results to each item in original data
+    for i, item in enumerate(items):
+        if i in results_map:
+            item.update(results_map[i])
 
-        base_dir = Path(ppt_root)
-        all_md_files: list[Path] = []
-        if base_dir.exists():
-            all_md_files = list(base_dir.rglob("*.md"))
+    # Update summary info
+    eval_duration = time.time() - start_time
 
-        def _find_md_for_doc(doc_id_val: str) -> Path | None:
-            stem = Path(doc_id_val).stem.lower()
-            name = doc_id_val.lower()
-            for md in all_md_files:
-                pstr = str(md).lower()
-                if (stem and stem in pstr) or (name and name in pstr):
-                    return md
-            return None
+    # Calculate evaluation statistics
+    success_count = sum(1 for r in results_map.values() if r.get("eval_success", False))
+    failed_count = total - success_count
+    scores = [r.get("score", 0) for r in results_map.values() if r.get("eval_success", False)]
+    prompt_tokens_list = [
+        r.get("prompt_tokens")
+        for r in results_map.values()
+        if r.get("eval_success", False) and isinstance(r.get("prompt_tokens"), int)
+    ]
+    avg_prompt_tokens = (
+        (sum(prompt_tokens_list) / len(prompt_tokens_list)) if prompt_tokens_list else 0
+    )
 
-        to_ingest: list[tuple[str, Path]] = []
-        for did in doc_list:
-            if did and did not in ingested_doc_ids:
-                mdp = _find_md_for_doc(did)
-                if mdp is not None:
-                    to_ingest.append((did, mdp))
-                else:
-                    print(f"[Skip] markdown not found for doc_id={did}")
+    # Calculate acc and f1
+    eval_results = [{**items[i], **results_map[i]} for i in range(len(items)) if i in results_map]
+    acc, f1 = eval_acc_and_f1(eval_results)
 
-        # Phase 1: Ingestion
-        print("Phase 1: Ingesting context...")
-        if to_ingest:
-            print(f"[Ingest-Concurrent] tasks={len(to_ingest)} from {ppt_root}")
+    # Update data summary
+    if "eval_summary" not in data:
+        data["eval_summary"] = {}
 
-            def _ingest_one(doc_id_local: str, md_path_local: Path, lib_local: str = lib) -> str:
-                user_id_local = doc_id_local
-                c_local = client if lib_local == "memos" else _get_lib_client(lib_local)
-                add_context(c_local, user_id_local, md_path_local, lib=lib_local)
-                return doc_id_local
+    data["eval_summary"] = {
+        "eval_duration_seconds": eval_duration,
+        "total_samples": total,
+        "success_count": success_count,
+        "failed_count": failed_count,
+        "accuracy": acc,
+        "f1_score": f1,
+        "avg_score": sum(scores) / len(scores) if scores else 0,
+        "avg_prompt_tokens": avg_prompt_tokens,
+        "max_workers": max_workers,
+        "eval_timestamp": datetime.now().isoformat(),
+    }
 
-            with ThreadPoolExecutor(max_workers=workers) as executor:
-                futures = [executor.submit(_ingest_one, did, mdp) for did, mdp in to_ingest]
-                for f in as_completed(futures):
-                    try:
-                        done_id = f.result()
-                        ingested_doc_ids.add(done_id)
-                    except Exception as e:
-                        print(f"[Add-Error] {e}")
+    # Save results to output file
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_file, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
 
-        # Phase 2: Evaluation
-        print("Phase 2: Evaluating...")
-        for doc_id in doc_list:
-            if not doc_id:
-                continue
-            print(f"\n===== [Doc] {doc_id} =====")
-            user_id = doc_id
+    print(f"\n{'=' * 60}")
+    print("[Evaluation Finished]")
+    print(f"  Total samples: {total}")
+    print(f"  Success: {success_count}, Failed: {failed_count}")
+    print(f"  Accuracy: {acc:.4f}")
+    print(f"  F1 Score: {f1:.4f}")
+    print(f"  Average Score: {data['eval_summary']['avg_score']:.4f}")
+    print(f"  Average prompt_tokens: {data['eval_summary']['avg_prompt_tokens']:.2f}")
+    print(f"  Duration: {eval_duration:.2f}s")
+    print(f"  Results saved to: {output_file}")
+    print(f"{'=' * 60}")
 
-            doc_samples = [s for s in data if str(s.get("doc_id") or "").strip() == doc_id]
+    # Generate detailed report
+    report_path = output_file.with_suffix(".report.txt")
+    show_results(eval_results, show_path=str(report_path))
+    print(f"[Report] Detailed report saved to: {report_path}")
 
-            def _process_item(
-                item: dict,
-                doc_id_local: str = doc_id,
-                user_id_local: str = user_id,
-                lib_local: str = lib,
-            ) -> dict:
-                q = item["question"]
-                q_norm_local = " ".join(str(q).split())
-                if (doc_id_local, q_norm_local) in completed_pairs:
-                    return {"skip": True}
-                if lib_local == "memos":
-                    memories, images = memos_search(
-                        client, get_images, user_id_local, q, top_k=top_k
-                    )
-                elif lib_local == "mem0":
-                    c_local = _get_lib_client(lib_local)
-                    memories, images = mem0_search(
-                        c_local, get_images, user_id_local, q, top_k=top_k
-                    )
-                elif lib_local == "supermemory":
-                    c_local = _get_lib_client(lib_local)
-                    memories, images = supermemory_search(
-                        c_local, get_images, user_id_local, q, top_k=top_k
-                    )
-                else:
-                    memories, images = [], []
-                resp, prompt_tokens = multimodal_answer(
-                    add_images_context, oai_client, memories, q, images
-                )
-                with open(
-                    Path("evaluation/scripts/mmlongbench/eval/prompt_for_answer_extraction.md"),
-                    encoding="utf-8",
-                ) as f:
-                    prompt_local = f.read()
-                extracted_res_local = extract_answer(q, resp, prompt_local)
-                try:
-                    pred_ans_local = (
-                        extracted_res_local.split("Answer format:")[0]
-                        .split("Extracted answer:")[1]
-                        .strip()
-                    )
-                except Exception:
-                    pred_ans_local = resp.strip()
-                score_local = eval_score(
-                    item.get("answer"), pred_ans_local, item.get("answer_format", "Str")
-                )
-                sr = dict(item)
-                sr["response"] = resp
-                sr["extracted_res"] = extracted_res_local
-                sr["pred"] = pred_ans_local
-                sr["score"] = score_local
-                sr["q_norm"] = q_norm_local
-                sr["images"] = images
-                sr["prompt_tokens"] = prompt_tokens
-                sr["memory_used"] = memories
-                return sr
-
-            with ThreadPoolExecutor(max_workers=workers) as executor:
-                futures = [executor.submit(_process_item, it) for it in doc_samples]
-                for f in as_completed(futures):
-                    try:
-                        res = f.result()
-                        if res.get("skip"):
-                            continue
-                        print("[images used]:", res.get("images") or [])
-                        print(
-                            f"[QA] doc_id={doc_id} images={len(res.get('images') or [])} score={res.get('score')}"
-                        )
-                        results.append(
-                            {k: v for k, v in res.items() if k not in ("q_norm", "images")}
-                        )
-                        completed_pairs.add((doc_id, res.get("q_norm") or ""))
-
-                        print("[Question]:", res.get("question"))
-                        print("[Answer]:", res.get("pred"))
-                        print("[Ground truth]:", res.get("answer"))
-                        print("[Score]:", res.get("score"))
-                        print("[Prompt Tokens]:", res.get("prompt_tokens"))
-                        out_json = Path(output_path)
-                        out_json.parent.mkdir(parents=True, exist_ok=True)
-                        out_json.write_text(
-                            json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8"
-                        )
-                        acc, f1 = eval_acc_and_f1(results)
-                        total_target = sum(
-                            1 for s in data if str(s.get("doc_id") or "") in doc_list
-                        )
-                        total_tokens = sum(r.get("prompt_tokens", 0) for r in results)
-                        avg_tokens = round(total_tokens / len(results), 2) if results else 0
-                        print(
-                            f"[Metric] acc={acc} f1={f1} avg_tokens={avg_tokens} processed={len(results)}/{total_target}"
-                        )
-                    except Exception as e:
-                        print(f"[Error] processing item: {e}")
-
-        show_results(results, show_path=str(report_path))
-        print(f"[Report] saved to {report_path}")
-
-        end_time = time.time()
-        total_duration = end_time - start_time
-        with open(report_path, "a", encoding="utf-8") as f:
-            f.write(f"\nTotal Evaluation Time: {total_duration:.2f} seconds\n")
-        print(f"[Time] Total duration: {total_duration:.2f}s")
+    # Save concise metrics file
+    metrics_path = output_file.with_suffix(".metrics.json")
+    metrics = {
+        "accuracy": acc,
+        "f1_score": f1,
+        "avg_score": data["eval_summary"]["avg_score"],
+        "avg_prompt_tokens": data["eval_summary"]["avg_prompt_tokens"],
+        "total_samples": total,
+        "success_count": success_count,
+        "failed_count": failed_count,
+        "eval_duration_seconds": eval_duration,
+        "eval_timestamp": data["eval_summary"]["eval_timestamp"],
+    }
+    with open(metrics_path, "w", encoding="utf-8") as f:
+        json.dump(metrics, f, ensure_ascii=False, indent=2)
+    print(f"[Metrics] Metrics saved to: {metrics_path}")
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+
+    parser = argparse.ArgumentParser(description="MMlongbench Evaluation Script")
+    parser.add_argument("--lib", "-b", required=True, help="Product name to evaluate")
+    parser.add_argument("--workers", "-w", type=int, default=20, help="Concurrent workers")
+    parser.add_argument(
+        "--top-k", "-k", type=int, default=20, help="Top K results to use (default: 20)"
+    )
+    parser.add_argument("--version-dir", "-v", default=None, help="Version directory name")
+
+    args = parser.parse_args()
+
+    print("=" * 60)
+    print("MMLongBench-doc Product Eval Tool")
+    print("=" * 60)
+
+    print("[Response model]: ", os.getenv("CHAT_MODEL"))
+
+    base_dir = Path("evaluation/data/mmlongbench")
+    version_dir = base_dir / args.version_dir
+    input_filename = f"{args.lib}_search_results.json"
+    input_path = version_dir / input_filename
+
+    if not input_path.exists():
+        print(f"Error: Input file not found: {input_path}")
+        sys.exit(1)
+
+    output_path = input_path
+
+    print(f"[Info] Input file: {input_path}")
+    print(f"[Info] Output file: {output_path}")
+
+    run_eval(
+        questions_file=input_path,
+        output_file=output_path,
+        max_workers=args.workers,
+        top_k=args.top_k,
+    )

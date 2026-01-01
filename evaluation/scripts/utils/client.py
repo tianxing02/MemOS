@@ -136,58 +136,95 @@ class MemobaseClient:
 
 
 class MemosApiClient:
-    def __init__(self):
-        self.memos_url = os.getenv("MEMOS_URL")
-        self.headers = {"Content-Type": "application/json", "Authorization": os.getenv("MEMOS_KEY")}
+    """Product Add API 封装"""
 
-    def add(self, messages, user_id, conv_id, batch_size: int = 9999):
-        """
-        messages = [{"role": "assistant", "content": data, "chat_time": date_str}]
-        """
-        url = f"{self.memos_url}/product/add"
-        added_memories = []
-        for i in range(0, len(messages), batch_size):
-            batch_messages = messages[i : i + batch_size]
-            payload = json.dumps(
-                {
-                    "messages": batch_messages,
-                    "user_id": user_id,
-                    "mem_cube_id": user_id,
-                    "conversation_id": conv_id,
-                    "mode": "fine",
-                    "async_mode": "sync",
-                }
-            )
-            response = requests.request("POST", url, data=payload, headers=self.headers)
-            assert response.status_code == 200, response.text
-            assert json.loads(response.text)["message"] == "Memory added successfully", (
-                response.text
-            )
-            added_memories += json.loads(response.text)["data"]
-        return added_memories
+    def __init__(self, timeout: float = 600.0):
+        self.base_url = os.getenv("MEMOS_URL")
+        self.headers = {"Content-Type": "application/json"}
+        self.timeout = timeout
 
-    def search(self, query, user_id, top_k):
-        """Search memories."""
-        url = f"{self.memos_url}/product/search"
-        payload = json.dumps(
-            {
-                "query": query,
-                "user_id": user_id,
-                "mem_cube_id": user_id,
-                "conversation_id": "",
-                "top_k": top_k,
-                "mode": "fine",
-                "include_preference": True,
-                "pref_top_k": 6,
-            },
-            ensure_ascii=False,
+    def add(
+        self,
+        messages,
+        user_id,
+        writable_cube_ids: list[str],
+        source_type: str,
+        mode: str,
+        async_mode: str,
+    ):
+        """
+        调用 /product/add 接口
+
+        Args:
+            messages: 添加记忆信息
+            user_id: 用户ID
+            writable_cube_ids: 可写cube ID列表
+            source_type: 来源类型
+            mode: 模式 (fine/coarse)
+            async_mode: 异步模式 (sync/async)
+        """
+        url = f"{self.base_url}/product/add"
+
+        payload = {
+            "user_id": user_id,
+            "writable_cube_ids": writable_cube_ids,
+            "messages": messages,
+            "info": {"source_type": source_type},
+            "mode": mode,
+            "async_mode": async_mode,
+        }
+
+        response = requests.post(
+            url,
+            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            headers=self.headers,
+            timeout=self.timeout,
         )
-        response = requests.request("POST", url, data=payload, headers=self.headers)
-        assert response.status_code == 200, response.text
-        assert json.loads(response.text)["message"] == "Search completed successfully", (
-            response.text
+
+        if response.status_code != 200:
+            raise RuntimeError(f"HTTP {response.status_code}: {response.text}")
+
+        body = response.json()
+        if body.get("code") is not None and body.get("code") != 200:
+            raise RuntimeError(f"BUSINESS ERROR {body.get('code')}: {response.text}")
+
+        return body
+
+    def search(self, query, user_id, readable_cube_ids: list[str], top_k: str, mode: str):
+        """
+        调用 /product/search 接口
+
+        Args:
+            query: 搜索查询
+            user_id: 用户ID
+            readable_cube_ids: 可读cube ID列表, 默认为[user_id]
+            top_k: 返回结果数量
+        """
+
+        url = f"{self.base_url}/product/search"
+
+        if readable_cube_ids is None:
+            readable_cube_ids = [user_id]
+
+        payload = {
+            "query": query,
+            "user_id": user_id,
+            "readable_cube_ids": readable_cube_ids,
+            "top_k": top_k,
+            "mode": mode,
+        }
+
+        response = requests.post(
+            url,
+            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            headers=self.headers,
+            timeout=self.timeout,
         )
-        return json.loads(response.text)["data"]
+
+        if response.status_code != 200:
+            raise RuntimeError(f"HTTP {response.status_code}: {response.text}")
+
+        return response.json()
 
 
 class MemosApiOnlineClient:

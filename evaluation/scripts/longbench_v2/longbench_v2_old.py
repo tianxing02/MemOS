@@ -45,6 +45,7 @@ def retry_operation(func, *args, retries=5, delay=2, **kwargs):
         try:
             return func(*args, **kwargs)
         except Exception as e:
+            traceback.print_exc()
             if attempt < retries - 1:
                 func_name = getattr(func, "__name__", "Operation")
                 print(f"[Retry] {func_name} failed: {e}. Retrying in {delay}s...")
@@ -197,7 +198,7 @@ def llm_answer(oai_client, memories: list[str], question: str, choices: dict) ->
         model=os.getenv("CHAT_MODEL"),
         messages=messages,
         temperature=0.1,
-        max_tokens=128,
+        max_tokens=12800,
     )
     return resp.choices[0].message.content or "", resp.usage.prompt_tokens
 
