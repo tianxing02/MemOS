@@ -32,14 +32,14 @@ def retry_operation(func, *args, retries=5, delay=2, **kwargs):
 
 def _get_lib_client(lib: str):
     if lib == "mem0":
-        from utils.client import Mem0Client  # type: ignore
+        from evaluation.scripts.utils.client import Mem0Client
 
         return Mem0Client(enable_graph=False)
     if lib == "supermemory":
-        from utils.client import SupermemoryClient  # type: ignore
+        from evaluation.scripts.utils.client import SupermemoryClient
 
         return SupermemoryClient()
-    from utils.client import MemosApiClient  # type: ignore
+    from evaluation.scripts.utils.client import MemosApiClient
 
     return MemosApiClient()
 

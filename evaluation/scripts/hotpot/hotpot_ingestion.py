@@ -6,10 +6,10 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from datasets import load_dataset
 from dotenv import load_dotenv
 from tqdm import tqdm
 
+from evaluation.scripts.hotpot.data_loader import load_hotpot_data
 from evaluation.scripts.utils.metrics import Metrics
 
 
@@ -32,14 +32,14 @@ def retry_operation(func, *args, retries=5, delay=2, **kwargs):
 
 def _get_lib_client(lib: str):
     if lib == "mem0":
-        from utils.client import Mem0Client  # type: ignore
+        from evaluation.scripts.utils.client import Mem0Client
 
         return Mem0Client(enable_graph=False)
     if lib == "supermemory":
-        from utils.client import SupermemoryClient  # type: ignore
+        from evaluation.scripts.utils.client import SupermemoryClient
 
         return SupermemoryClient()
-    from utils.client import MemosApiClient  # type: ignore
+    from evaluation.scripts.utils.client import MemosApiClient
 
     return MemosApiClient()
 
@@ -68,14 +68,17 @@ def _save_added_ids(records_path: Path, added_ids: set[str], perf: dict | None =
 
 
 def _build_memory_texts(ctx: dict | list | None) -> list[str]:
-    if not isinstance(ctx, dict):
-        return []
-    titles = ctx.get("title") or []
-    sentences_list = ctx.get("sentences") or []
     tasks: list[str] = []
-    for title, sentences in zip(titles, sentences_list, strict=False):
+    for item in ctx:
+        if not isinstance(item, list | tuple) or len(item) != 2:
+            continue
+        title, sentences = item
+        if not isinstance(sentences, list):
+            continue
         for idx, sentence in enumerate(sentences):
-            tasks.append(f"{title}: [#{idx}] {sentence} ")
+            tasks.append(
+                json.dumps({"idx": idx, "title": title, "sentence": sentence}, ensure_ascii=False)
+            )
     return tasks
 
 
@@ -116,10 +119,12 @@ def add_context_memories(
             retry_operation(client.add, content=content, user_id=user_id)
 
 
-def ingest_one(client, lib: str, item: dict) -> str:
+def ingest_one(client, lib: str, item: dict, version_dir: str) -> str:
     qid = item.get("_id") or item.get("id")
     ctx = item.get("context")
-    add_context_memories(client, lib, str(qid), ctx)
+
+    user_id = version_dir + "_" + str(qid)
+    add_context_memories(client, lib, user_id, ctx)
     return str(qid)
 
 
@@ -147,16 +152,14 @@ def main(argv: list[str] | None = None) -> None:
     print("hotpotQA Product Add Concurrent Tool")
     print("=" * 60)
 
-    data = load_dataset("hotpotqa/hotpot_qa", "distractor")
-    split = data.get("validation")
-    items_list = [split[i] for i in range(len(split))]
-    if args.limit is not None:
-        items_list = items_list[: args.limit]
-
     output_dir = Path("evaluation/data/hotpot")
     if args.version_dir:
         output_dir = output_dir / args.version_dir
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    items_list = load_hotpot_data("evaluation/data/hotpot")
+    if args.limit is not None:
+        items_list = items_list[: args.limit]
 
     records_path = output_dir / f"{args.lib}_added_records.json"
     added_ids = _load_added_ids(records_path)
@@ -176,7 +179,7 @@ def main(argv: list[str] | None = None) -> None:
     def do_ingest(item):
         start_time = time.perf_counter()
         try:
-            sid = ingest_one(client, args.lib, item)
+            sid = ingest_one(client, args.lib, item, args.version_dir)
             duration = time.perf_counter() - start_time
             metrics.record(duration, True)
             return sid

@@ -7,11 +7,11 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from datasets import load_dataset
 from dotenv import load_dotenv
 from openai import OpenAI
 from tqdm import tqdm
 
+from evaluation.scripts.hotpot.data_loader import load_hotpot_data
 from evaluation.scripts.utils.extract_answer import extract_answer, parse_extracted_answer
 from evaluation.scripts.utils.metrics import Metrics
 from evaluation.scripts.utils.prompts import HOTPOT_ANSWER_PROMPT
@@ -56,39 +56,7 @@ def _save_pred(
 
 
 def write_gold(gold_path: Path) -> None:
-    data = load_dataset("hotpotqa/hotpot_qa", "distractor")
-    split = data.get("validation")
-    items_list = [split[i] for i in range(len(split))]
-    out = []
-    for it in items_list:
-        qid = it.get("_id") or it.get("id")
-        sp = it.get("supporting_facts")
-        if isinstance(sp, dict):
-            titles = sp.get("title") or []
-            sent_ids = sp.get("sent_id") or []
-            sp_list = [[t, s] for t, s in zip(titles, sent_ids, strict=False)]
-        else:
-            sp_list = sp or []
-        ctx = it.get("context")
-        if isinstance(ctx, dict):
-            titles = ctx.get("title") or []
-            sentences = ctx.get("sentences") or []
-            ctx_list = [[t, s] for t, s in zip(titles, sentences, strict=False)]
-        else:
-            ctx_list = ctx or []
-        out.append(
-            {
-                "_id": qid,
-                "question": it.get("question"),
-                "answer": it.get("answer"),
-                "supporting_facts": sp_list,
-                "context": ctx_list,
-            }
-        )
-    gold_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = gold_path.with_suffix(gold_path.suffix + ".tmp")
-    tmp.write_text(json.dumps(out, ensure_ascii=False), encoding="utf-8")
-    os.replace(tmp, gold_path)
+    load_hotpot_data(gold_path.parent)
 
 
 def run_eval(pred_path: Path, gold_path: Path):
