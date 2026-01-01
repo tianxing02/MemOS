@@ -53,15 +53,15 @@ def supermemory_search(
 
 def _get_lib_client(lib: str):
     if lib == "memos":
-        from utils.client import MemosApiClient  # type: ignore
+        from evaluation.scripts.utils.client import MemosApiClient
 
         return MemosApiClient()
     if lib == "mem0":
-        from utils.client import Mem0Client  # type: ignore
+        from evaluation.scripts.utils.client import Mem0Client
 
         return Mem0Client(enable_graph=False)
     if lib == "supermemory":
-        from utils.client import SupermemoryClient  # type: ignore
+        from evaluation.scripts.utils.client import SupermemoryClient
 
         return SupermemoryClient()
 

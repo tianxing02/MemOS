@@ -6,11 +6,10 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from datasets import load_dataset
 from tqdm import tqdm
 
+from evaluation.scripts.hotpot.data_loader import load_hotpot_data
 from evaluation.scripts.utils.metrics import Metrics
-from memos.reranker.strategies.dialogue_common import extract_texts_and_sp_from_sources
 
 
 def retry_operation(func, *args, retries=5, delay=2, **kwargs):
@@ -29,14 +28,14 @@ def retry_operation(func, *args, retries=5, delay=2, **kwargs):
 
 def _get_lib_client(lib: str):
     if lib == "mem0":
-        from utils.client import Mem0Client  # type: ignore
+        from evaluation.scripts.utils.client import Mem0Client
 
         return Mem0Client(enable_graph=False)
     if lib == "supermemory":
-        from utils.client import SupermemoryClient  # type: ignore
+        from evaluation.scripts.utils.client import SupermemoryClient
 
         return SupermemoryClient()
-    from utils.client import MemosApiClient  # type: ignore
+    from evaluation.scripts.utils.client import MemosApiClient
 
     return MemosApiClient()
 
@@ -66,19 +65,30 @@ def _save_json_list(path: Path, rows: list[dict]) -> None:
 
 
 def get_dedup_sp(sources):
-    sp_list: list[list[str | int]] = []
-    _, sps = extract_texts_and_sp_from_sources(sources)
-    for t, s in sps:
-        sp_list.append([t, s])
-
     seen = set()
     dedup_sp = []
-    for t, s in sp_list:
-        key = (t, s)
+    mem_texts = []
+
+    for source in sources:
+        try:
+            obj = json.loads(source)
+        except json.JSONDecodeError:
+            continue
+
+        title = obj.get("title")
+        idx = obj.get("idx")
+        sentence = obj.get("sentence")
+
+        if title is None or idx is None:
+            continue
+
+        key = (title, idx)
         if key not in seen:
             seen.add(key)
-            dedup_sp.append([t, s])
-    return dedup_sp
+            dedup_sp.append([title, idx])
+            mem_texts.append(sentence)
+
+    return mem_texts, dedup_sp
 
 
 def memos_search(client, user_id: str, query: str, top_k: int) -> tuple[str, list[list[str | int]]]:
@@ -91,36 +101,36 @@ def memos_search(client, user_id: str, query: str, top_k: int) -> tuple[str, lis
         source = (m.get("metadata", {}) or {}).get("sources") or []
         sources.extend(source)
 
-    dedup_sp = get_dedup_sp(sources)
+    _, dedup_sp = get_dedup_sp(sources)
     return mem_texts, dedup_sp
 
 
 def mem0_search(client, user_id: str, query: str, top_k: int) -> tuple[str, list[list[str | int]]]:
     res = retry_operation(client.search, query, user_id, top_k)
-    results = res.get("results", [])
-    mem_texts = [m.get("memory", "") for m in results if m.get("memory")]
-    dedup_sp = get_dedup_sp(mem_texts)
+    sources = [m.get("memory", "") for m in res.get("results", []) if m.get("memory")]
+    mem_texts, dedup_sp = get_dedup_sp(sources)
     return mem_texts, dedup_sp
 
 
 def supermemory_search(
     client, user_id: str, query: str, top_k: int
 ) -> tuple[str, list[list[str | int]]]:
-    chunk_list = retry_operation(client.search, query, user_id, top_k)
-    dedup_sp = get_dedup_sp(chunk_list)
-    return chunk_list, dedup_sp
+    sources = retry_operation(client.search, query, user_id, top_k)
+    mem_texts, dedup_sp = get_dedup_sp(sources)
+    return mem_texts, dedup_sp
 
 
-def search_one(client, lib: str, item: dict, top_k: int) -> dict:
+def search_one(client, lib: str, item: dict, top_k: int, version_dir: str) -> dict:
     qid = item.get("_id") or item.get("id")
     question = item.get("question") or ""
+    user_id = version_dir + "_" + str(qid)
 
     if lib == "memos":
-        memories, sp_list = memos_search(client, str(qid), str(question), top_k)
+        memories, sp_list = memos_search(client, user_id, str(question), top_k)
     elif lib == "mem0":
-        memories, sp_list = mem0_search(client, str(qid), str(question), top_k)
+        memories, sp_list = mem0_search(client, user_id, str(question), top_k)
     elif lib == "supermemory":
-        memories, sp_list = supermemory_search(client, str(qid), str(question), top_k)
+        memories, sp_list = supermemory_search(client, user_id, str(question), top_k)
     else:
         memories, sp_list = [], []
 
@@ -154,9 +164,7 @@ def main(argv: list[str] | None = None) -> None:
     # Handle limit/max_samples compatibility
     limit = args.limit if args.limit is not None else args.max_samples
 
-    data = load_dataset("hotpotqa/hotpot_qa", "distractor")
-    split = data.get("validation")
-    items_list = [split[i] for i in range(len(split))]
+    items_list = load_hotpot_data("evaluation/data/hotpot")
     if limit is not None:
         items_list = items_list[:limit]
 
@@ -187,7 +195,7 @@ def main(argv: list[str] | None = None) -> None:
         def do_search(item):
             st = time.perf_counter()
             try:
-                r = search_one(client, args.lib, item, args.top_k)
+                r = search_one(client, args.lib, item, args.top_k, args.version_dir)
                 dur = time.perf_counter() - st
                 metrics.record(dur, True)
                 return r

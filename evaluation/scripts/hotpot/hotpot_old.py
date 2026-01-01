@@ -7,7 +7,6 @@ import traceback
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from datasets import load_dataset
 from dotenv import load_dotenv
 from openai import OpenAI
 from tqdm import tqdm
@@ -18,12 +17,12 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils.client import MemosApiClient
 from utils.prompts import LME_ANSWER_PROMPT, MEMOS_CONTEXT_TEMPLATE
 
+from evaluation.scripts.hotpot.data_loader import load_hotpot_data
 from memos.reranker.strategies.dialogue_common import extract_texts_and_sp_from_sources
 
 
 load_dotenv()
 os.environ["SEARCH_MODE"] = os.environ.get("SEARCH_MODE", "fine")
-data = load_dataset("hotpotqa/hotpot_qa", "distractor")
 client = MemosApiClient()
 oai_client = OpenAI(
     api_key=os.getenv("CHAT_MODEL_API_KEY"), base_url=os.getenv("CHAT_MODEL_BASE_URL")
@@ -34,20 +33,29 @@ pred_sp = {}
 output_dir = "evaluation/data/hotpot/output"
 os.makedirs(output_dir, exist_ok=True)
 pred_path = os.path.join(output_dir, "dev_distractor_pred.json")
-gold_path = os.path.join(output_dir, "dev_distractor_gold.json")
+gold_path = "evaluation/data/hotpot/dev_distractor_gold.json"
 
 
 def add_context_memories(user_id: str, ctx: dict | list | None):
-    if not isinstance(ctx, dict):
-        return
-    titles = ctx.get("title") or []
-    sentences_list = ctx.get("sentences") or []
-
     tasks = []
-    for title, sentences in zip(titles, sentences_list, strict=False):
-        for idx, sentence in enumerate(sentences):
-            memory_content = f"{title}: {sentence} [#{idx}]"
-            tasks.append(memory_content)
+    if isinstance(ctx, dict):
+        titles = ctx.get("title") or []
+        sentences_list = ctx.get("sentences") or []
+        for title, sentences in zip(titles, sentences_list, strict=False):
+            for idx, sentence in enumerate(sentences):
+                memory_content = f"{title}: {sentence} [#{idx}]"
+                tasks.append(memory_content)
+    elif isinstance(ctx, list):
+        for item in ctx:
+            if isinstance(item, list) and len(item) >= 2:
+                title = item[0]
+                sentences = item[1]
+                for idx, sentence in enumerate(sentences):
+                    memory_content = f"{title}: {sentence} [#{idx}]"
+                    tasks.append(memory_content)
+
+    if not tasks:
+        return
 
     iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     messages = [{"role": "user", "content": content, "created_at": iso} for content in tasks]
@@ -233,9 +241,7 @@ def save_pred():
 
 def main():
     interval = 10
-    split = data.get("validation")
-    items_list = [split[i] for i in range(len(split))]
-    write_gold(data)
+    items_list = load_hotpot_data("evaluation/data/hotpot")
 
     if os.path.exists(pred_path):
         try:
