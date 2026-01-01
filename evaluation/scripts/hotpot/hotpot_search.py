@@ -2,6 +2,7 @@ import argparse
 import json
 import os
 import time
+import traceback
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -15,7 +16,10 @@ from evaluation.scripts.utils.metrics import Metrics
 def retry_operation(func, *args, retries=5, delay=2, **kwargs):
     for attempt in range(retries):
         try:
-            return func(*args, **kwargs)
+            result = func(*args, **kwargs)
+            if isinstance(result, dict) and "data" in result:
+                return result["data"]
+            return result
         except Exception as e:
             if attempt < retries - 1:
                 func_name = getattr(func, "__name__", "Operation")
@@ -64,16 +68,17 @@ def _save_json_list(path: Path, rows: list[dict]) -> None:
     os.replace(tmp, path)
 
 
-def get_dedup_sp(sources):
+def get_sources_info(sources):
     seen = set()
     dedup_sp = []
     mem_texts = []
 
     for source in sources:
-        try:
-            obj = json.loads(source)
-        except json.JSONDecodeError:
-            continue
+        if isinstance(source, str):
+            try:
+                obj = json.loads(source)
+            except json.JSONDecodeError:
+                continue
 
         title = obj.get("title")
         idx = obj.get("idx")
@@ -91,24 +96,37 @@ def get_dedup_sp(sources):
     return mem_texts, dedup_sp
 
 
-def memos_search(client, user_id: str, query: str, top_k: int) -> tuple[str, list[list[str | int]]]:
-    results = retry_operation(client.search, query=query, user_id=user_id, top_k=top_k)
+def memos_search(
+    client, user_id: str, query: str, top_k: int, search_mode: str
+) -> tuple[str, list[list[str | int]]]:
+    readable_cube_ids = [user_id]
+    results = retry_operation(
+        client.search,
+        query=query,
+        user_id=user_id,
+        readable_cube_ids=readable_cube_ids,
+        top_k=top_k,
+        mode=search_mode,
+    )
     memories = results["text_mem"][0]["memories"]
     mem_texts = [i["memory"] for i in memories]
 
     sources = []
     for m in memories:
         source = (m.get("metadata", {}) or {}).get("sources") or []
+        for s in source:
+            source_txt = json.loads(s["content"])
+            sources.append(json.loads(source_txt)["content"])
         sources.extend(source)
 
-    _, dedup_sp = get_dedup_sp(sources)
+    _, dedup_sp = get_sources_info(sources)
     return mem_texts, dedup_sp
 
 
 def mem0_search(client, user_id: str, query: str, top_k: int) -> tuple[str, list[list[str | int]]]:
     res = retry_operation(client.search, query, user_id, top_k)
     sources = [m.get("memory", "") for m in res.get("results", []) if m.get("memory")]
-    mem_texts, dedup_sp = get_dedup_sp(sources)
+    mem_texts, dedup_sp = get_sources_info(sources)
     return mem_texts, dedup_sp
 
 
@@ -116,17 +134,19 @@ def supermemory_search(
     client, user_id: str, query: str, top_k: int
 ) -> tuple[str, list[list[str | int]]]:
     sources = retry_operation(client.search, query, user_id, top_k)
-    mem_texts, dedup_sp = get_dedup_sp(sources)
+    mem_texts, dedup_sp = get_sources_info(sources)
     return mem_texts, dedup_sp
 
 
-def search_one(client, lib: str, item: dict, top_k: int, version_dir: str) -> dict:
+def search_one(
+    client, lib: str, item: dict, top_k: int, version_dir: str, search_mode: str
+) -> dict:
     qid = item.get("_id") or item.get("id")
     question = item.get("question") or ""
     user_id = version_dir + "_" + str(qid)
 
     if lib == "memos":
-        memories, sp_list = memos_search(client, user_id, str(question), top_k)
+        memories, sp_list = memos_search(client, user_id, str(question), top_k, search_mode)
     elif lib == "mem0":
         memories, sp_list = mem0_search(client, user_id, str(question), top_k)
     elif lib == "supermemory":
@@ -157,7 +177,7 @@ def main(argv: list[str] | None = None) -> None:
         "--limit", type=int, default=None, help="Limit number of samples (was max_samples)"
     )
     parser.add_argument("--version-dir", "-v", default=None, help="Version directory name")
-    parser.add_argument("--mode", default="fine", help="Search mode")
+    parser.add_argument("--search-mode", default="fine", help="Search mode")
 
     args = parser.parse_args(argv)
 
@@ -170,7 +190,12 @@ def main(argv: list[str] | None = None) -> None:
 
     output_dir = Path(f"evaluation/data/hotpot/{args.version_dir}")
     output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / f"{args.lib}_search_results.json"
+
+    if args.lib == "memos":
+        output_path = output_dir / f"{args.lib}_{args.search_mode}_search_results.json"
+    else:
+        output_path = output_dir / f"{args.lib}_search_results.json"
+
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     results, processed_ids = _load_existing_results(output_path)
@@ -195,7 +220,9 @@ def main(argv: list[str] | None = None) -> None:
         def do_search(item):
             st = time.perf_counter()
             try:
-                r = search_one(client, args.lib, item, args.top_k, args.version_dir)
+                r = search_one(
+                    client, args.lib, item, args.top_k, args.version_dir, args.search_mode
+                )
                 dur = time.perf_counter() - st
                 metrics.record(dur, True)
                 return r
@@ -215,6 +242,7 @@ def main(argv: list[str] | None = None) -> None:
                     _save_json_list(output_path, results)
             except Exception as e:
                 print(f"[Search] Error: {e}")
+                traceback.print_exc()
 
     _save_json_list(output_path, results)
     print(f"[Search] saved {len(results)} rows to {output_path}")
@@ -232,7 +260,7 @@ def main(argv: list[str] | None = None) -> None:
                 "workers": args.workers,
                 "top_k": args.top_k,
                 "limit": limit,
-                "mode": args.mode,
+                "search_mode": args.search_mode,
                 "lib": args.lib,
             },
         },

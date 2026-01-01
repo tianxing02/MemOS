@@ -149,6 +149,7 @@ def eval(prediction_file, gold_file):
         print(metrics)
     else:
         print(metrics)
+    return metrics
 
 
 if __name__ == "__main__":
