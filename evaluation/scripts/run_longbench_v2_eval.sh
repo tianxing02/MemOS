@@ -6,14 +6,16 @@ cd "$ROOT_DIR"
 export PYTHONPATH="$ROOT_DIR"
 
 # Common parameters
-LIB="supermemory"
-WORKERS=5
+LIB="mem0"
+WORKERS=10
 TOPK=20
 ADD_MODE="fine"
 SEARCH_MODE="fine"
-VERSION_DIR="test_1231"
+VERSION_DIR="test_0104_01"
 ASYNC_MODE="sync"
-CHAT_MODEL="gpt-4o-mini"
+#CHAT_MODEL="gpt-4o-mini"
+CHAT_MODEL="o4-mini"
+LIMIT=30
 
 # Add / Ingestion
 echo "Running longbench_v2_ingestion.py..."
@@ -22,7 +24,8 @@ python -m evaluation.scripts.longbench_v2.longbench_v2_ingestion \
   --workers "$WORKERS" \
   --version-dir "$VERSION_DIR" \
   --mode "$ADD_MODE" \
-  --async-mode "$ASYNC_MODE"
+  --async-mode "$ASYNC_MODE" \
+#  --limit "$LIMIT"
 
 # Search
 echo "Running longbench_v2_search.py..."
@@ -32,7 +35,7 @@ python -m evaluation.scripts.longbench_v2.longbench_v2_search \
   --version-dir "$VERSION_DIR" \
   --top-k "$TOPK" \
   --mode "$SEARCH_MODE" \
-  --limit 30
+#  --limit "$LIMIT"
 
 # Eval
 echo "Running longbench_v2_eval.py..."

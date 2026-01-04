@@ -126,13 +126,11 @@ def ingest_context(
             mode=mode,
             async_mode=async_mode,
         )
-        return
 
     if lib == "mem0":
         messages = [{"role": "user", "content": p} for p in chunks]
         ts = int(time.time())
         retry_operation(client.add, messages=messages, user_id=user_id, timestamp=ts, batch_size=10)
-        return
 
     if lib == "supermemory":
         retry_operation(client.add, content=context, user_id=user_id)
@@ -170,6 +168,14 @@ def parse_args():
     parser.add_argument("--version-dir", "-v", default=None, help="Version directory name")
 
     parser.add_argument(
+        "--limit",
+        "-l",
+        type=int,
+        default=None,
+        help="Limit number of samples to process (for testing, default all)",
+    )
+
+    parser.add_argument(
         "--dataset_path",
         "-p",
         default="evaluation/data/longbench_v2/longbenchv2_train.json",
@@ -187,6 +193,8 @@ def main() -> None:
 
     dataset_path = Path(args.dataset_path)
     dataset = _load_dataset_jsonl(dataset_path)
+    if args.limit is not None:
+        dataset = dataset[: args.limit]
 
     version_output_dir = os.path.join("evaluation/data/longbench_v2", args.version_dir)
     os.makedirs(version_output_dir, exist_ok=True)
@@ -212,6 +220,7 @@ def main() -> None:
             metrics.record(duration, True)
             return sid
         except Exception as e:
+            traceback.print_exc()
             duration = time.perf_counter() - start_time
             metrics.record(duration, False, str(e))
             raise e
@@ -234,27 +243,29 @@ def main() -> None:
     print(f"[Add] saved records to {output_path}")
 
     total_duration = time.time() - start_time
-    perf_out = Path(version_output_dir) / f"{args.lib}_add_perf.json"
 
     summary = metrics.summary()
 
-    with open(perf_out, "w", encoding="utf-8") as f:
-        json.dump(
-            {
-                "summary": summary,
-                "total_duration": total_duration,
-                "config": {
-                    "workers": args.workers,
-                    "mode": args.mode,
-                    "async_mode": args.async_mode,
-                    "dataset_path": args.dataset_path,
-                },
+    combined_obj = {
+        "perf": {
+            "summary": summary,
+            "total_duration": total_duration,
+            "config": {
+                "workers": args.workers,
+                "mode": args.mode,
+                "async_mode": args.async_mode,
+                "dataset_path": args.dataset_path,
             },
+        },
+        "added_ids": list(added_ids),
+    }
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(
+            combined_obj,
             f,
             ensure_ascii=False,
             indent=2,
         )
-    print(f"[Add] saved performance metrics to {perf_out}")
 
     print("\n" + "=" * 60)
     print("Ingestion finished! Statistics:")
