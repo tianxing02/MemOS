@@ -226,7 +226,7 @@ def main() -> None:
             try:
                 r = f.result()
                 results.append(r)
-                if idx % 10 == 0:
+                if idx % 20 == 0:
                     _save_json_list(output_path, results)
             except Exception as e:
                 metrics.record(0.0, False, str(e))
@@ -239,7 +239,6 @@ def main() -> None:
     total_duration = time.time() - start_time
     summary = metrics.summary()
     combined_obj = {
-        "results": results,
         "perf": {
             "summary": summary,
             "total_duration": total_duration,
@@ -251,6 +250,7 @@ def main() -> None:
                 "mode": args.mode,
             },
         },
+        "results": results,
     }
     tmp = output_path.with_suffix(output_path.suffix + ".tmp")
     tmp.write_text(json.dumps(combined_obj, ensure_ascii=False, indent=2), encoding="utf-8")
