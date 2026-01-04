@@ -1,4 +1,4 @@
-from memos.memories.textual.item import TextualMemoryItem
+from memos.memories.textual.item import TextualMemoryItem, TreeNodeTextualMemoryMetadata
 
 
 def estimate_tokens(text: str) -> int:
@@ -48,13 +48,48 @@ def should_keep_update(new_text: str, old_text: str) -> bool:
     similarity = calculate_similarity(old_text, new_text)
     change_ratio = 1 - similarity
 
-    if old_len < 50:
-        return change_ratio < 0.5
+    if change_ratio == float(0):
+        return False
+
+    if old_len < 200:
+        return change_ratio < 0.7
     else:
-        return change_ratio < 0.15
+        return change_ratio < 0.2
 
 
-def split_into_chunks(memories: list[TextualMemoryItem], max_tokens_per_chunk=500):
+def general_split_into_chunks(items: list[dict], max_tokens_per_chunk: int = 500):
+    chunks = []
+    current_chunk = []
+    current_tokens = 0
+
+    for item in items:
+        item_text = str(item)
+        item_tokens = estimate_tokens(item_text)
+
+        if item_tokens > max_tokens_per_chunk:
+            if current_chunk:
+                chunks.append(current_chunk)
+                current_chunk = []
+
+            chunks.append([item])
+            current_tokens = 0
+
+        elif current_tokens + item_tokens <= max_tokens_per_chunk:
+            current_chunk.append(item)
+            current_tokens += item_tokens
+        else:
+            if current_chunk:
+                chunks.append(current_chunk)
+            current_chunk = [item]
+            current_tokens = item_tokens
+
+    if current_chunk:
+        chunks.append(current_chunk)
+
+    return chunks
+
+
+def split_into_chunks(memories: list[TextualMemoryItem], max_tokens_per_chunk: int = 500):
     chunks = []
     current_chunk = []
     current_tokens = 0
@@ -84,3 +119,31 @@ def split_into_chunks(memories: list[TextualMemoryItem], max_tokens_per_chunk=50
         chunks.append(current_chunk)
 
     return chunks
+
+
+def make_mem_item(text: str, **kwargs) -> TextualMemoryItem:
+    """Build a minimal TextualMemoryItem."""
+    info = kwargs.get("info", {})
+    info_ = info.copy()
+    user_id = info_.pop("user_id", "")
+    session_id = info_.pop("session_id", "")
+
+    return TextualMemoryItem(
+        memory=text,
+        metadata=TreeNodeTextualMemoryMetadata(
+            user_id=user_id,
+            session_id=session_id,
+            memory_type="LongTermMemory",
+            status="activated",
+            tags=kwargs.get("tags", []),
+            key=kwargs.get("key", ""),
+            embedding=kwargs.get("embedding", []),
+            usage=[],
+            sources=kwargs.get("sources", []),
+            user_name=kwargs.get("user_name", ""),
+            background=kwargs.get("background", ""),
+            confidence=0.99,
+            type=kwargs.get("type", ""),
+            info=info_,
+        ),
+    )

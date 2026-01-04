@@ -1,7 +1,6 @@
 import concurrent.futures
 import contextlib
 import json
-import os
 import traceback
 
 from memos.configs.mem_scheduler import GeneralSchedulerConfig
@@ -30,8 +29,12 @@ from memos.mem_scheduler.utils.filter_utils import (
     is_all_english,
     transform_name_to_key,
 )
-from memos.mem_scheduler.utils.misc_utils import group_messages_by_user_and_mem_cube
+from memos.mem_scheduler.utils.misc_utils import (
+    group_messages_by_user_and_mem_cube,
+    is_cloud_env,
+)
 from memos.memories.textual.item import TextualMemoryItem
+from memos.memories.textual.naive import NaiveTextMemory
 from memos.memories.textual.preference import PreferenceTextMemory
 from memos.memories.textual.tree import TreeTextMemory
 from memos.types import (
@@ -66,7 +69,7 @@ class GeneralScheduler(BaseScheduler):
     def long_memory_update_process(
         self, user_id: str, mem_cube_id: str, messages: list[ScheduleMessageItem]
     ):
-        mem_cube = self.current_mem_cube
+        mem_cube = self.mem_cube
 
         # update query monitors
         for msg in messages:
@@ -109,8 +112,8 @@ class GeneralScheduler(BaseScheduler):
 
             query_db_manager = self.monitor.query_monitors[user_id][mem_cube_id]
             query_db_manager.obj.put(item=item)
-            # Sync with database after adding new item
-            query_db_manager.sync_with_orm()
+        # Sync with database after adding new item
+        query_db_manager.sync_with_orm()
         logger.debug(
             f"Queries in monitor for user_id={user_id}, mem_cube_id={mem_cube_id}: {query_db_manager.obj.get_queries_with_timesort()}"
         )
@@ -126,7 +129,10 @@ class GeneralScheduler(BaseScheduler):
             top_k=self.top_k,
         )
         logger.info(
-            f"[long_memory_update_process] Processed {len(queries)} queries {queries} and retrieved {len(new_candidates)} new candidate memories for user_id={user_id}"
+            # Build the candidate preview string outside the f-string to avoid backslashes in expression
+            f"[long_memory_update_process] Processed {len(queries)} queries {queries} and retrieved {len(new_candidates)} "
+            f"new candidate memories for user_id={user_id}: "
+            + ("\n- " + "\n- ".join([f"{one.id}: {one.memory}" for one in new_candidates]))
         )
 
         # rerank
@@ -141,14 +147,18 @@ class GeneralScheduler(BaseScheduler):
             f"[long_memory_update_process] Final working memory size: {len(new_order_working_memory)} memories for user_id={user_id}"
         )
 
-        old_memory_texts = [mem.memory for mem in cur_working_memory]
-        new_memory_texts = [mem.memory for mem in new_order_working_memory]
+        old_memory_texts = "\n- " + "\n- ".join(
+            [f"{one.id}: {one.memory}" for one in cur_working_memory]
+        )
+        new_memory_texts = "\n- " + "\n- ".join(
+            [f"{one.id}: {one.memory}" for one in new_order_working_memory]
+        )
 
-        logger.debug(
+        logger.info(
             f"[long_memory_update_process] For user_id='{user_id}', mem_cube_id='{mem_cube_id}': "
             f"Scheduler replaced working memory based on query history {queries}. "
-            f"Old working memory ({len(old_memory_texts)} items): {old_memory_texts}. "
-            f"New working memory ({len(new_memory_texts)} items): {new_memory_texts}."
+            f"Old working memory ({len(cur_working_memory)} items): {old_memory_texts}. "
+            f"New working memory ({len(new_order_working_memory)} items): {new_memory_texts}."
         )
 
         # update activation memories
@@ -162,7 +172,7 @@ class GeneralScheduler(BaseScheduler):
                 label=QUERY_TASK_LABEL,
                 user_id=user_id,
                 mem_cube_id=mem_cube_id,
-                mem_cube=self.current_mem_cube,
+                mem_cube=self.mem_cube,
             )
 
     def _add_message_consumer(self, messages: list[ScheduleMessageItem]) -> None:
@@ -187,12 +197,9 @@ class GeneralScheduler(BaseScheduler):
                             f"prepared_add_items: {prepared_add_items};\n prepared_update_items_with_original: {prepared_update_items_with_original}"
                         )
                         # Conditional Logging: Knowledge Base (Cloud Service) vs. Playground/Default
-                        is_cloud_env = (
-                            os.getenv("MEMSCHEDULER_RABBITMQ_EXCHANGE_NAME")
-                            == "memos-memory-change"
-                        )
+                        cloud_env = is_cloud_env()
 
-                        if is_cloud_env:
+                        if cloud_env:
                             self.send_add_log_messages_to_cloud_env(
                                 msg, prepared_add_items, prepared_update_items_with_original
                             )
@@ -249,7 +256,7 @@ class GeneralScheduler(BaseScheduler):
                             to_memory_type=NOT_APPLICABLE_TYPE,
                             user_id=msg.user_id,
                             mem_cube_id=msg.mem_cube_id,
-                            mem_cube=self.current_mem_cube,
+                            mem_cube=self.mem_cube,
                             memcube_log_content=[
                                 {
                                     "content": f"[User] {msg.content}",
@@ -305,7 +312,7 @@ class GeneralScheduler(BaseScheduler):
                             to_memory_type=NOT_APPLICABLE_TYPE,
                             user_id=msg.user_id,
                             mem_cube_id=msg.mem_cube_id,
-                            mem_cube=self.current_mem_cube,
+                            mem_cube=self.mem_cube,
                             memcube_log_content=[
                                 {
                                     "content": f"[Assistant] {msg.content}",
@@ -337,9 +344,12 @@ class GeneralScheduler(BaseScheduler):
         for memory_id in userinput_memory_ids:
             try:
                 # This mem_item represents the NEW content that was just added/processed
-                mem_item: TextualMemoryItem = self.current_mem_cube.text_mem.get(
-                    memory_id=memory_id
+                mem_item: TextualMemoryItem | None = None
+                mem_item = self.mem_cube.text_mem.get(
+                    memory_id=memory_id, user_name=msg.mem_cube_id
                 )
+                if mem_item is None:
+                    raise ValueError(f"Memory {memory_id} not found after retries")
                 # Check if a memory with the same key already exists (determining if it's an update)
                 key = getattr(mem_item.metadata, "key", None) or transform_name_to_key(
                     name=mem_item.memory
@@ -349,8 +359,8 @@ class GeneralScheduler(BaseScheduler):
                 original_item_id = None
 
                 # Only check graph_store if a key exists and the text_mem has a graph_store
-                if key and hasattr(self.current_mem_cube.text_mem, "graph_store"):
-                    candidates = self.current_mem_cube.text_mem.graph_store.get_by_metadata(
+                if key and hasattr(self.mem_cube.text_mem, "graph_store"):
+                    candidates = self.mem_cube.text_mem.graph_store.get_by_metadata(
                         [
                             {"field": "key", "op": "=", "value": key},
                             {
@@ -365,8 +375,8 @@ class GeneralScheduler(BaseScheduler):
                         original_item_id = candidates[0]
                         # Crucial step: Fetch the original content for updates
                         # This `get` is for the *existing* memory that will be updated
-                        original_mem_item = self.current_mem_cube.text_mem.get(
-                            memory_id=original_item_id
+                        original_mem_item = self.mem_cube.text_mem.get(
+                            memory_id=original_item_id, user_name=msg.mem_cube_id
                         )
                         original_content = original_mem_item.memory
 
@@ -478,7 +488,7 @@ class GeneralScheduler(BaseScheduler):
                 to_memory_type=LONG_TERM_MEMORY_TYPE,
                 user_id=msg.user_id,
                 mem_cube_id=msg.mem_cube_id,
-                mem_cube=self.current_mem_cube,
+                mem_cube=self.mem_cube,
                 memcube_log_content=add_content_legacy,
                 metadata=add_meta_legacy,
                 memory_len=len(add_content_legacy),
@@ -493,7 +503,7 @@ class GeneralScheduler(BaseScheduler):
                 to_memory_type=LONG_TERM_MEMORY_TYPE,
                 user_id=msg.user_id,
                 mem_cube_id=msg.mem_cube_id,
-                mem_cube=self.current_mem_cube,
+                mem_cube=self.mem_cube,
                 memcube_log_content=update_content_legacy,
                 metadata=update_meta_legacy,
                 memory_len=len(update_content_legacy),
@@ -513,8 +523,12 @@ class GeneralScheduler(BaseScheduler):
         """
         kb_log_content: list[dict] = []
         info = msg.info or {}
+
         # Process added items
         for item in prepared_add_items:
+            metadata = getattr(item, "metadata", None)
+            file_ids = getattr(metadata, "file_ids", None) if metadata else None
+            source_doc_id = file_ids[0] if isinstance(file_ids, list) and file_ids else None
             kb_log_content.append(
                 {
                     "log_source": "KNOWLEDGE_BASE_LOG",
@@ -523,13 +537,16 @@ class GeneralScheduler(BaseScheduler):
                     "memory_id": item.id,
                     "content": item.memory,
                     "original_content": None,
-                    "source_doc_id": getattr(item.metadata, "source_doc_id", None),
+                    "source_doc_id": source_doc_id,
                 }
             )
 
         # Process updated items
         for item_data in prepared_update_items_with_original:
             item = item_data["new_item"]
+            metadata = getattr(item, "metadata", None)
+            file_ids = getattr(metadata, "file_ids", None) if metadata else None
+            source_doc_id = file_ids[0] if isinstance(file_ids, list) and file_ids else None
             kb_log_content.append(
                 {
                     "log_source": "KNOWLEDGE_BASE_LOG",
@@ -538,7 +555,7 @@ class GeneralScheduler(BaseScheduler):
                     "memory_id": item.id,
                     "content": item.memory,
                     "original_content": item_data.get("original_content"),
-                    "source_doc_id": getattr(item.metadata, "source_doc_id", None),
+                    "source_doc_id": source_doc_id,
                 }
             )
 
@@ -552,7 +569,7 @@ class GeneralScheduler(BaseScheduler):
                 to_memory_type=LONG_TERM_MEMORY_TYPE,
                 user_id=msg.user_id,
                 mem_cube_id=msg.mem_cube_id,
-                mem_cube=self.current_mem_cube,
+                mem_cube=self.mem_cube,
                 memcube_log_content=kb_log_content,
                 metadata=None,
                 memory_len=len(kb_log_content),
@@ -567,7 +584,7 @@ class GeneralScheduler(BaseScheduler):
             if not messages:
                 return
             message = messages[0]
-            mem_cube = self.current_mem_cube
+            mem_cube = self.mem_cube
 
             user_id = message.user_id
             mem_cube_id = message.mem_cube_id
@@ -594,14 +611,15 @@ class GeneralScheduler(BaseScheduler):
                 feedback_content=feedback_data.get("feedback_content"),
                 feedback_time=feedback_data.get("feedback_time"),
                 task_id=task_id,
+                info=feedback_data.get("info", None),
             )
 
             logger.info(
                 f"Successfully processed feedback for user_id={user_id}, mem_cube_id={mem_cube_id}"
             )
 
-            is_cloud_env = os.getenv("MEMSCHEDULER_RABBITMQ_EXCHANGE_NAME") == "memos-memory-change"
-            if is_cloud_env:
+            cloud_env = is_cloud_env()
+            if cloud_env:
                 record = feedback_result.get("record") if isinstance(feedback_result, dict) else {}
                 add_records = record.get("add") if isinstance(record, dict) else []
                 update_records = record.get("update") if isinstance(record, dict) else []
@@ -627,8 +645,8 @@ class GeneralScheduler(BaseScheduler):
                         or mem_item.get("original_content")
                     )
                     source_doc_id = None
-                    if "archived_id" in mem_item:
-                        source_doc_id = mem_item.get("archived_id")
+                    if isinstance(mem_item, dict):
+                        source_doc_id = mem_item.get("source_doc_id", None)
 
                     return mem_id, mem_memory, original_content, source_doc_id
 
@@ -682,6 +700,7 @@ class GeneralScheduler(BaseScheduler):
                             stack_info=True,
                         )
 
+                logger.info(f"[Feedback Scheduler] kb_log_content: {kb_log_content!s}")
                 if kb_log_content:
                     logger.info(
                         "[DIAGNOSTIC] general_scheduler._mem_feedback_message_consumer: Creating knowledgeBaseUpdate event for feedback. user_id=%s mem_cube_id=%s task_id=%s items=%s",
@@ -718,7 +737,7 @@ class GeneralScheduler(BaseScheduler):
             else:
                 logger.info(
                     "Skipping web log for feedback. Not in a cloud environment (is_cloud_env=%s)",
-                    is_cloud_env,
+                    cloud_env,
                 )
 
         except Exception as e:
@@ -734,9 +753,9 @@ class GeneralScheduler(BaseScheduler):
             try:
                 user_id = message.user_id
                 mem_cube_id = message.mem_cube_id
-                mem_cube = self.current_mem_cube
+                mem_cube = self.mem_cube
                 if mem_cube is None:
-                    logger.warning(
+                    logger.error(
                         f"mem_cube is None for user_id={user_id}, mem_cube_id={mem_cube_id}, skipping processing",
                         stack_info=True,
                     )
@@ -825,10 +844,12 @@ class GeneralScheduler(BaseScheduler):
             memory_items = []
             for mem_id in mem_ids:
                 try:
-                    memory_item = text_mem.get(mem_id)
+                    memory_item = text_mem.get(mem_id, user_name=user_name)
                     memory_items.append(memory_item)
                 except Exception as e:
-                    logger.warning(f"Failed to get memory {mem_id}: {e}")
+                    logger.warning(
+                        f"[_process_memories_with_reader] Failed to get memory {mem_id}: {e}"
+                    )
                     continue
 
             if not memory_items:
@@ -878,13 +899,16 @@ class GeneralScheduler(BaseScheduler):
 
                     # LOGGING BLOCK START
                     # This block is replicated from _add_message_consumer to ensure consistent logging
-                    is_cloud_env = (
-                        os.getenv("MEMSCHEDULER_RABBITMQ_EXCHANGE_NAME") == "memos-memory-change"
-                    )
-                    if is_cloud_env:
+                    cloud_env = is_cloud_env()
+                    if cloud_env:
                         # New: Knowledge Base Logging (Cloud Service)
                         kb_log_content = []
                         for item in flattened_memories:
+                            metadata = getattr(item, "metadata", None)
+                            file_ids = getattr(metadata, "file_ids", None) if metadata else None
+                            source_doc_id = (
+                                file_ids[0] if isinstance(file_ids, list) and file_ids else None
+                            )
                             kb_log_content.append(
                                 {
                                     "log_source": "KNOWLEDGE_BASE_LOG",
@@ -895,7 +919,7 @@ class GeneralScheduler(BaseScheduler):
                                     "memory_id": item.id,
                                     "content": item.memory,
                                     "original_content": None,
-                                    "source_doc_id": getattr(item.metadata, "source_doc_id", None),
+                                    "source_doc_id": source_doc_id,
                                 }
                             )
                         if kb_log_content:
@@ -908,7 +932,7 @@ class GeneralScheduler(BaseScheduler):
                                 to_memory_type=LONG_TERM_MEMORY_TYPE,
                                 user_id=user_id,
                                 mem_cube_id=mem_cube_id,
-                                mem_cube=self.current_mem_cube,
+                                mem_cube=self.mem_cube,
                                 memcube_log_content=kb_log_content,
                                 metadata=None,
                                 memory_len=len(kb_log_content),
@@ -953,7 +977,7 @@ class GeneralScheduler(BaseScheduler):
                                 to_memory_type=LONG_TERM_MEMORY_TYPE,
                                 user_id=user_id,
                                 mem_cube_id=mem_cube_id,
-                                mem_cube=self.current_mem_cube,
+                                mem_cube=self.mem_cube,
                                 memcube_log_content=add_content_legacy,
                                 metadata=add_meta_legacy,
                                 memory_len=len(add_content_legacy),
@@ -995,10 +1019,8 @@ class GeneralScheduler(BaseScheduler):
                 f"Error in _process_memories_with_reader: {traceback.format_exc()}", exc_info=True
             )
             with contextlib.suppress(Exception):
-                is_cloud_env = (
-                    os.getenv("MEMSCHEDULER_RABBITMQ_EXCHANGE_NAME") == "memos-memory-change"
-                )
-                if is_cloud_env:
+                cloud_env = is_cloud_env()
+                if cloud_env:
                     if not kb_log_content:
                         trigger_source = (
                             info.get("trigger_source", "Messages") if info else "Messages"
@@ -1021,7 +1043,7 @@ class GeneralScheduler(BaseScheduler):
                         to_memory_type=LONG_TERM_MEMORY_TYPE,
                         user_id=user_id,
                         mem_cube_id=mem_cube_id,
-                        mem_cube=self.current_mem_cube,
+                        mem_cube=self.mem_cube,
                         memcube_log_content=kb_log_content,
                         metadata=None,
                         memory_len=len(kb_log_content),
@@ -1039,7 +1061,7 @@ class GeneralScheduler(BaseScheduler):
             try:
                 user_id = message.user_id
                 mem_cube_id = message.mem_cube_id
-                mem_cube = self.current_mem_cube
+                mem_cube = self.mem_cube
                 if mem_cube is None:
                     logger.warning(
                         f"mem_cube is None for user_id={user_id}, mem_cube_id={mem_cube_id}, skipping processing"
@@ -1077,7 +1099,7 @@ class GeneralScheduler(BaseScheduler):
                     mem_items: list[TextualMemoryItem] = []
                     for mid in mem_ids:
                         with contextlib.suppress(Exception):
-                            mem_items.append(text_mem.get(mid))
+                            mem_items.append(text_mem.get(mid, user_name=user_name))
                     if len(mem_items) > 1:
                         keys: list[str] = []
                         memcube_content: list[dict] = []
@@ -1133,7 +1155,7 @@ class GeneralScheduler(BaseScheduler):
                         if merged_target_ids:
                             post_ref_id = next(iter(merged_target_ids))
                             with contextlib.suppress(Exception):
-                                merged_item = text_mem.get(post_ref_id)
+                                merged_item = text_mem.get(post_ref_id, user_name=user_name)
                                 combined_key = (
                                     getattr(getattr(merged_item, "metadata", {}), "key", None)
                                     or combined_key
@@ -1242,7 +1264,7 @@ class GeneralScheduler(BaseScheduler):
             memory_items = []
             for mem_id in mem_ids:
                 try:
-                    memory_item = text_mem.get(mem_id)
+                    memory_item = text_mem.get(mem_id, user_name=user_name)
                     memory_items.append(memory_item)
                 except Exception as e:
                     logger.warning(f"Failed to get memory {mem_id}: {e}|{traceback.format_exc()}")
@@ -1269,7 +1291,7 @@ class GeneralScheduler(BaseScheduler):
 
         def process_message(message: ScheduleMessageItem):
             try:
-                mem_cube = self.current_mem_cube
+                mem_cube = self.mem_cube
                 if mem_cube is None:
                     logger.warning(
                         f"mem_cube is None for user_id={message.user_id}, mem_cube_id={message.mem_cube_id}, skipping processing"
@@ -1345,19 +1367,31 @@ class GeneralScheduler(BaseScheduler):
 
         text_mem_base = mem_cube.text_mem
         if not isinstance(text_mem_base, TreeTextMemory):
-            logger.error(
-                f"Not implemented! Expected TreeTextMemory but got {type(text_mem_base).__name__} "
-                f"for mem_cube_id={mem_cube_id}, user_id={user_id}. "
-                f"text_mem_base value: {text_mem_base}",
-                exc_info=True,
+            if isinstance(text_mem_base, NaiveTextMemory):
+                logger.debug(
+                    f"NaiveTextMemory used for mem_cube_id={mem_cube_id}, processing session turn with simple search."
+                )
+                # Treat NaiveTextMemory similar to TreeTextMemory but with simpler logic
+                # We will perform retrieval to get "working memory" candidates for activation memory
+                # But we won't have a distinct "current working memory"
+                cur_working_memory = []
+            else:
+                logger.warning(
+                    f"Not implemented! Expected TreeTextMemory but got {type(text_mem_base).__name__} "
+                    f"for mem_cube_id={mem_cube_id}, user_id={user_id}. "
+                    f"text_mem_base value: {text_mem_base}"
+                )
+                return [], []
+        else:
+            cur_working_memory: list[TextualMemoryItem] = text_mem_base.get_working_memory(
+                user_name=mem_cube_id
             )
-            return
+            cur_working_memory = cur_working_memory[:top_k]
 
         logger.info(
             f"[process_session_turn] Processing {len(queries)} queries for user_id={user_id}, mem_cube_id={mem_cube_id}"
         )
 
-        cur_working_memory: list[TextualMemoryItem] = text_mem_base.get_working_memory()
         text_working_memory: list[str] = [w_m.memory for w_m in cur_working_memory]
         intent_result = self.monitor.detect_intent(
             q_list=queries, text_working_memory=text_working_memory
@@ -1395,20 +1429,34 @@ class GeneralScheduler(BaseScheduler):
             logger.info(
                 f"[process_session_turn] Searching for missing evidence: '{item}' with top_k={k_per_evidence} for user_id={user_id}"
             )
-            info = {
-                "user_id": user_id,
-                "session_id": "",
-            }
 
-            results: list[TextualMemoryItem] = self.retriever.search(
-                query=item,
-                mem_cube=mem_cube,
-                top_k=k_per_evidence,
-                method=self.search_method,
-                info=info,
-            )
+            search_args = {}
+            if isinstance(text_mem_base, NaiveTextMemory):
+                # NaiveTextMemory doesn't support complex search args usually, but let's see
+                # self.retriever.search calls mem_cube.text_mem.search
+                # NaiveTextMemory.search takes query and top_k
+                # SchedulerRetriever.search handles method dispatch
+                # For NaiveTextMemory, we might need to bypass retriever or extend it
+                # But let's try calling naive memory directly if retriever fails or doesn't support it
+                try:
+                    results = text_mem_base.search(query=item, top_k=k_per_evidence)
+                except Exception as e:
+                    logger.warning(f"NaiveTextMemory search failed: {e}")
+                    results = []
+            else:
+                results: list[TextualMemoryItem] = self.retriever.search(
+                    query=item,
+                    user_id=user_id,
+                    mem_cube_id=mem_cube_id,
+                    mem_cube=mem_cube,
+                    top_k=k_per_evidence,
+                    method=self.search_method,
+                    search_args=search_args,
+                )
+
             logger.info(
-                f"[process_session_turn] Search results for missing evidence '{item}': {[one.memory for one in results]}"
+                f"[process_session_turn] Search results for missing evidence '{item}': "
+                + ("\n- " + "\n- ".join([f"{one.id}: {one.memory}" for one in results]))
             )
             new_candidates.extend(results)
         return cur_working_memory, new_candidates

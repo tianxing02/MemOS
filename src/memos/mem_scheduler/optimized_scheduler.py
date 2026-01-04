@@ -186,10 +186,14 @@ class OptimizedScheduler(GeneralScheduler):
             info=info,
             search_tool_memory=search_req.search_tool_memory,
             tool_mem_top_k=search_req.tool_mem_top_k,
+            dedup=search_req.dedup,
         )
         memories = merged_memories[: search_req.top_k]
 
-        formatted_memories = [format_textual_memory_item(item) for item in memories]
+        formatted_memories = [
+            format_textual_memory_item(item, include_embedding=search_req.dedup == "sim")
+            for item in memories
+        ]
         self.submit_memory_history_async_task(
             search_req=search_req,
             user_context=user_context,
@@ -230,10 +234,13 @@ class OptimizedScheduler(GeneralScheduler):
                 memories: list[TextualMemoryItem] = self.search_memories(
                     search_req=APISearchRequest(**content_dict["search_req"]),
                     user_context=UserContext(**content_dict["user_context"]),
-                    mem_cube=self.current_mem_cube,
+                    mem_cube=self.mem_cube,
                     mode=SearchMode.FAST,
                 )
-                formatted_memories = [format_textual_memory_item(data) for data in memories]
+                formatted_memories = [
+                    format_textual_memory_item(data, include_embedding=search_req.dedup == "sim")
+                    for data in memories
+                ]
             else:
                 memories = [
                     TextualMemoryItem.from_dict(one) for one in memories_to_store["memories"]
@@ -338,19 +345,25 @@ class OptimizedScheduler(GeneralScheduler):
                 for one in new_working_memory_monitors:
                     one.sorting_score = 0
 
-            logger.info(
-                f"[optimized replace_working_memory] update {len(new_working_memory_monitors)} working_memory_monitors"
-            )
             self.monitor.update_working_memory_monitors(
                 new_working_memory_monitors=new_working_memory_monitors,
                 user_id=user_id,
                 mem_cube_id=mem_cube_id,
                 mem_cube=mem_cube,
             )
-
-            # Use the filtered and reranked memories directly
-            text_mem_base.replace_working_memory(memories=memories_with_new_order)
-
+            logger.info(
+                f"[optimized replace_working_memory] update {len(new_working_memory_monitors)} working_memory_monitors"
+            )
+            try:
+                # Use the filtered and reranked memories directly
+                text_mem_base.replace_working_memory(
+                    memories=memories_with_new_order, user_name=mem_cube_id
+                )
+            except Exception:
+                logger.error(
+                    "[optimized replace_working_memory] text_mem_base.replace_working_memory failed!",
+                    stack_info=True,
+                )
             # Update monitor after replacing working memory
             mem_monitors: list[MemoryMonitorItem] = self.monitor.working_memory_monitors[user_id][
                 mem_cube_id
