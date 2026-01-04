@@ -1,12 +1,8 @@
-import base64
 import json
-import mimetypes
 import os
-import re
 import time
 
-from datetime import datetime
-from functools import lru_cache
+from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
 from typing import Any, Literal
@@ -37,169 +33,6 @@ from memos.types import ChatHistory, MessageList, MOSSearchResult
 
 
 logger = get_logger(__name__)
-
-# -----------------------
-# Helper functions for image handling in chat
-# -----------------------
-
-
-def _encode_image_to_data_url(image_path: str) -> str | None:
-    """Encode local image file to base64 data URL for OpenAI-compatible image messages.
-
-    Returns a data URL like: data:image/jpeg;base64,<...>
-    """
-    try:
-        mime, _ = mimetypes.guess_type(image_path)
-        if not mime:
-            # default to jpeg
-            mime = "image/jpeg"
-        with open(image_path, "rb") as f:
-            b64 = base64.b64encode(f.read()).decode("ascii")
-        return f"data:{mime};base64,{b64}"
-    except Exception as e:
-        logger.warning(f"Failed to encode image '{image_path}' to data URL: {e}")
-        return None
-
-
-@lru_cache(maxsize=1)
-def _build_images_index() -> dict[str, str]:
-    """Scan `./ppt_test_result` recursively and index images by filename.
-
-    New structure example:
-    ./ppt_test_result/<pdf-name>/extracted/file_*/<pdf-name>/auto/images/*.{png,jpg,jpeg,webp,gif}
-
-    Also compatible with previous layouts. Returns mapping:
-    basename (e.g. img_123.jpg) -> absolute path
-    """
-    base_dir = Path("./ppt_test_result")
-    index: dict[str, str] = {}
-    if not base_dir.exists():
-        return index
-
-    # Recursively find any `auto/images` directories under ppt_test_result
-    for images_dir in base_dir.rglob("auto/images"):
-        if images_dir.is_dir():
-            for img_file in images_dir.iterdir():
-                if img_file.is_file():
-                    index[img_file.name] = str(img_file.resolve())
-    logger.info(f"Image index built with {len(index)} entries")
-    return index
-
-
-def get_images(sources: list[str]) -> list[str]:
-    """Extract image absolute paths from metadata sources.
-
-    Supports patterns like: ![](images/<hash>.jpg) or any 'images/...jpg' substring.
-    Falls back to scanning the ppt_test_result index to resolve basenames.
-    """
-    if not sources:
-        return []
-
-    # Ensure index exists
-    index = _build_images_index()
-    found: list[str] = []
-
-    md_img_pattern = re.compile(r"!\[[^\]]*\]\(([^\)]+)\)")
-    images_substr_pattern = re.compile(r"images/[^\s)]+\.(?:png|jpg|jpeg|webp)", re.IGNORECASE)
-
-    for src in sources:
-        if not src:
-            continue
-        # 1) markdown image syntax
-        for m in md_img_pattern.findall(src):
-            candidate = m.strip()
-            # if it's a relative like 'images/xxx.jpg', resolve via index
-            basename = os.path.basename(candidate)
-            if basename in index:
-                found.append(index[basename])
-            else:
-                # try direct path (absolute or relative)
-                p = Path(candidate)
-                if not p.is_absolute():
-                    p = Path.cwd() / p
-                if p.exists():
-                    found.append(str(p.resolve()))
-
-        # 2) any 'images/xxx.jpg' substring
-        for m in images_substr_pattern.findall(src):
-            candidate = m.strip()
-            basename = os.path.basename(candidate)
-            if basename in index:
-                found.append(index[basename])
-            else:
-                p = Path(candidate)
-                if not p.is_absolute():
-                    p = Path.cwd() / p
-                if p.exists():
-                    found.append(str(p.resolve()))
-
-    # Deduplicate preserving order
-    dedup: list[str] = []
-    seen = set()
-    for path in found:
-        if path not in seen:
-            dedup.append(path)
-            seen.add(path)
-    return dedup
-
-
-def add_images_context(
-    current_messages: list[dict[str, Any]], images: list[str]
-) -> list[dict[str, Any]]:
-    """Append images in OpenAI-compatible multi-part format and ensure message structure.
-
-    - Deduplicates image paths.
-    - Ensures a system message exists with a concise CN vision instruction.
-    - Ensures the last user message has multi-part content: [text, image_url...].
-    - Uses base64 data URLs. Limits to 6 images.
-    - In-place modification of `current_messages`.
-    """
-    if not images:
-        return current_messages
-
-    # Deduplicate images while preserving order
-    unique_images: list[str] = []
-    seen_paths: set[str] = set()
-    for p in images:
-        if p not in seen_paths:
-            unique_images.append(p)
-            seen_paths.add(p)
-
-    # Locate or create the last user message
-    user_idx = None
-    for i in range(len(current_messages) - 1, -1, -1):
-        if current_messages[i].get("role") == "user":
-            user_idx = i
-            break
-
-    user_msg = current_messages[user_idx]
-    orig_content = user_msg.get("content", "")
-
-    # Normalize user content to multi-part format using original query as text (no fallback)
-    content_parts: list[dict[str, Any]]
-    if isinstance(orig_content, str):
-        content_parts = [{"type": "text", "text": orig_content}]
-    elif isinstance(orig_content, list):
-        content_parts = orig_content
-    else:
-        content_parts = [{"type": "text", "text": str(orig_content)}]
-
-    # 5) Append up to 3 images as data URLs
-    limit = 6
-    count = 0
-
-    for img_path in unique_images:
-        if count >= limit:
-            break
-        data_url = _encode_image_to_data_url(img_path)
-        if data_url:
-            content_parts.append({"type": "image_url", "image_url": {"url": data_url}})
-            count += 1
-
-    user_msg["content"] = content_parts
-    current_messages[user_idx] = user_msg
-    logger.info(f"Attached {count} images to user message (deduplicated from {len(images)})")
-    return current_messages
 
 
 class MOSCore:
@@ -359,7 +192,7 @@ class MOSCore:
         self.chat_history_manager[user_id] = ChatHistory(
             user_id=user_id if user_id is not None else self.user_id,
             session_id=session_id if session_id is not None else self.session_id,
-            created_at=datetime.utcnow(),
+            created_at=datetime.now(timezone.utc),
             total_messages=0,
             chat_history=[],
         )
@@ -429,7 +262,6 @@ class MOSCore:
         Returns:
             str: The response from the MOS.
         """
-        global images_all
         target_user_id = user_id if user_id is not None else self.user_id
         accessible_cubes = self.user_manager.get_user_cubes(target_user_id)
         user_cube_ids = [cube.cube_id for cube in accessible_cubes]
@@ -440,12 +272,12 @@ class MOSCore:
 
         if self.config.enable_textual_memory and self.mem_cubes:
             memories_all = []
-            images_all = []
             for mem_cube_id, mem_cube in self.mem_cubes.items():
                 if mem_cube_id not in user_cube_ids:
                     continue
                 if not mem_cube.text_mem:
                     continue
+
                 # submit message to scheduler
                 if self.enable_mem_scheduler and self.mem_scheduler is not None:
                     message_item = ScheduleMessageItem(
@@ -459,7 +291,7 @@ class MOSCore:
 
                 memories = mem_cube.text_mem.search(
                     query,
-                    top_k=100,
+                    top_k=self.config.top_k,
                     info={
                         "user_id": target_user_id,
                         "session_id": self.session_id,
@@ -467,26 +299,19 @@ class MOSCore:
                     },
                 )
                 memories_all.extend(memories)
-                for memory in memories:
-                    images_list = get_images(memory.metadata.sources)
-                    if len(images_list):
-                        images_all.extend(images_list)
-
             logger.info(f"🧠 [Memory] Searched memories:\n{self._str_memories(memories_all)}\n")
             system_prompt = self._build_system_prompt(memories_all, base_prompt=base_prompt)
         else:
             system_prompt = self._build_system_prompt(base_prompt=base_prompt)
-
         current_messages = [
             {"role": "system", "content": system_prompt},
             *chat_history.chat_history,
             {"role": "user", "content": query},
         ]
-        current_messages = add_images_context(current_messages, images_all)
         past_key_values = None
 
         if self.config.enable_activation_memory:
-            if self.config.chat_model.backend != "huggingface":
+            if self.config.chat_model.backend not in ["huggingface", "huggingface_singleton"]:
                 logger.error(
                     "Activation memory only used for huggingface backend. Skipping activation memory."
                 )
@@ -513,7 +338,6 @@ class MOSCore:
         # submit message to scheduler
         for accessible_mem_cube in accessible_cubes:
             mem_cube_id = accessible_mem_cube.cube_id
-            mem_cube_id = mem_cube_id.replace("cube_", "")
             mem_cube = self.mem_cubes[mem_cube_id]
             if self.enable_mem_scheduler and self.mem_scheduler is not None:
                 message_item = ScheduleMessageItem(
@@ -674,7 +498,9 @@ class MOSCore:
         existing_cube = self.user_manager.get_cube(mem_cube_id)
 
         # check the embedder is it consistent with MOSConfig
-        if self.config.mem_reader.config.embedder != (
+        if hasattr(
+            self.mem_cubes[mem_cube_id].text_mem.config, "embedder"
+        ) and self.config.mem_reader.config.embedder != (
             cube_embedder := self.mem_cubes[mem_cube_id].text_mem.config.embedder
         ):
             logger.warning(
@@ -799,6 +625,7 @@ class MOSCore:
                             "session_id": target_session_id,
                             "chat_history": chat_history.chat_history,
                         },
+                        moscube=moscube,
                         search_filter=search_filter,
                     )
                     search_time_end = time.time()
@@ -858,7 +685,7 @@ class MOSCore:
         self,
         messages: MessageList | None = None,
         memory_content: str | None = None,
-        doc_path: list[str] | None = None,
+        doc_path: str | None = None,
         mem_cube_id: str | None = None,
         user_id: str | None = None,
         session_id: str | None = None,
@@ -1034,7 +861,7 @@ class MOSCore:
                     info={"user_id": target_user_id, "session_id": target_session_id},
                     mode="fast" if sync_mode == "async" else "fine",
                 )
-                print("memories lenght:", len(memories))
+
                 mem_ids = []
                 for mem in memories:
                     mem_id_list: list[str] = self.mem_cubes[mem_cube_id].text_mem.add(mem)
@@ -1070,7 +897,7 @@ class MOSCore:
             and self.config.enable_textual_memory
             and self.mem_cubes[mem_cube_id].text_mem
         ):
-            documents = doc_path
+            documents = self._get_all_documents(doc_path)
             doc_memories = self.mem_reader.get_memory(
                 documents,
                 type="doc",
