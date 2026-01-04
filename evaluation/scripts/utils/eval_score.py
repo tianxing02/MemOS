@@ -1,59 +1,33 @@
-import os
 import re
-import traceback
 
 from collections import defaultdict
 from math import isclose
 
-from memos.configs.mem_os import MOSConfig
-from memos.llms.factory import LLMFactory
+
+def levenshtein_distance(s1, s2):
+    if len(s1) > len(s2):
+        s1, s2 = s2, s1
+
+    distances = range(len(s1) + 1)
+    for i2, c2 in enumerate(s2):
+        distances_ = [i2 + 1]
+        for i1, c1 in enumerate(s1):
+            if c1 == c2:
+                distances_.append(distances[i1])
+            else:
+                distances_.append(1 + min((distances[i1], distances[i1 + 1], distances_[-1])))
+        distances = distances_
+    return distances[-1]
 
 
-openapi_config = {
-    "model_name_or_path": "gpt-5-nano",
-    "top_k": 50,
-    "remove_think_prefix": True,
-    "api_key": os.getenv("OPENAI_API_KEY", "sk-xxxxx"),
-    "api_base": os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1"),
-}
-config = {
-    "user_id": "user_name",
-    "chat_model": {
-        "backend": "openai",
-        "config": openapi_config,
-    },
-    "mem_reader": {
-        "backend": "simple_struct",
-        "config": {
-            "llm": {"backend": "openai", "config": openapi_config},
-            "embedder": {
-                "backend": "universal_api",
-                "config": {
-                    "provider": "openai",
-                    "api_key": os.getenv("OPENAI_API_KEY", "sk-xxxxx"),
-                    "model_name_or_path": "text-embedding-3-large",
-                    "base_url": os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1"),
-                },
-            },
-            "chunker": {
-                "backend": "sentence",
-                "config": {
-                    "tokenizer_or_token_counter": "gpt2",
-                    "chunk_size": 512,
-                    "chunk_overlap": 128,
-                    "min_sentences_per_chunk": 1,
-                },
-            },
-        },
-    },
-    "max_turns_window": 20,
-    "top_k": 5,
-    "enable_textual_memory": True,
-    "enable_activation_memory": False,
-    "enable_parametric_memory": False,
-}
-mos_config = MOSConfig(**config)
-chat_llm = LLMFactory.from_config(mos_config.chat_model)
+def anls_compute(groundtruth, prediction, threshold=0.5):
+    dist = levenshtein_distance(groundtruth, prediction)
+    length = max(len(groundtruth.upper()), len(prediction.upper()))
+    value = 0.0 if length == 0 else float(dist) / float(length)
+    anls = 1.0 - value
+    if anls <= threshold:
+        anls = 0.0
+    return anls
 
 
 def is_float_equal(
@@ -132,55 +106,48 @@ def isfloat(num):
         return False
 
 
-def eval_score(question, gt, pred):
-    prompt = """
-        你是一个评委，根据问题和标准答案对学生的答案进行打分。打分规则如下：
-
-        完全不对（0分）：
-        学生答案与问题无关，未展示出任何相关概念或知识。
-        对了一部分（0.5分）：
-        学生答案提供了一些相关信息，但未能直接回答问题。
-        答案中包含部分正确内容，但缺乏关键信息，导致整体理解不清。
-        基本正确（0.7分）：
-        学生答案提供了大部分关键信息，不过依然距离标准答案有一定缺失。
-        答案中包含部分关键内容，但缺乏部分信息，导致不够完整。
-        完全正确（1分）：
-        学生答案准确地回答了问题，涵盖所有关键信息。
-        表达清晰，逻辑合理，直接且有效地回应了问题。
-
-        问题：{}
-
-        标准答案：{}
-
-        学生答案：{}
-        """
-
-    max_try = 20
-    try_i = 0
-    while try_i < max_try:
+def eval_score(gt, pred, answer_type):
+    if answer_type == "Int":
         try:
-            llm_input_prompt_score = (
-                prompt.format(question, gt, pred)
-                + """请返回给我一个json：
-            {
-                "分数": 1,
-                "理由": "xxxx"
-            }"""
-            )
-            score = chat_llm.generate(
-                [
-                    {"role": "user", "content": llm_input_prompt_score},
-                ]
-            )
-
-            print(f"score: {score}")
-            score_real = eval(score.replace("json", "").replace("\n", "").replace("```", ""))
-            return float(score_real["分数"])
+            gt, pred = int(gt), int(float(pred))
         except Exception:
-            traceback.print_exc()
-            print(f"trying num {try_i}")
-            try_i += 1
-    return -1
+            pred = ""
+        score = gt == pred
+    elif answer_type == "Float":
+        try:
+            gt = float(get_clean_string(str(gt)))
+            pred = float(get_clean_string(str(pred)))
+        except Exception:
+            pred = ""
+        score = is_float_equal(gt, pred, include_percentage=True, is_close=True)
+    elif answer_type in ["Str", "None"]:
+        gt = get_clean_string(gt)
+        pred = get_clean_string(pred)
+        score = gt == pred if is_exact_match(gt) else anls_compute(gt, pred)
+    else:
+        if isinstance(gt, str) and gt.startswith("["):
+            gt = eval(gt)
+        if not isinstance(gt, list):
+            gt = [gt]
+        if isinstance(pred, str) and pred.startswith("["):
+            pred = eval(pred)
+        if not isinstance(pred, list):
+            pred = [pred]
+        print(len(gt), len(pred))
+        if len(gt) != len(pred):
+            score = 0.0
+        else:
+            gt = sorted([get_clean_string(a) for a in gt])
+            pred = sorted([get_clean_string(a) for a in pred])
+            print(gt, pred)
+            if isfloat(gt[0]) or is_exact_match(gt[0]):
+                score = "-".join(gt) == "-".join(pred)
+            else:
+                score = min(
+                    [anls_compute(gt_v, pred_v) for gt_v, pred_v in zip(gt, pred, strict=False)]
+                )
+
+    return float(score)
 
 
 def eval_acc_and_f1(samples):
