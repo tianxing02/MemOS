@@ -104,15 +104,21 @@ def _save_added_ids(records_path: Path, added_ids: set[str]) -> None:
 
 
 def ingest_context(
-    client, sample: dict, lib: str, mode: str = "fine", async_mode: str = "sync"
+    client,
+    sample: dict,
+    lib: str,
+    mode: str = "fine",
+    async_mode: str = "sync",
+    version_dir: str | None = None,
 ) -> str:
     sample_id = str(sample.get("_id"))
-    user_id = sample_id
+    user_id = version_dir + "_" + sample_id
     context = sample.get("context") or ""
     chunker = RecursiveCharacterTextSplitter.from_language(
-        language=Language.PYTHON, chunk_size=5120, chunk_overlap=128
+        language=Language.PYTHON, chunk_size=2048, chunk_overlap=128
     )
     chunks = [p for p in chunker.split_text(context or "") if p.strip()]
+    ts = int(time.time())
 
     if lib == "memos":
         messages = [{"type": "text", "text": p} for p in chunks]
@@ -129,7 +135,6 @@ def ingest_context(
 
     if lib == "mem0":
         messages = [{"role": "user", "content": p} for p in chunks]
-        ts = int(time.time())
         retry_operation(client.add, messages=messages, user_id=user_id, timestamp=ts, batch_size=10)
 
     if lib == "supermemory":
@@ -215,7 +220,9 @@ def main() -> None:
     def do_ingest(sample):
         start_time = time.perf_counter()
         try:
-            sid = ingest_context(client, sample, args.lib, args.mode, args.async_mode)
+            sid = ingest_context(
+                client, sample, args.lib, args.mode, args.async_mode, args.version_dir
+            )
             duration = time.perf_counter() - start_time
             metrics.record(duration, True)
             return sid

@@ -95,9 +95,9 @@ def _save_json_list(path: Path, rows: list[dict]) -> None:
     os.replace(tmp, path)
 
 
-def search_one(client, sample: dict, lib: str, top_k: int) -> dict:
+def search_one(client, sample: dict, lib: str, top_k: int, version_dir: str) -> dict:
     sample_id = str(sample.get("_id"))
-    user_id = sample_id
+    user_id = version_dir + "_" + sample_id
     question = sample.get("question") or ""
     choices = {
         "A": sample.get("choice_A") or "",
@@ -213,7 +213,7 @@ def main() -> None:
 
         def do_search(sample: dict) -> dict:
             st = time.perf_counter()
-            r = search_one(client, sample, args.lib, args.top_k)
+            r = search_one(client, sample, args.lib, args.top_k, args.version_dir)
             dur = time.perf_counter() - st
             r["duration_ms"] = dur * 1000
             metrics.record(dur, True)

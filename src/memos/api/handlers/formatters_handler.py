@@ -49,7 +49,6 @@ def format_memory_item(memory_data: Any, include_embedding: bool = False) -> dic
     memory["ref_id"] = ref_id
     if not include_embedding:
         memory["metadata"]["embedding"] = []
-    memory["metadata"]["sources"] = []
     memory["metadata"]["usage"] = []
     memory["metadata"]["ref_id"] = ref_id
     memory["metadata"]["id"] = memory_id

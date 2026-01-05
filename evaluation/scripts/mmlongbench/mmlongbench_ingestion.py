@@ -59,7 +59,6 @@ def run_concurrent_add(
     total_files = len(filenames)
     completed = 0
     completed_lock = threading.Lock()
-    user_id = user_prefix
 
     def add_single_file(filename: str, doc_id: str = ""):
         nonlocal completed
@@ -119,7 +118,6 @@ def run_concurrent_add(
                 paragraphs = [p for p in chunker.split_text(text) if p.strip()]
                 messages = [{"role": "user", "content": p} for p in paragraphs]
                 ts = int(time.time())
-
                 result = client.add(messages=messages, user_id=doc_id, timestamp=ts, batch_size=10)
 
             duration = time.perf_counter() - start_time
@@ -146,7 +144,7 @@ def run_concurrent_add(
 
     print(f"\nStarting concurrent add for {total_files} files...")
     print(f"Concurrency: {workers}")
-    print(f"User ID: {user_id}")
+    print(f"Version Dir: {user_prefix}")
     print(f"URL prefix: {url_prefix}")
     print("-" * 60)
 
