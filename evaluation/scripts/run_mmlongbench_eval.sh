@@ -8,21 +8,21 @@ export PYTHONPATH="$ROOT_DIR"
 # Common parameters
 LIB="memos"
 WORKERS=10
-TOPK=20
+TOPK=15
 ADD_MODE="fine"
 SEARCH_MODE="fine"
-VERSION_DIR="test_1230"
+VERSION_DIR="memlongbench_120709_lcy_changeprompt"
 ASYNC_MODE="sync"
 CHAT_MODEL="gpt-4o-mini"
 
 # Add / Ingestion
-echo "Running mmlongbench_ingestion.py..."
-python -m evaluation.scripts.mmlongbench.mmlongbench_ingestion \
-  --lib "$LIB" \
-  --workers "$WORKERS" \
-  --version-dir "$VERSION_DIR" \
-  --mode "$ADD_MODE" \
-  --async-mode "$ASYNC_MODE"
+#echo "Running mmlongbench_ingestion.py..."
+#python -m evaluation.scripts.mmlongbench.mmlongbench_ingestion \
+#  --lib "$LIB" \
+#  --workers "$WORKERS" \
+#  --version-dir "$VERSION_DIR" \
+#  --mode "$ADD_MODE" \
+#  --async-mode "$ASYNC_MODE"
 
 # Search
 echo "Running mmlongbench_search.py..."

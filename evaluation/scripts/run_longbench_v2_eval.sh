@@ -6,15 +6,15 @@ cd "$ROOT_DIR"
 export PYTHONPATH="$ROOT_DIR"
 
 # Common parameters
-LIB="mem0"
+LIB="memos"
 WORKERS=10
-TOPK=20
+TOPK=30
 ADD_MODE="fine"
-SEARCH_MODE="fine"
-VERSION_DIR="test_0104_01"
+SEARCH_MODE="fast"
+VERSION_DIR="test_0105_01"
 ASYNC_MODE="sync"
-#CHAT_MODEL="gpt-4o-mini"
-CHAT_MODEL="o4-mini"
+CHAT_MODEL="gpt-4o-mini"
+#CHAT_MODEL="o4-mini"
 LIMIT=30
 
 # Add / Ingestion
