@@ -159,6 +159,14 @@ class ChatRequest(BaseRequest):
         return self
 
 
+class ChatPlaygroundRequest(ChatRequest):
+    """Request model for chat operations in playground."""
+
+    beginner_guide_step: str | None = Field(
+        None, description="Whether to use beginner guide, option: [first, second]"
+    )
+
+
 class ChatCompleteRequest(BaseRequest):
     """Request model for chat operations. will (Deprecated), instead use APIChatCompleteRequest."""
 
@@ -311,6 +319,15 @@ class APISearchRequest(BaseRequest):
         description="Number of textual memories to retrieve (top-K). Default: 10.",
     )
 
+    dedup: Literal["no", "sim"] | None = Field(
+        None,
+        description=(
+            "Optional dedup option for textual memories. "
+            "Use 'no' for no dedup, 'sim' for similarity dedup. "
+            "If None, default exact-text dedup is applied."
+        ),
+    )
+
     pref_top_k: int = Field(
         6,
         ge=0,
@@ -373,9 +390,11 @@ class APISearchRequest(BaseRequest):
             "If None, default thresholds will be applied."
         ),
     )
-
-    # TODO: tmp field for playground search goal parser, will be removed later
-    playground_search_goal_parser: bool = Field(False, description="Playground search goal parser")
+    # Internal field for search memory type
+    search_memory_type: str = Field(
+        "All",
+        description="Type of memory to search: All, WorkingMemory, LongTermMemory, UserMemory, OuterMemory, ToolSchemaMemory, ToolTrajectoryMemory",
+    )
 
     # ==== Context ====
     chat_history: MessageList | None = Field(
@@ -667,6 +686,19 @@ class APIFeedbackRequest(BaseRequest):
         "async", description="feedback mode: sync or async"
     )
     corrected_answer: bool = Field(False, description="Whether need return corrected answer")
+    info: dict[str, Any] | None = Field(
+        None,
+        description=(
+            "Additional metadata for the add request. "
+            "All keys can be used as filters in search. "
+            "Example: "
+            "{'agent_id': 'xxxxxx', "
+            "'app_id': 'xxxx', "
+            "'source_type': 'web', "
+            "'source_url': 'https://www.baidu.com', "
+            "'source_content': 'West Lake is the most famous scenic spot in Hangzhou'}."
+        ),
+    )
     # ==== mem_cube_id is NOT enabled====
     mem_cube_id: str | None = Field(
         None,
@@ -740,12 +772,19 @@ class GetMemoryRequest(BaseRequest):
     mem_cube_id: str = Field(..., description="Cube ID")
     user_id: str | None = Field(None, description="User ID")
     include_preference: bool = Field(True, description="Whether to handle preference memory")
+    page: int | None = Field(
+        None,
+        description="Page number (starts from 1). If None, exports all data without pagination.",
+    )
+    page_size: int | None = Field(
+        None, description="Number of items per page. If None, exports all data without pagination."
+    )
 
 
 class DeleteMemoryRequest(BaseRequest):
     """Request model for deleting memories."""
 
-    writable_cube_ids: list[str] = Field(..., description="Writable cube IDs")
+    writable_cube_ids: list[str] = Field(None, description="Writable cube IDs")
     memory_ids: list[str] | None = Field(None, description="Memory IDs")
     file_ids: list[str] | None = Field(None, description="File IDs")
     filter: dict[str, Any] | None = Field(None, description="Filter for the memory")
@@ -775,12 +814,24 @@ class MemoryDetail(BaseModel):
     model_config = {"extra": "allow"}
 
 
+class FileDetail(BaseModel):
+    """Individual file detail model based on actual API response."""
+
+    model_config = {"extra": "allow"}
+
+
 class GetMessagesData(BaseModel):
     """Data model for get messages response based on actual API."""
 
     message_detail_list: list[MessageDetail] = Field(
         default_factory=list, alias="message_detail_list", description="List of message details"
     )
+
+
+class GetCreateKnowledgebaseData(BaseModel):
+    """Data model for create knowledgebase response based on actual API."""
+
+    id: str = Field(..., description="Knowledgebase id")
 
 
 class SearchMemoryData(BaseModel):
@@ -792,12 +843,64 @@ class SearchMemoryData(BaseModel):
     message_detail_list: list[MessageDetail] | None = Field(
         None, alias="message_detail_list", description="List of message details (usually None)"
     )
+    preference_detail_list: list[MessageDetail] | None = Field(
+        None,
+        alias="preference_detail_list",
+        description="List of preference details (usually None)",
+    )
+    tool_memory_detail_list: list[MessageDetail] | None = Field(
+        None,
+        alias="tool_memory_detail_list",
+        description="List of tool_memor details (usually None)",
+    )
+    preference_note: str = Field(
+        None, alias="preference_note", description="String of preference_note"
+    )
+
+
+class GetKnowledgebaseFileData(BaseModel):
+    """Data model for search memory response based on actual API."""
+
+    file_detail_list: list[FileDetail] = Field(
+        default_factory=list, alias="file_detail_list", description="List of files details"
+    )
+
+
+class GetMemoryData(BaseModel):
+    """Data model for search memory response based on actual API."""
+
+    memory_detail_list: list[MemoryDetail] = Field(
+        default_factory=list, alias="memory_detail_list", description="List of memory details"
+    )
+    preference_detail_list: list[MessageDetail] | None = Field(
+        None, alias="preference_detail_list", description="List of preference detail"
+    )
 
 
 class AddMessageData(BaseModel):
     """Data model for add message response based on actual API."""
 
     success: bool = Field(..., description="Operation success status")
+    task_id: str = Field(..., description="Operation task_id")
+    status: str = Field(..., description="Operation task status")
+
+
+class DeleteMessageData(BaseModel):
+    """Data model for delete  Message based on actual API."""
+
+    success: bool = Field(..., description="Operation success status")
+
+
+class ChatMessageData(BaseModel):
+    """Data model for chat  Message based on actual API."""
+
+    response: str = Field(..., description="Operation response")
+
+
+class GetTaskStatusMessageData(BaseModel):
+    """Data model for task status Message based on actual API."""
+
+    status: str = Field(..., description="Operation task status")
 
 
 # ─── MemOS Response Models (Similar to OpenAI ChatCompletion) ──────────────────
@@ -828,6 +931,125 @@ class MemOSSearchResponse(BaseModel):
         """Convenient access to memory list."""
         return self.data.memory_detail_list
 
+    @property
+    def preferences(self) -> list[MemoryDetail]:
+        """Convenient access to preference list."""
+        return self.data.preference_detail_list
+
+    @property
+    def tool_memories(self) -> list[MemoryDetail]:
+        """Convenient access to tool_memory list."""
+        return self.data.tool_memory_detail_list
+
+
+class MemOSDeleteKnowledgebaseResponse(BaseModel):
+    """Response model for delete knowledgebase operation based on actual API."""
+
+    code: int = Field(..., description="Response status code")
+    message: str = Field(..., description="Response message")
+    data: DeleteMessageData = Field(..., description="delete results data")
+
+    @property
+    def success(self) -> bool:
+        """Convenient access to success status."""
+        return self.data.success
+
+
+class MemOSDeleteMemoryResponse(BaseModel):
+    """Response model for delete knowledgebase operation based on actual API."""
+
+    code: int = Field(..., description="Response status code")
+    message: str = Field(..., description="Response message")
+    data: DeleteMessageData = Field(..., description="delete results data")
+
+    @property
+    def success(self) -> bool:
+        """Convenient access to success status."""
+        return self.data.success
+
+
+class MemOSChatResponse(BaseModel):
+    """Response model for chat operation based on actual API."""
+
+    code: int = Field(..., description="Response status code")
+    message: str = Field(..., description="Response message")
+    data: ChatMessageData = Field(..., description="chat results data")
+
+    @property
+    def response(self) -> str:
+        """Convenient access to success status."""
+        return self.data.response
+
+
+class MemOSGetTaskStatusResponse(BaseModel):
+    """Response model for get task status operation based on actual API."""
+
+    code: int = Field(..., description="Response status code")
+    message: str = Field(..., description="Response message")
+    data: list[GetTaskStatusMessageData] = Field(..., description="Task status data")
+
+    @property
+    def messages(self) -> list[GetTaskStatusMessageData]:
+        """Convenient access to task status messages."""
+        return self.data
+
+
+class MemOSCreateKnowledgebaseResponse(BaseModel):
+    """Response model for create knowledgebase operation based on actual API."""
+
+    code: int = Field(..., description="Response status code")
+    message: str = Field(..., description="Response message")
+    data: GetCreateKnowledgebaseData = Field(..., description="Messages data")
+
+    @property
+    def knowledgebase_id(self) -> str:
+        """Convenient access to knowledgebase id."""
+        return self.data.id
+
+
+class MemOSAddKnowledgebaseFileResponse(BaseModel):
+    """Response model for add knowledgebase-file operation based on actual API."""
+
+    code: int = Field(..., description="Response status code")
+    message: str = Field(..., description="Response message")
+    data: list[dict[str, Any]]
+
+    @property
+    def memories(self) -> list[dict[str, Any]]:
+        """Convenient access to memory list."""
+        return self.data
+
+
+class MemOSGetMemoryResponse(BaseModel):
+    """Response model for get memory operation based on actual API."""
+
+    code: int = Field(..., description="Response status code")
+    message: str = Field(..., description="Response message")
+    data: GetMemoryData = Field(..., description="Get results data")
+
+    @property
+    def memories(self) -> list[MemoryDetail]:
+        """Convenient access to memory list."""
+        return self.data.memory_detail_list
+
+    @property
+    def preferences(self) -> list[MessageDetail] | None:
+        """Convenient access to preference list."""
+        return self.data.preference_detail_list
+
+
+class MemOSGetKnowledgebaseFileResponse(BaseModel):
+    """Response model for get KnowledgebaseFile operation based on actual API."""
+
+    code: int = Field(..., description="Response status code")
+    message: str = Field(..., description="Response message")
+    data: GetKnowledgebaseFileData = Field(..., description="Get results data")
+
+    @property
+    def files(self) -> list[FileDetail]:
+        """Convenient access to file list."""
+        return self.data.file_detail_list
+
 
 class MemOSAddResponse(BaseModel):
     """Response model for add message operation based on actual API."""
@@ -840,6 +1062,39 @@ class MemOSAddResponse(BaseModel):
     def success(self) -> bool:
         """Convenient access to success status."""
         return self.data.success
+
+    @property
+    def task_id(self) -> str:
+        """Convenient access to task_id status."""
+        return self.data.task_id
+
+    @property
+    def status(self) -> str:
+        """Convenient access to status status."""
+        return self.data.status
+
+
+class MemOSAddFeedBackResponse(BaseModel):
+    """Response model for add feedback operation based on actual API."""
+
+    code: int = Field(..., description="Response status code")
+    message: str = Field(..., description="Response message")
+    data: AddMessageData = Field(..., description="Add operation data")
+
+    @property
+    def success(self) -> bool:
+        """Convenient access to success status."""
+        return self.data.success
+
+    @property
+    def task_id(self) -> str:
+        """Convenient access to task_id status."""
+        return self.data.task_id
+
+    @property
+    def status(self) -> str:
+        """Convenient access to status status."""
+        return self.data.status
 
 
 # ─── Scheduler Status Models ───────────────────────────────────────────────────
@@ -865,3 +1120,85 @@ class StatusResponse(BaseResponse[list[StatusResponseItem]]):
     """Response model for scheduler status operations."""
 
     message: str = "Memory get status successfully"
+
+
+class TaskQueueData(BaseModel):
+    """Queue-level metrics for scheduler tasks."""
+
+    user_id: str = Field(..., description="User ID the query is scoped to")
+    user_name: str | None = Field(None, description="User name if available")
+    mem_cube_id: str | None = Field(
+        None, description="MemCube ID if a single cube is targeted; otherwise None"
+    )
+    stream_keys: list[str] = Field(..., description="Matched Redis stream keys for this user")
+    users_count: int = Field(..., description="Distinct users currently present in queue streams")
+    pending_tasks_count: int = Field(
+        ..., description="Count of pending (delivered, not acked) tasks"
+    )
+    remaining_tasks_count: int = Field(..., description="Count of enqueued tasks (xlen)")
+    pending_tasks_detail: list[str] = Field(
+        ..., description="Per-stream pending counts, formatted as '{stream_key}:{count}'"
+    )
+    remaining_tasks_detail: list[str] = Field(
+        ..., description="Per-stream remaining counts, formatted as '{stream_key}:{count}'"
+    )
+
+
+class TaskQueueResponse(BaseResponse[TaskQueueData]):
+    """Response model for scheduler task queue status."""
+
+    message: str = "Scheduler task queue status retrieved successfully"
+
+
+class TaskSummary(BaseModel):
+    """Aggregated counts of tasks by status."""
+
+    waiting: int = Field(0, description="Number of tasks waiting to run")
+    in_progress: int = Field(0, description="Number of tasks currently running")
+    pending: int = Field(
+        0, description="Number of tasks fetched by workers but not yet acknowledged"
+    )
+    completed: int = Field(0, description="Number of tasks completed")
+    failed: int = Field(0, description="Number of tasks failed")
+    cancelled: int = Field(0, description="Number of tasks cancelled")
+    total: int = Field(0, description="Total number of tasks counted")
+
+
+class AllStatusResponseData(BaseModel):
+    """Aggregated scheduler status metrics."""
+
+    scheduler_summary: TaskSummary = Field(
+        ..., description="Aggregated status for scheduler-managed tasks"
+    )
+    all_tasks_summary: TaskSummary = Field(
+        ..., description="Aggregated status for all tracked tasks"
+    )
+
+
+class AllStatusResponse(BaseResponse[AllStatusResponseData]):
+    """Response model for full scheduler status operations."""
+
+    message: str = "Scheduler status summary retrieved successfully"
+
+
+# ─── Internal API Endpoints Models (for internal use) ───────────────────────────────────────────────────
+
+
+class GetUserNamesByMemoryIdsRequest(BaseRequest):
+    """Request model for getting user names by memory ids."""
+
+    memory_ids: list[str] = Field(..., description="Memory IDs")
+
+
+class GetUserNamesByMemoryIdsResponse(BaseResponse[dict[str, str | None]]):
+    """Response model for getting user names by memory ids."""
+
+
+class ExistMemCubeIdRequest(BaseRequest):
+    """Request model for checking if mem cube id exists."""
+
+    mem_cube_id: str = Field(..., description="Mem cube ID")
+
+
+class ExistMemCubeIdResponse(BaseResponse[dict[str, bool]]):
+    """Response model for checking if mem cube id exists."""

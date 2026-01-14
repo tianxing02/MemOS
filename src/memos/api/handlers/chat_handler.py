@@ -8,6 +8,7 @@ consolidating all chat-related logic without depending on mos_server.
 import asyncio
 import json
 import re
+import time
 import traceback
 
 from collections.abc import Generator
@@ -22,6 +23,7 @@ from memos.api.product_models import (
     APIADDRequest,
     APIChatCompleteRequest,
     APISearchRequest,
+    ChatPlaygroundRequest,
     ChatRequest,
 )
 from memos.context.context import ContextThread
@@ -30,11 +32,13 @@ from memos.mem_os.utils.reference_utils import (
     prepare_reference_data,
     process_streaming_references_complete,
 )
+from memos.mem_reader.read_multi_modal.utils import detect_lang
 from memos.mem_scheduler.schemas.message_schemas import ScheduleMessageItem
 from memos.mem_scheduler.schemas.task_schemas import (
     ANSWER_TASK_LABEL,
     QUERY_TASK_LABEL,
 )
+from memos.templates.cloud_service_prompt import get_cloud_chat_prompt
 from memos.templates.mos_prompts import (
     FURTHER_SUGGESTION_PROMPT,
     get_memos_prompt,
@@ -91,18 +95,17 @@ class ChatHandler(BaseHandler):
         self.enable_mem_scheduler = (
             hasattr(dependencies, "enable_mem_scheduler") and dependencies.enable_mem_scheduler
         )
+        self.dependencies = dependencies
 
     def handle_chat_complete(self, chat_req: APIChatCompleteRequest) -> dict[str, Any]:
         """
-        Chat with MemOS for complete response (non-streaming).
-
-        This implementation directly uses search/add handlers instead of mos_server.
+        Chat with MemOS for chat complete response (non-streaming).
 
         Args:
             chat_req: Chat complete request
 
         Returns:
-            Dictionary with response and references
+            Dictionary with chat complete response and reasoning
 
         Raises:
             HTTPException: If chat fails
@@ -135,6 +138,13 @@ class ChatHandler(BaseHandler):
                 if text_mem_results and text_mem_results[0].get("memories"):
                     memories_list = text_mem_results[0]["memories"]
 
+            # Drop internet memories forced
+            memories_list = [
+                mem
+                for mem in memories_list
+                if mem.get("metadata", {}).get("memory_type") != "OuterMemory"
+            ]
+
             # Filter memories by threshold
             filtered_memories = self._filter_memories_by_threshold(
                 memories_list, chat_req.threshold or 0.5
@@ -142,9 +152,10 @@ class ChatHandler(BaseHandler):
 
             # Step 2: Build system prompt
             system_prompt = self._build_system_prompt(
-                filtered_memories,
-                search_response.data.get("pref_string", ""),
-                chat_req.system_prompt,
+                query=chat_req.query,
+                memories=filtered_memories,
+                pref_string=search_response.data.get("pref_string", ""),
+                base_prompt=chat_req.system_prompt,
             )
 
             # Prepare message history
@@ -155,20 +166,40 @@ class ChatHandler(BaseHandler):
                 {"role": "user", "content": chat_req.query},
             ]
 
-            self.logger.info("Starting to generate complete response...")
+            self.logger.info("[Cloud Service] Starting to generate chat complete response...")
 
             # Step 3: Generate complete response from LLM
             if chat_req.model_name_or_path and chat_req.model_name_or_path not in self.chat_llms:
-                return {
-                    "message": f"Model {chat_req.model_name_or_path} not suport, choose from {list(self.chat_llms.keys())}"
-                }
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Model {chat_req.model_name_or_path} not suport, choose from {list(self.chat_llms.keys())}",
+                )
+
             model = chat_req.model_name_or_path or next(iter(self.chat_llms.keys()))
+
+            self.logger.info(f"[Cloud Service] Chat Complete Model: {model}")
+            strat = time.time()
             response = self.chat_llms[model].generate(current_messages, model_name_or_path=model)
+            end = time.time()
+            self.logger.info(f"[Cloud Service] Chat Complete Time: {end - strat} seconds")
+
+            if not response:
+                self.logger.error(
+                    f"[Cloud Service] Chat Complete Failed, LLM response is {response}"
+                )
+                raise HTTPException(
+                    status_code=500, detail="Chat complete failed, LLM response is None"
+                )
+
+            self.logger.info(
+                f"[Cloud Service] Chat Complete LLM Input: {json.dumps(current_messages, ensure_ascii=False)} Chat Complete LLM Response: {response}"
+            )
 
             # Step 4: start add after chat asynchronously
             if chat_req.add_message_on_answer:
                 # Resolve writable cube IDs (for add)
                 writable_cube_ids = chat_req.writable_cube_ids or [chat_req.user_id]
+                start = time.time()
                 self._start_add_to_memory(
                     user_id=chat_req.user_id,
                     writable_cube_ids=writable_cube_ids,
@@ -177,6 +208,8 @@ class ChatHandler(BaseHandler):
                     full_response=response,
                     async_mode="async",
                 )
+                end = time.time()
+                self.logger.info(f"[Cloud Service] Chat Add Time: {end - start} seconds")
 
             match = re.search(r"<think>([\s\S]*?)</think>", response)
             reasoning_text = match.group(1) if match else None
@@ -192,14 +225,12 @@ class ChatHandler(BaseHandler):
         except ValueError as err:
             raise HTTPException(status_code=404, detail=str(traceback.format_exc())) from err
         except Exception as err:
-            self.logger.error(f"Failed to complete chat: {traceback.format_exc()}")
+            self.logger.error(f"[Cloud Service] Failed to chat complete: {traceback.format_exc()}")
             raise HTTPException(status_code=500, detail=str(traceback.format_exc())) from err
 
     def handle_chat_stream(self, chat_req: ChatRequest) -> StreamingResponse:
         """
-        Chat with MemOS via Server-Sent Events (SSE) stream using search/add handlers.
-
-        This implementation directly uses search_handler and add_handler.
+        Chat with MemOS via Server-Sent Events (SSE) stream for chat stream response.
 
         Args:
             chat_req: Chat stream request
@@ -213,7 +244,7 @@ class ChatHandler(BaseHandler):
         try:
 
             def generate_chat_response() -> Generator[str, None, None]:
-                """Generate chat response as SSE stream."""
+                """Generate chat stream response as SSE stream."""
                 try:
                     # Resolve readable cube IDs (for search)
                     readable_cube_ids = chat_req.readable_cube_ids or (
@@ -253,14 +284,22 @@ class ChatHandler(BaseHandler):
                         if text_mem_results and text_mem_results[0].get("memories"):
                             memories_list = text_mem_results[0]["memories"]
 
+                    # Drop internet memories forced
+                    memories_list = [
+                        mem
+                        for mem in memories_list
+                        if mem.get("metadata", {}).get("memory_type") != "OuterMemory"
+                    ]
+
                     # Filter memories by threshold
                     filtered_memories = self._filter_memories_by_threshold(memories_list)
 
                     # Step 2: Build system prompt with memories
                     system_prompt = self._build_system_prompt(
-                        filtered_memories,
-                        search_response.data.get("pref_string", ""),
-                        chat_req.system_prompt,
+                        query=chat_req.query,
+                        memories=filtered_memories,
+                        pref_string=search_response.data.get("pref_string", ""),
+                        base_prompt=chat_req.system_prompt,
                     )
 
                     # Prepare messages
@@ -272,7 +311,7 @@ class ChatHandler(BaseHandler):
                     ]
 
                     self.logger.info(
-                        f"user_id: {chat_req.user_id}, readable_cube_ids: {readable_cube_ids}, "
+                        f"[Cloud Service] chat stream user_id: {chat_req.user_id}, readable_cube_ids: {readable_cube_ids}, "
                         f"current_system_prompt: {system_prompt}"
                     )
 
@@ -281,10 +320,15 @@ class ChatHandler(BaseHandler):
                         chat_req.model_name_or_path
                         and chat_req.model_name_or_path not in self.chat_llms
                     ):
-                        return {
-                            "message": f"Model {chat_req.model_name_or_path} not suport, choose from {list(self.chat_llms.keys())}"
-                        }
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"Model {chat_req.model_name_or_path} not suport, choose from {list(self.chat_llms.keys())}",
+                        )
+
                     model = chat_req.model_name_or_path or next(iter(self.chat_llms.keys()))
+                    self.logger.info(f"[Cloud Service] Chat Stream Model: {model}")
+
+                    start = time.time()
                     response_stream = self.chat_llms[model].generate_stream(
                         current_messages, model_name_or_path=model
                     )
@@ -313,12 +357,20 @@ class ChatHandler(BaseHandler):
                         chunk_data = f"data: {json.dumps({'type': 'text', 'data': chunk}, ensure_ascii=False)}\n\n"
                         yield chunk_data
 
+                    end = time.time()
+                    self.logger.info(f"[Cloud Service] Chat Stream Time: {end - start} seconds")
+
+                    self.logger.info(
+                        f"[Cloud Service] Chat Stream LLM Input: {json.dumps(current_messages, ensure_ascii=False)} Chat Stream LLM Response: {full_response}"
+                    )
+
                     current_messages.append({"role": "assistant", "content": full_response})
                     if chat_req.add_message_on_answer:
                         # Resolve writable cube IDs (for add)
                         writable_cube_ids = chat_req.writable_cube_ids or (
                             [chat_req.mem_cube_id] if chat_req.mem_cube_id else [chat_req.user_id]
                         )
+                        start = time.time()
                         self._start_add_to_memory(
                             user_id=chat_req.user_id,
                             writable_cube_ids=writable_cube_ids,
@@ -327,9 +379,12 @@ class ChatHandler(BaseHandler):
                             full_response=full_response,
                             async_mode="async",
                         )
-
+                        end = time.time()
+                        self.logger.info(
+                            f"[Cloud Service] Chat Stream Add Time: {end - start} seconds"
+                        )
                 except Exception as e:
-                    self.logger.error(f"Error in chat stream: {e}", exc_info=True)
+                    self.logger.error(f"[Cloud Service] Error in chat stream: {e}", exc_info=True)
                     error_data = f"data: {json.dumps({'type': 'error', 'content': str(traceback.format_exc())})}\n\n"
                     yield error_data
 
@@ -349,14 +404,14 @@ class ChatHandler(BaseHandler):
         except ValueError as err:
             raise HTTPException(status_code=404, detail=str(traceback.format_exc())) from err
         except Exception as err:
-            self.logger.error(f"Failed to start chat stream: {traceback.format_exc()}")
+            self.logger.error(
+                f"[Cloud Service] Failed to start chat stream: {traceback.format_exc()}"
+            )
             raise HTTPException(status_code=500, detail=str(traceback.format_exc())) from err
 
-    def handle_chat_stream_playground(self, chat_req: ChatRequest) -> StreamingResponse:
+    def handle_chat_stream_playground(self, chat_req: ChatPlaygroundRequest) -> StreamingResponse:
         """
-        Chat with MemOS via Server-Sent Events (SSE) stream using search/add handlers.
-
-        This implementation directly uses search_handler and add_handler.
+        Chat with MemOS via Server-Sent Events (SSE) stream for playground chat stream response.
 
         Args:
             chat_req: Chat stream request
@@ -370,7 +425,7 @@ class ChatHandler(BaseHandler):
         try:
 
             def generate_chat_response() -> Generator[str, None, None]:
-                """Generate chat response as SSE stream."""
+                """Generate playground chat stream response as SSE stream."""
                 try:
                     import time
 
@@ -388,15 +443,53 @@ class ChatHandler(BaseHandler):
                         [chat_req.mem_cube_id] if chat_req.mem_cube_id else [chat_req.user_id]
                     )
 
-                    # for playground, add the query to memory without response
-                    self._start_add_to_memory(
-                        user_id=chat_req.user_id,
-                        writable_cube_ids=writable_cube_ids,
-                        session_id=chat_req.session_id or "default_session",
+                    # ====== first search text mem with parse goal ======
+                    search_req = APISearchRequest(
                         query=chat_req.query,
-                        full_response=None,
-                        async_mode="sync",
+                        user_id=chat_req.user_id,
+                        readable_cube_ids=readable_cube_ids,
+                        mode="fast",
+                        internet_search=False,
+                        top_k=20,
+                        chat_history=chat_req.history,
+                        session_id=chat_req.session_id,
+                        include_preference=True,
+                        pref_top_k=chat_req.pref_top_k,
+                        filter=chat_req.filter,
+                        search_tool_memory=False,
                     )
+                    start_time = time.time()
+                    search_response = self.search_handler.handle_search_memories(search_req)
+                    end_time = time.time()
+                    self.logger.info(
+                        f"[PLAYGROUND CHAT] first search time: {end_time - start_time}"
+                    )
+
+                    yield f"data: {json.dumps({'type': 'status', 'data': '1'})}\n\n"
+
+                    # Extract memories from search results (first search)
+                    memories_list = []
+                    if search_response.data and search_response.data.get("text_mem"):
+                        text_mem_results = search_response.data["text_mem"]
+                        if text_mem_results and text_mem_results[0].get("memories"):
+                            memories_list = text_mem_results[0]["memories"]
+
+                    # Filter memories by threshold
+                    filtered_memories = self._filter_memories_by_threshold(memories_list)[:5]
+
+                    # Prepare reference data (first search)
+                    reference = prepare_reference_data(filtered_memories)
+                    # get preference string
+                    pref_string = search_response.data.get("pref_string", "")
+
+                    yield f"data: {json.dumps({'type': 'reference', 'data': reference}, ensure_ascii=False)}\n\n"
+
+                    # Prepare preference markdown string
+                    if chat_req.include_preference:
+                        pref_list = search_response.data.get("pref_mem") or []
+                        pref_memories = pref_list[0].get("memories", []) if pref_list else []
+                        pref_md_string = self._build_pref_md_string_for_playground(pref_memories)
+                        yield f"data: {json.dumps({'type': 'pref_md_string', 'data': pref_md_string}, ensure_ascii=False)}\n\n"
 
                     # Use first readable cube ID for scheduler (backward compatibility)
                     scheduler_cube_id = (
@@ -409,66 +502,63 @@ class ChatHandler(BaseHandler):
                         label=QUERY_TASK_LABEL,
                     )
 
-                    # ====== first search without parse goal ======
-                    search_req = APISearchRequest(
-                        query=chat_req.query,
-                        user_id=chat_req.user_id,
-                        readable_cube_ids=readable_cube_ids,
-                        mode=chat_req.mode,
-                        internet_search=False,
-                        top_k=chat_req.top_k,
-                        chat_history=chat_req.history,
-                        session_id=chat_req.session_id,
-                        include_preference=chat_req.include_preference,
-                        pref_top_k=chat_req.pref_top_k,
-                        filter=chat_req.filter,
+                    # parse goal for internet search
+                    searcher = self.dependencies.searcher
+                    parsed_goal = searcher.task_goal_parser.parse(
+                        task_description=chat_req.query,
+                        context="\n".join([memory.get("memory", "") for memory in memories_list]),
+                        conversation=chat_req.history,
+                        mode="fine",
                     )
-                    search_response = self.search_handler.handle_search_memories(search_req)
+                    self.logger.info(f"[PLAYGROUND CHAT] parsed_goal: {parsed_goal}")
 
-                    yield f"data: {json.dumps({'type': 'status', 'data': '1'})}\n\n"
+                    if chat_req.beginner_guide_step == "first":
+                        chat_req.internet_search = False
+                        parsed_goal.internet_search = False
+                    elif chat_req.beginner_guide_step == "second":
+                        chat_req.internet_search = True
+                        parsed_goal.internet_search = True
 
-                    # Extract memories from search results (first search)
-                    memories_list = []
-                    if search_response.data and search_response.data.get("text_mem"):
-                        text_mem_results = search_response.data["text_mem"]
-                        if text_mem_results and text_mem_results[0].get("memories"):
-                            memories_list = text_mem_results[0]["memories"]
+                    if chat_req.internet_search or parsed_goal.internet_search:
+                        # internet status
+                        yield f"data: {json.dumps({'type': 'status', 'data': 'start_internet_search'})}\n\n"
 
-                    # Filter memories by threshold
-                    first_filtered_memories = self._filter_memories_by_threshold(memories_list)
-
-                    # Prepare reference data (first search)
-                    reference = prepare_reference_data(first_filtered_memories)
-                    # get preference string
-                    pref_string = search_response.data.get("pref_string", "")
-
-                    yield f"data: {json.dumps({'type': 'reference', 'data': reference})}\n\n"
-
-                    # Prepare preference markdown string
-                    if chat_req.include_preference:
-                        pref_list = search_response.data.get("pref_mem") or []
-                        pref_memories = pref_list[0].get("memories", []) if pref_list else []
-                        pref_md_string = self._build_pref_md_string_for_playground(pref_memories)
-                        yield f"data: {json.dumps({'type': 'pref_md_string', 'data': pref_md_string})}\n\n"
-
-                    # internet status
-                    yield f"data: {json.dumps({'type': 'status', 'data': 'start_internet_search'})}\n\n"
-
-                    # ====== second search with parse goal ======
+                    # ======  second deep search  ======
                     search_req = APISearchRequest(
-                        query=chat_req.query,
+                        query=(parsed_goal.rephrased_query or chat_req.query)
+                        + (f" {parsed_goal.memories}" if parsed_goal.memories else ""),
                         user_id=chat_req.user_id,
                         readable_cube_ids=readable_cube_ids,
-                        mode=chat_req.mode,
-                        internet_search=chat_req.internet_search,
-                        top_k=chat_req.top_k,
+                        mode="fast",
+                        internet_search=chat_req.internet_search or parsed_goal.internet_search,
+                        top_k=100,  # for playground, we need to search more memories
                         chat_history=chat_req.history,
                         session_id=chat_req.session_id,
                         include_preference=False,
+                        pref_top_k=chat_req.pref_top_k,
                         filter=chat_req.filter,
-                        playground_search_goal_parser=True,
+                        search_memory_type="All",
+                        search_tool_memory=False,
                     )
+
+                    self.logger.info(f"[PLAYGROUND CHAT] second search query: {search_req.query}")
+
+                    start_time = time.time()
                     search_response = self.search_handler.handle_search_memories(search_req)
+                    end_time = time.time()
+                    self.logger.info(
+                        f"[PLAYGROUND CHAT] second search time: {end_time - start_time}"
+                    )
+
+                    # for playground, add the query to memory without response
+                    self._start_add_to_memory(
+                        user_id=chat_req.user_id,
+                        writable_cube_ids=writable_cube_ids,
+                        session_id=chat_req.session_id or "default_session",
+                        query=chat_req.query,
+                        full_response=None,
+                        async_mode="sync",
+                    )
 
                     # Extract memories from search results (second search)
                     memories_list = []
@@ -477,13 +567,18 @@ class ChatHandler(BaseHandler):
                         if text_mem_results and text_mem_results[0].get("memories"):
                             memories_list = text_mem_results[0]["memories"]
 
-                    # Filter memories by threshold
-                    second_filtered_memories = self._filter_memories_by_threshold(memories_list)
+                    # Filter memories by threshold, min_num is the min number of memories for playground
+                    second_filtered_memories = self._filter_memories_by_threshold(
+                        memories_list, min_num=35
+                    )
 
                     # dedup and supplement memories
-                    filtered_memories = self._dedup_and_supplement_memories(
-                        first_filtered_memories, second_filtered_memories
-                    )
+                    fast_length = len(filtered_memories)
+                    supplement_length = max(0, 50 - fast_length)  # 50 is the max mem for playground
+                    second_dedup_memories = self._dedup_and_supplement_memories(
+                        filtered_memories, second_filtered_memories
+                    )[:supplement_length]
+                    filtered_memories = filtered_memories + second_dedup_memories
 
                     # Prepare remain reference data (second search)
                     reference = prepare_reference_data(filtered_memories)
@@ -491,12 +586,18 @@ class ChatHandler(BaseHandler):
                     internet_reference = self._get_internet_reference(
                         search_response.data.get("text_mem")[0]["memories"]
                     )
-
-                    yield f"data: {json.dumps({'type': 'reference', 'data': reference})}\n\n"
+                    yield f"data: {json.dumps({'type': 'reference', 'data': reference}, ensure_ascii=False)}\n\n"
 
                     # Step 2: Build system prompt with memories
+                    lang = detect_lang(chat_req.query)
+                    if pref_string:
+                        pref_string += (
+                            "\n# 注意\n- 在思考内容中，不要出现引用序号和id [1,2,3]等标记，否则会导致引用错误。"
+                            if lang == "zh"
+                            else "\n#warning\n- In thinking content, do not appear the reference number and id [1,2,3]etc. otherwise it will cause reference error."
+                        )
                     system_prompt = self._build_enhance_system_prompt(
-                        filtered_memories, pref_string
+                        filtered_memories, pref_string, lang=lang
                     )
 
                     # Prepare messages
@@ -508,65 +609,82 @@ class ChatHandler(BaseHandler):
                     ]
 
                     self.logger.info(
-                        f"user_id: {chat_req.user_id}, readable_cube_ids: {readable_cube_ids}, "
+                        f"[PLAYGROUND CHAT] user_id: {chat_req.user_id}, readable_cube_ids: {readable_cube_ids}, "
                         f"current_system_prompt: {system_prompt}"
                     )
 
                     # Step 3: Generate streaming response from LLM
-                    if (
-                        chat_req.model_name_or_path
-                        and chat_req.model_name_or_path not in self.chat_llms
-                    ):
-                        return {
-                            "message": f"Model {chat_req.model_name_or_path} not suport, choose from {list(self.chat_llms.keys())}"
-                        }
-                    model = chat_req.model_name_or_path or next(iter(self.chat_llms.keys()))
-                    response_stream = self.chat_llms[model].generate_stream(
-                        current_messages, model_name_or_path=model
-                    )
-
-                    # Stream the response
-                    buffer = ""
-                    full_response = ""
-                    in_think = False
-
-                    for chunk in response_stream:
-                        if chunk == "<think>":
-                            in_think = True
-                            yield f"data: {json.dumps({'type': 'status', 'data': 'reasoning'})}\n\n"
-                            continue
-                        if chunk == "</think>":
-                            in_think = False
-                            yield f"data: {json.dumps({'type': 'status', 'data': '2'})}\n\n"
-                            continue
-
-                        if in_think:
-                            chunk_data = f"data: {json.dumps({'type': 'reasoning', 'data': chunk}, ensure_ascii=False)}\n\n"
-                            yield chunk_data
-                            continue
-
-                        buffer += chunk
-                        full_response += chunk
-
-                        # Process buffer to ensure complete reference tags
-                        processed_chunk, remaining_buffer = process_streaming_references_complete(
-                            buffer
+                    try:
+                        model = next(iter(self.chat_llms.keys()))
+                        self.logger.info(f"[PLAYGROUND CHAT] Chat Playground Stream Model: {model}")
+                        start = time.time()
+                        response_stream = self.chat_llms[model].generate_stream(
+                            current_messages, model_name_or_path=model
                         )
 
-                        if processed_chunk:
-                            chunk_data = f"data: {json.dumps({'type': 'text', 'data': processed_chunk}, ensure_ascii=False)}\n\n"
-                            yield chunk_data
-                            buffer = remaining_buffer
+                        # Stream the response
+                        buffer = ""
+                        full_response = ""
+                        in_think = False
 
-                    # Process any remaining buffer
-                    if buffer:
-                        processed_chunk, _ = process_streaming_references_complete(buffer)
-                        if processed_chunk:
-                            chunk_data = f"data: {json.dumps({'type': 'text', 'data': processed_chunk}, ensure_ascii=False)}\n\n"
-                            yield chunk_data
+                        for chunk in response_stream:
+                            if chunk == "<think>":
+                                in_think = True
+                                yield f"data: {json.dumps({'type': 'status', 'data': 'reasoning'})}\n\n"
+                                continue
+                            if chunk == "</think>":
+                                in_think = False
+                                yield f"data: {json.dumps({'type': 'status', 'data': '2'})}\n\n"
+                                continue
 
-                    # Yield internet reference after text response
-                    yield f"data: {json.dumps({'type': 'internet_reference', 'data': internet_reference})}\n\n"
+                            if in_think:
+                                chunk_data = f"data: {json.dumps({'type': 'reasoning', 'data': chunk}, ensure_ascii=False)}\n\n"
+                                yield chunk_data
+                                continue
+
+                            buffer += chunk
+                            full_response += chunk
+
+                            # Process buffer to ensure complete reference tags
+                            processed_chunk, remaining_buffer = (
+                                process_streaming_references_complete(buffer)
+                            )
+
+                            if processed_chunk:
+                                chunk_data = f"data: {json.dumps({'type': 'text', 'data': processed_chunk}, ensure_ascii=False)}\n\n"
+                                yield chunk_data
+                                buffer = remaining_buffer
+
+                        # Process any remaining buffer
+                        if buffer:
+                            processed_chunk, _ = process_streaming_references_complete(buffer)
+                            if processed_chunk:
+                                chunk_data = f"data: {json.dumps({'type': 'text', 'data': processed_chunk}, ensure_ascii=False)}\n\n"
+                                yield chunk_data
+
+                        end = time.time()
+                        self.logger.info(
+                            f"[PLAYGROUND CHAT] Chat Playground Stream Time: {end - start} seconds"
+                        )
+                        self.logger.info(
+                            f"[PLAYGROUND CHAT] Chat Playground Stream LLM Input: {json.dumps(current_messages, ensure_ascii=False)} Chat Playground Stream LLM Response: {full_response}"
+                        )
+
+                    except Exception as llm_error:
+                        # Log the error
+                        self.logger.error(
+                            f"[PLAYGROUND CHAT] Error during LLM generation: {llm_error}",
+                            exc_info=True,
+                        )
+                        # Send error message to client
+                        error_msg = f"模型生成错误: {llm_error!s}"
+                        yield f"data: {json.dumps({'type': 'error', 'data': error_msg}, ensure_ascii=False)}\n\n"
+                        # Re-raise to let outer exception handler process it
+                        raise
+
+                    if chat_req.internet_search or parsed_goal.internet_search:
+                        # Yield internet reference after text response
+                        yield f"data: {json.dumps({'type': 'internet_reference', 'data': internet_reference}, ensure_ascii=False)}\n\n"
 
                     # Calculate timing
                     time_end = time.time()
@@ -578,8 +696,8 @@ class ChatHandler(BaseHandler):
                     # Get further suggestion
                     current_messages.append({"role": "assistant", "content": full_response})
                     further_suggestion = self._get_further_suggestion(current_messages)
-                    self.logger.info(f"further_suggestion: {further_suggestion}")
-                    yield f"data: {json.dumps({'type': 'suggestion', 'data': further_suggestion})}\n\n"
+                    self.logger.info(f"[PLAYGROUND CHAT] further_suggestion: {further_suggestion}")
+                    yield f"data: {json.dumps({'type': 'suggestion', 'data': further_suggestion}, ensure_ascii=False)}\n\n"
 
                     yield f"data: {json.dumps({'type': 'end'})}\n\n"
 
@@ -609,7 +727,9 @@ class ChatHandler(BaseHandler):
                     )
 
                 except Exception as e:
-                    self.logger.error(f"Error in chat stream: {e}", exc_info=True)
+                    self.logger.error(
+                        f"[PLAYGROUND CHAT] Error in playground chat stream: {e}", exc_info=True
+                    )
                     error_data = f"data: {json.dumps({'type': 'error', 'content': str(traceback.format_exc())})}\n\n"
                     yield error_data
 
@@ -629,20 +749,32 @@ class ChatHandler(BaseHandler):
         except ValueError as err:
             raise HTTPException(status_code=404, detail=str(traceback.format_exc())) from err
         except Exception as err:
-            self.logger.error(f"Failed to start chat stream: {traceback.format_exc()}")
+            self.logger.error(
+                f"[PLAYGROUND CHAT] Failed to start playground chat stream: {traceback.format_exc()}"
+            )
             raise HTTPException(status_code=500, detail=str(traceback.format_exc())) from err
 
     def _dedup_and_supplement_memories(
         self, first_filtered_memories: list, second_filtered_memories: list
     ) -> list:
-        """Remove memory from second_filtered_memories that already exists in first_filtered_memories, return remaining memories"""
-        # Create a set of IDs from first_filtered_memories for efficient lookup
-        first_memory_ids = {memory["id"] for memory in first_filtered_memories}
+        """
+        Remove memories from second_filtered_memories whose content already exists in
+        first_filtered_memories, return the remaining list.
+        """
+
+        def _norm(text: str) -> str:
+            # Use normalized text as the dedup key; keep original text in the payload.
+            return " ".join(text.split())
+
+        first_memory_texts = {_norm(memory.get("memory", "")) for memory in first_filtered_memories}
 
         remaining_memories = []
         for memory in second_filtered_memories:
-            if memory["id"] not in first_memory_ids:
-                remaining_memories.append(memory)
+            key = _norm(memory.get("memory", ""))
+            if key in first_memory_texts:
+                continue
+            first_memory_texts.add(key)
+            remaining_memories.append(memory)
         return remaining_memories
 
     def _get_internet_reference(
@@ -699,6 +831,7 @@ class ChatHandler(BaseHandler):
 
     def _build_system_prompt(
         self,
+        query: str,
         memories: list | None = None,
         pref_string: str | None = None,
         base_prompt: str | None = None,
@@ -706,12 +839,8 @@ class ChatHandler(BaseHandler):
     ) -> str:
         """Build system prompt with optional memories context."""
         if base_prompt is None:
-            base_prompt = (
-                "You are a knowledgeable and helpful AI assistant. "
-                "You have access to conversation memories that help you provide more personalized responses. "
-                "Use the memories to understand the user's context, preferences, and past interactions. "
-                "If memories are provided, reference them naturally when relevant, but don't explicitly mention having memories."
-            )
+            lang = detect_lang(query)
+            base_prompt = get_cloud_chat_prompt(lang=lang)
 
         memory_context = ""
         if memories:
@@ -727,7 +856,7 @@ class ChatHandler(BaseHandler):
             return base_prompt.format(memories=memory_context)
         elif base_prompt and memories:
             # For backward compatibility, append memories if no placeholder is found
-            memory_context_with_header = "\n\n## Memories:\n" + memory_context
+            memory_context_with_header = "\n\n## Fact Memories:\n" + memory_context
             return base_prompt + memory_context_with_header
         return base_prompt
 
@@ -735,6 +864,7 @@ class ChatHandler(BaseHandler):
         self,
         memories_list: list,
         pref_string: str = "",
+        lang: str = "en",
         tone: str = "friendly",
         verbosity: str = "mid",
     ) -> str:
@@ -751,9 +881,9 @@ class ChatHandler(BaseHandler):
             System prompt string
         """
         now = datetime.now()
-        formatted_date = now.strftime("%Y-%m-%d (%A)")
+        formatted_date = now.strftime("%Y-%m-%d %H:%M (%A)")
         sys_body = get_memos_prompt(
-            date=formatted_date, tone=tone, verbosity=verbosity, mode="enhance"
+            date=formatted_date, tone=tone, verbosity=verbosity, mode="enhance", lang=lang
         )
 
         # Format memories
@@ -763,7 +893,7 @@ class ChatHandler(BaseHandler):
             sys_body
             + "\n\n# Memories\n## PersonalMemory (ordered)\n"
             + mem_block_p
-            + "\n## OuterMemory (ordered)\n"
+            + "\n## OuterMemory (from Internet Search, ordered)\n"
             + mem_block_o
             + f"\n\n{pref_string}"
         )
@@ -793,6 +923,15 @@ class ChatHandler(BaseHandler):
             memory_content = m.get("memory", "")
             metadata = m.get("metadata", {})
             memory_type = metadata.get("memory_type", "")
+            created_time = metadata.get("updated_at", "") or metadata.get("created_at", "")
+
+            # format time to YYYY-MM-DD HH:MM (ISO 8601 -> YYYY-MM-DD HH:MM)
+            if created_time and isinstance(created_time, str):
+                try:
+                    dt = datetime.fromisoformat(created_time)
+                    created_time = dt.strftime("%Y-%m-%d %H:%M")
+                except ValueError:
+                    pass  # keep original value
 
             tag = "O" if "Outer" in str(memory_type) else "P"
             txt = memory_content.replace("\n", " ").strip()
@@ -803,6 +942,7 @@ class ChatHandler(BaseHandler):
             if tag == "O":
                 lines_o.append(f"[{idx}:{mid}] :: [{tag}] {txt}\n")
             elif tag == "P":
+                txt = f"(CreatedTime: {created_time}) {txt}"
                 lines_p.append(f"[{idx}:{mid}] :: [{tag}] {txt}")
 
         return "\n".join(lines_o), "\n".join(lines_p)

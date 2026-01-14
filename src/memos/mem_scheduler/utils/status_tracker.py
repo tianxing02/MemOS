@@ -13,10 +13,13 @@ if TYPE_CHECKING:
 
 class TaskStatusTracker:
     @require_python_package(import_name="redis", install_command="pip install redis")
-    def __init__(self, redis_client: "redis.Redis"):
+    def __init__(self, redis_client: "redis.Redis | None"):
         self.redis = redis_client
 
     def _get_key(self, user_id: str) -> str:
+        if not self.redis:
+            return
+
         return f"memos:task_meta:{user_id}"
 
     def _get_task_items_key(self, user_id: str, task_id: str) -> str:
@@ -41,6 +44,9 @@ class TaskStatusTracker:
             mem_cube_id: Memory cube identifier
             business_task_id: Optional business-level task ID (one task_id can have multiple item_ids)
         """
+        if not self.redis:
+            return
+
         key = self._get_key(user_id)
         payload = {
             "status": "waiting",
@@ -61,6 +67,9 @@ class TaskStatusTracker:
         self.redis.expire(key, timedelta(days=7))
 
     def task_started(self, task_id: str, user_id: str):
+        if not self.redis:
+            return
+
         key = self._get_key(user_id)
         existing_data_json = self.redis.hget(key, task_id)
         if not existing_data_json:
@@ -77,6 +86,9 @@ class TaskStatusTracker:
         self.redis.expire(key, timedelta(days=7))
 
     def task_completed(self, task_id: str, user_id: str):
+        if not self.redis:
+            return
+
         key = self._get_key(user_id)
         existing_data_json = self.redis.hget(key, task_id)
         if not existing_data_json:
@@ -91,6 +103,9 @@ class TaskStatusTracker:
         self.redis.expire(key, timedelta(days=7))
 
     def task_failed(self, task_id: str, user_id: str, error_message: str):
+        if not self.redis:
+            return
+
         key = self._get_key(user_id)
         existing_data_json = self.redis.hget(key, task_id)
         if not existing_data_json:
@@ -108,11 +123,17 @@ class TaskStatusTracker:
         self.redis.expire(key, timedelta(days=7))
 
     def get_task_status(self, task_id: str, user_id: str) -> dict | None:
+        if not self.redis:
+            return None
+
         key = self._get_key(user_id)
         data = self.redis.hget(key, task_id)
         return json.loads(data) if data else None
 
     def get_all_tasks_for_user(self, user_id: str) -> dict[str, dict]:
+        if not self.redis:
+            return {}
+
         key = self._get_key(user_id)
         all_tasks = self.redis.hgetall(key)
         return {tid: json.loads(t_data) for tid, t_data in all_tasks.items()}
@@ -132,6 +153,9 @@ class TaskStatusTracker:
             - If any item is 'failed' → 'failed'
             Returns None if task_id not found.
         """
+        if not self.redis:
+            return None
+
         # Get all item_ids for this task_id
         task_items_key = self._get_task_items_key(user_id, business_task_id)
         item_ids = self.redis.smembers(task_items_key)
@@ -142,11 +166,14 @@ class TaskStatusTracker:
         # Get statuses for all items
         key = self._get_key(user_id)
         item_statuses = []
+        errors = []
         for item_id in item_ids:
             item_data_json = self.redis.hget(key, item_id)
             if item_data_json:
                 item_data = json.loads(item_data_json)
                 item_statuses.append(item_data["status"])
+                if item_data.get("status") == "failed" and "error" in item_data:
+                    errors.append(item_data["error"])
 
         if not item_statuses:
             return None
@@ -167,4 +194,36 @@ class TaskStatusTracker:
             "business_task_id": business_task_id,
             "item_count": len(item_ids),
             "item_statuses": item_statuses,
+            "errors": errors,
         }
+
+    def get_all_tasks_global(self) -> dict[str, dict[str, dict]]:
+        """
+        Retrieve all tasks for all users from Redis.
+
+        Returns:
+            dict: {user_id: {task_id: task_data, ...}, ...}
+        """
+        if not self.redis:
+            return {}
+
+        all_users_tasks = {}
+        cursor: int | str = 0
+        while True:
+            cursor, keys = self.redis.scan(cursor=cursor, match="memos:task_meta:*", count=100)
+            for key in keys:
+                # key format: memos:task_meta:{user_id}
+                parts = key.split(":")
+                if len(parts) < 3:
+                    continue
+                user_id = parts[2]
+
+                tasks = self.redis.hgetall(key)
+                if tasks:
+                    user_tasks = {tid: json.loads(t_data) for tid, t_data in tasks.items()}
+                    all_users_tasks[user_id] = user_tasks
+
+            if cursor == 0 or cursor == "0":
+                break
+
+        return all_users_tasks

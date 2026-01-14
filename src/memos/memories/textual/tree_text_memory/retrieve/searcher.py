@@ -47,13 +47,16 @@ class Searcher:
         search_strategy: dict | None = None,
         manual_close_internet: bool = True,
         tokenizer: FastTokenizer | None = None,
+        include_embedding: bool = False,
     ):
         self.graph_store = graph_store
         self.embedder = embedder
         self.llm = dispatcher_llm
 
         self.task_goal_parser = TaskGoalParser(dispatcher_llm)
-        self.graph_retriever = GraphMemoryRetriever(graph_store, embedder, bm25_retriever)
+        self.graph_retriever = GraphMemoryRetriever(
+            graph_store, embedder, bm25_retriever, include_embedding=include_embedding
+        )
         self.reranker = reranker
         self.reasoner = MemoryReasoner(dispatcher_llm)
 
@@ -116,9 +119,13 @@ class Searcher:
         info=None,
         search_tool_memory: bool = False,
         tool_mem_top_k: int = 6,
+        dedup: str | None = None,
         plugin=False,
     ):
-        deduped = self._deduplicate_results(retrieved_results)
+        if dedup == "no":
+            deduped = retrieved_results
+        else:
+            deduped = self._deduplicate_results(retrieved_results)
         final_results = self._sort_and_trim(
             deduped, top_k, plugin, search_tool_memory, tool_mem_top_k
         )
@@ -138,6 +145,7 @@ class Searcher:
         user_name: str | None = None,
         search_tool_memory: bool = False,
         tool_mem_top_k: int = 6,
+        dedup: str | None = None,
         **kwargs,
     ) -> list[TextualMemoryItem]:
         """
@@ -199,6 +207,7 @@ class Searcher:
             plugin=kwargs.get("plugin", False),
             search_tool_memory=search_tool_memory,
             tool_mem_top_k=tool_mem_top_k,
+            dedup=dedup,
         )
 
         logger.info(f"[SEARCH] Done. Total {len(final_results)} results.")
@@ -280,6 +289,51 @@ class Searcher:
             query_embedding = self.embedder.embed(list({query, *parsed_goal.memories}))
 
         return parsed_goal, query_embedding, context, query
+
+    @timed
+    def _retrieve_simple(
+        self,
+        query: str,
+        top_k: int,
+        search_filter: dict | None = None,
+        user_name: str | None = None,
+        **kwargs,
+    ):
+        """Retrieve from by keywords and embedding"""
+        query_words = []
+        if self.tokenizer:
+            query_words = self.tokenizer.tokenize_mixed(query)
+        else:
+            query_words = query.strip().split()
+        query_words = [query, *query_words]
+        logger.info(f"[SIMPLESEARCH] Query words: {query_words}")
+        query_embeddings = self.embedder.embed(query_words)
+
+        items = self.graph_retriever.retrieve_from_mixed(
+            top_k=top_k * 2,
+            memory_scope=None,
+            query_embedding=query_embeddings,
+            search_filter=search_filter,
+            user_name=user_name,
+            use_fast_graph=self.use_fast_graph,
+        )
+        logger.info(f"[SIMPLESEARCH] Items count: {len(items)}")
+        documents = [getattr(item, "memory", "") for item in items]
+        if not documents:
+            return []
+        documents_embeddings = self.embedder.embed(documents)
+        similarity_matrix = cosine_similarity_matrix(documents_embeddings)
+        selected_indices, _ = find_best_unrelated_subgroup(documents, similarity_matrix)
+        selected_items = [items[i] for i in selected_indices]
+        logger.info(
+            f"[SIMPLESEARCH] after unrelated subgroup selection items count: {len(selected_items)}"
+        )
+        return self.reranker.rerank(
+            query=query,
+            query_embedding=query_embeddings[0],
+            graph_results=selected_items,
+            top_k=top_k,
+        )
 
     @timed
     def _retrieve_paths(
@@ -364,7 +418,6 @@ class Searcher:
                         mode=mode,
                     )
                 )
-
             results = []
             for t in tasks:
                 results.extend(t.result())
@@ -526,18 +579,19 @@ class Searcher:
         if self.manual_close_internet and not parsed_goal.internet_search:
             logger.info(f"[PATH-C] '{query}' Skipped (no retriever, fast mode)")
             return []
-        if memory_type not in ["All"]:
+        if memory_type not in ["All", "OuterMemory"]:
+            logger.info(f"[PATH-C] '{query}' Skipped (memory_type does not match)")
             return []
         logger.info(f"[PATH-C] '{query}' Retrieving from internet...")
         items = self.internet_retriever.retrieve_from_internet(
-            query=query, top_k=top_k, parsed_goal=parsed_goal, info=info
+            query=query, top_k=2 * top_k, parsed_goal=parsed_goal, info=info, mode=mode
         )
         logger.info(f"[PATH-C] '{query}' Retrieved from internet {len(items)} items: {items}")
         return self.reranker.rerank(
             query=query,
             query_embedding=query_embedding[0],
             graph_results=items,
-            top_k=min(top_k, 5),
+            top_k=top_k,
             parsed_goal=parsed_goal,
         )
 
@@ -665,6 +719,8 @@ class Searcher:
         )
         logger.info(f"[SIMPLESEARCH] Items count: {len(items)}")
         documents = [getattr(item, "memory", "") for item in items]
+        if not documents:
+            return []
         documents_embeddings = self.embedder.embed(documents)
         similarity_matrix = cosine_similarity_matrix(documents_embeddings)
         selected_indices, _ = find_best_unrelated_subgroup(documents, similarity_matrix)
@@ -695,15 +751,35 @@ class Searcher:
         """Sort results by score and trim to top_k"""
         final_items = []
         if search_tool_memory:
-            tool_results = [
+            tool_schema_results = [
                 (item, score)
                 for item, score in results
-                if item.metadata.memory_type in ["ToolSchemaMemory", "ToolTrajectoryMemory"]
+                if item.metadata.memory_type == "ToolSchemaMemory"
             ]
-            sorted_tool_results = sorted(tool_results, key=lambda pair: pair[1], reverse=True)[
-                :tool_mem_top_k
+            sorted_tool_schema_results = sorted(
+                tool_schema_results, key=lambda pair: pair[1], reverse=True
+            )[:tool_mem_top_k]
+            for item, score in sorted_tool_schema_results:
+                if plugin and round(score, 2) == 0.00:
+                    continue
+                meta_data = item.metadata.model_dump()
+                meta_data["relativity"] = score
+                final_items.append(
+                    TextualMemoryItem(
+                        id=item.id,
+                        memory=item.memory,
+                        metadata=SearchedTreeNodeTextualMemoryMetadata(**meta_data),
+                    )
+                )
+            tool_trajectory_results = [
+                (item, score)
+                for item, score in results
+                if item.metadata.memory_type == "ToolTrajectoryMemory"
             ]
-            for item, score in sorted_tool_results:
+            sorted_tool_trajectory_results = sorted(
+                tool_trajectory_results, key=lambda pair: pair[1], reverse=True
+            )[:tool_mem_top_k]
+            for item, score in sorted_tool_trajectory_results:
                 if plugin and round(score, 2) == 0.00:
                     continue
                 meta_data = item.metadata.model_dump()
