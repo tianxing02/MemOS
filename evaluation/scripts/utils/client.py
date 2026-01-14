@@ -422,6 +422,6 @@ if __name__ == "__main__":
     client = MemosApiClient()
     for m in messages:
         m["created_at"] = iso_date
-    client.add(messages, user_id, user_id)
-    memories = client.search(query, user_id, top_k)
+    client.add(messages, user_id, [user_id], "extreme_multimodal", "fine", "async")
+    memories = client.search(query, user_id, [user_id], top_k, "fast")
     print(memories)
