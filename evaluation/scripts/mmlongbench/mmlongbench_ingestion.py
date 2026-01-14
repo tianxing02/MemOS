@@ -2,15 +2,38 @@
 
 import argparse
 import json
+import os
 import threading
 import time
+import traceback
 
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+from dotenv import load_dotenv
 from langchain_text_splitters import Language, RecursiveCharacterTextSplitter
 
 from evaluation.scripts.utils.metrics import Metrics
+
+
+load_dotenv()
+
+fastgpt_dataset_id = os.getenv("FASTGPT_DATASET_ID_MM_LONGBENCH")
+memos_knowledgebase_id = os.getenv("MEMOS_KNOWLEDGEBASE_ID_MM_LONGBENCH")
+
+def retry_operation(func, *args, retries=5, delay=2, **kwargs):
+    for attempt in range(retries):
+        try:
+            return func(*args, **kwargs)
+        except Exception as e:
+            if attempt < retries - 1:
+                traceback.print_exc()
+                func_name = getattr(func, "__name__", "Operation")
+                print(f"[Retry] {func_name} failed: {e}. Retrying in {delay}s...")
+                time.sleep(delay)
+                delay *= 2
+            else:
+                raise e
 
 
 def read_filenames(filepath: str) -> list[str]:
@@ -33,7 +56,6 @@ def run_concurrent_add(
     url_prefix: str,
     user_prefix: str,
     workers: int,
-    source_type: str = "extreme_multimodal",
     mode: str = "fine",
     async_mode: str = "sync",
 ) -> dict:
@@ -46,7 +68,6 @@ def run_concurrent_add(
         url_prefix: URL prefix
         user_prefix: User ID prefix
         workers: Concurrency
-        source_type: Source type
         mode: Mode
         async_mode: Async mode
 
@@ -59,13 +80,14 @@ def run_concurrent_add(
     total_files = len(filenames)
     completed = 0
     completed_lock = threading.Lock()
-    user_id = user_prefix
+
+    added_ids: dict[str, str] = {}
 
     def add_single_file(filename: str, doc_id: str = ""):
         nonlocal completed
 
         file_id = filename  # 文件名作为file_id
-        file_data = f"{url_prefix.rstrip('/')}/{filename}"  # URL前缀 + 文件名
+        file_url = f"{url_prefix.rstrip('/')}/{filename}"  # URL前缀 + 文件名
 
         base_dir = Path("ppt_test_result")
         all_md_files = list(base_dir.rglob("*.md"))
@@ -80,36 +102,26 @@ def run_concurrent_add(
 
         start_time = time.perf_counter()
         user_id = user_prefix + "_" + doc_id
-        writable_cube_ids = [user_id]
-        chat_time = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
         result = None
         try:
-            if lib == "memos":
-                messages = [
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "file",
-                                "file": {
-                                    "file_id": file_id,
-                                    "filename": file_data,
-                                    "file_data": file_data,
-                                },
-                            }
-                        ],
-                        "chat_time": chat_time,
-                    }
-                ]
-                result = client.add(
-                    messages=messages,
-                    user_id=user_id,
-                    writable_cube_ids=writable_cube_ids,
-                    source_type=source_type,
-                    mode=mode,
-                    async_mode=async_mode,
+            if lib == "memos-online":
+                result = retry_operation(client.upload_file, memos_knowledgebase_id, file_url)
+                file_id = None
+                if isinstance(result, dict):
+                    data = result.get("data") or []
+                    if isinstance(data, list) and data:
+                        first = data[0] if isinstance(data[0], dict) else {}
+                        fid = first.get("id")
+                        if fid:
+                            file_id = str(fid)
+                if file_id:
+                    added_ids[filename] = file_id
+            elif lib == "fastgpt":
+                result = retry_operation(
+                    client.upload_file, datasetId=fastgpt_dataset_id, file_url=file_url
                 )
+
             elif lib == "supermemory":
                 result = client.add(content=text, user_id=user_id)
             elif lib == "mem0":
@@ -119,7 +131,6 @@ def run_concurrent_add(
                 paragraphs = [p for p in chunker.split_text(text) if p.strip()]
                 messages = [{"role": "user", "content": p} for p in paragraphs]
                 ts = int(time.time())
-
                 result = client.add(messages=messages, user_id=doc_id, timestamp=ts, batch_size=10)
 
             duration = time.perf_counter() - start_time
@@ -146,7 +157,7 @@ def run_concurrent_add(
 
     print(f"\nStarting concurrent add for {total_files} files...")
     print(f"Concurrency: {workers}")
-    print(f"User ID: {user_id}")
+    print(f"Version Dir: {user_prefix}")
     print(f"URL prefix: {url_prefix}")
     print("-" * 60)
 
@@ -197,7 +208,7 @@ def run_concurrent_add(
         for error, count in sorted(summary["errors"].items(), key=lambda x: x[1], reverse=True)[:5]:
             print(f"  [{count} times] {error[:100]}...")
 
-    return {"summary": summary, "total_duration": total_duration, "results": results}
+    return {"summary": summary, "total_duration": total_duration, "results": results, "added": added_ids}
 
 
 def parse_args():
@@ -209,14 +220,14 @@ def parse_args():
     parser.add_argument(
         "--filenames-file",
         "-f",
-        default="evaluation/data/mmlongbench/md_file_list.txt",
+        default="evaluation/data/mmlongbench/pdf_file_list.txt",
         help="Path to text file containing list of filenames (one per line)",
     )
 
     parser.add_argument(
         "--url-prefix",
         "-u",
-        default="https://memos-knowledge-base-file-pre.oss-cn-shanghai.aliyuncs.com/ppt_md_files/",
+        default="https://memos-knowledge-base-file-pre.oss-cn-shanghai.aliyuncs.com/mmlongbench_pdf_files/",
         help="URL prefix to be prepended to filenames",
     )
 
@@ -233,17 +244,19 @@ def parse_args():
     )
 
     parser.add_argument(
-        "--source-type",
-        default="extreme_multimodal",
-        help="Source type (default: extreme_multimodal)",
-    )
-
-    parser.add_argument(
         "--mode", default="fine", choices=["fine", "fast"], help="Processing mode (default: fine)"
     )
 
     parser.add_argument(
         "--async-mode", default="sync", choices=["sync", "async"], help="Async mode (default: sync)"
+    )
+
+    parser.add_argument(
+        "--limit",
+        "-l",
+        type=int,
+        default=None,
+        help="Limit number of samples to process (for testing, default all)",
     )
 
     parser.add_argument("--version-dir", "-v", default=None, help="Version directory name")
@@ -264,6 +277,14 @@ def _get_lib_client(lib: str):
         from evaluation.scripts.utils.client import SupermemoryClient
 
         return SupermemoryClient()
+    if lib == "fastgpt":
+        from evaluation.scripts.utils.client import FastGPTClient
+
+        return FastGPTClient()
+    if lib == "memos-online":
+        from evaluation.scripts.utils.client import MemosApiOnlineClient
+
+        return MemosApiOnlineClient()
 
 
 def main():
@@ -296,17 +317,8 @@ def main():
         print(f"Error: Failed to read file - {e}")
         return
 
-    # Execute concurrent add
-    result = run_concurrent_add(
-        lib=args.lib,
-        filenames=filenames,
-        url_prefix=args.url_prefix,
-        user_prefix=args.version_dir,
-        workers=args.workers,
-        source_type=args.source_type,
-        mode=args.mode,
-        async_mode=args.async_mode,
-    )
+    if args.limit is not None:
+        filenames = filenames[: args.limit]
 
     # Determine output file path
     import os
@@ -315,24 +327,69 @@ def main():
     os.makedirs(version_output_dir, exist_ok=True)
     output_path = os.path.join(version_output_dir, f"{args.lib}_add_results.json")
 
+    existing_added: dict[str, str] = {}
+    if os.path.exists(output_path):
+        try:
+            with open(output_path, encoding="utf-8") as f:
+                obj = json.load(f)
+            added_obj = obj.get("added") if isinstance(obj, dict) else None
+            if isinstance(added_obj, dict):
+                existing_added = {
+                    str(k): str(v) for k, v in added_obj.items() if v is not None
+                }
+        except Exception:
+            existing_added = {}
+
+    if existing_added:
+        before = len(filenames)
+        filenames = [fn for fn in filenames if fn not in existing_added]
+        print(
+            f"[Resume] found {len(existing_added)} successful files in checkpoint, "
+            f"skip {before - len(filenames)} files, pending={len(filenames)}"
+        )
+
+    if not filenames:
+        print("[Add] no pending files, nothing to do.")
+        return
+
+    # Execute concurrent add
+    result = run_concurrent_add(
+        lib=args.lib,
+        filenames=filenames,
+        url_prefix=args.url_prefix,
+        user_prefix=args.version_dir,
+        workers=args.workers,
+        mode=args.mode,
+        async_mode=args.async_mode,
+    )
+
     # Save results to file
     if output_path:
         with open(output_path, "w", encoding="utf-8") as f:
             # Remove non-serializable content
             output_data = {
-                "summary": result["summary"],
-                "total_duration": result["total_duration"],
+                "summary": result.get("summary"),
+                "total_duration": result.get("total_duration"),
                 "config": {
                     "filenames_file": args.filenames_file,
                     "url_prefix": args.url_prefix,
                     "api_url": args.api_url,
                     "concurrency": args.workers,
-                    "source_type": args.source_type,
                     "mode": args.mode,
                     "async_mode": args.async_mode,
                     "version_dir": args.version_dir,
                 },
             }
+            added = result.get("added") or {}
+            merged_added: dict[str, str] = {}
+            merged_added.update(existing_added)
+            if isinstance(added, dict) and added:
+                for k, v in added.items():
+                    if v is None:
+                        continue
+                    merged_added[str(k)] = str(v)
+            if merged_added:
+                output_data["added"] = dict(sorted(merged_added.items()))
             json.dump(output_data, f, ensure_ascii=False, indent=2)
         print(f"\nResults saved to: {output_path}")
 

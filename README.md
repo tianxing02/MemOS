@@ -9,7 +9,7 @@ Designed for **AI companions, role-playing NPCs, and multi-agent systems**, MemO
   </a>
 
 <h1 align="center">
-  <img src="https://statics.memtensor.com.cn/logo/memos_color_m.png" alt="MemOS Logo" width="50"/> MemOS 1.0: 星河 (Stellar)  <img src="https://img.shields.io/badge/status-Preview-blue" alt="Preview Badge"/>
+  <img src="https://statics.memtensor.com.cn/logo/memos_color_m.png" alt="MemOS Logo" width="50"/> MemOS 2.0: 星尘（Stardust） <img src="https://img.shields.io/badge/status-Preview-blue" alt="Preview Badge"/>
 </h1>
 
   <p>
@@ -60,7 +60,7 @@ Get Free API: [Try API](https://memos-dashboard.openmem.net/quickstart/?source=g
 
 <img src="https://cdn.memtensor.com.cn/img/1762436050812_3tgird_compressed.png" alt="SOTA SCORE">
 
-**MemOS** is an operating system for Large Language Models (LLMs) that enhances them with long-term memory capabilities. It allows LLMs to store, retrieve, and manage information, enabling more context-aware, consistent, and personalized interactions.
+**MemOS** is an operating system for Large Language Models (LLMs) that enhances them with long-term memory capabilities. It allows LLMs to store, retrieve, and manage information, enabling more context-aware, consistent, and personalized interactions. **MemOS 2.0** features comprehensive knowledge base management, multi-modal memory support, tool memory for Agent enhancement, and enterprise-grade architecture optimizations.
 
 - **Website**: https://memos.openmem.net/
 - **Documentation**: https://memos-docs.openmem.net/home/overview/
@@ -71,7 +71,8 @@ Get Free API: [Try API](https://memos-dashboard.openmem.net/quickstart/?source=g
 
 Stay up to date with the latest MemOS announcements, releases, and community highlights.
 
-
+- **2025-12-24** - 🎉 **MemOS v2.0: Stardust (星尘) Release**:
+  Major upgrade featuring comprehensive Knowledge Base system with automatic document/URL parsing and cross-project sharing; Memory feedback mechanism for correction and precise deletion; Multi-modal memory supporting images and charts; Tool Memory to enhance Agent planning; Full architecture upgrade with Redis Streams multi-level queue scheduler and DB optimizations; New streaming/non-streaming Chat interfaces; Complete MCP upgrade; Lightweight deployment modes (quick & full).
 - **2025-11-06** - 🎉 MemOS v1.1.3 (Async Memory & Preference):
   Millisecond-level async memory add (support plain-text-memory and
   preference memory); enhanced BM25, graph recall, and mixture search; full
@@ -115,134 +116,131 @@ showcasing its capabilities in **information extraction**, **temporal and cross-
     - **Activation Memory**: Caches key-value pairs (`KVCacheMemory`) to accelerate LLM inference and context reuse.
     - **Parametric Memory**: Stores model adaptation parameters (e.g., LoRA weights).
 - **🔌 Extensible**: Easily extend and customize memory modules, data sources, and LLM integrations.
-
-## 🚀 Getting Started
-
-### ⭐️ MemOS online API
-The easiest way to use MemOS. Equip your agent with memory **in minutes**!
-
-Sign up and get started on[`MemOS dashboard`](https://memos-dashboard.openmem.net/cn/quickstart/?source=landing).
+- **🏂 Lightweight Deployment** 🆕: Support for quick mode and complete mode deployment options.
 
 
-### Self-Hosted Server
-1. Get the repository.
-```bash
-git clone https://github.com/MemTensor/MemOS.git
-cd MemOS
-pip install -r ./docker/requirements.txt
-```
+## 🚀 Quickstart Guide
 
-2. Configure `docker/.env.example` and copy to `MemOS/.env`
-3. Start the service.
-```bash
-uvicorn memos.api.server_api:app --host 0.0.0.0 --port 8001 --workers 8
-```
-
-### Local SDK
-Here's a quick example of how to create a **`MemCube`**, load it from a directory, access its memories, and save it.
-
-```python
-from memos.mem_cube.general import GeneralMemCube
-
-# Initialize a MemCube from a local directory
-mem_cube = GeneralMemCube.init_from_dir("examples/data/mem_cube_2")
-
-# Access and print all memories
-print("--- Textual Memories ---")
-for item in mem_cube.text_mem.get_all():
-    print(item)
-
-print("\n--- Activation Memories ---")
-for item in mem_cube.act_mem.get_all():
-    print(item)
-
-# Save the MemCube to a new directory
-mem_cube.dump("tmp/mem_cube")
-```
-
-**`MOS`** (Memory Operating System) is a higher-level orchestration layer that manages multiple MemCubes and provides a unified API for memory operations. Here's a quick example of how to use MOS:
-
-```python
-from memos.configs.mem_os import MOSConfig
-from memos.mem_os.main import MOS
-
-
-# init MOS
-mos_config = MOSConfig.from_json_file("examples/data/config/simple_memos_config.json")
-memory = MOS(mos_config)
-
-# create user
-user_id = "b41a34d5-5cae-4b46-8c49-d03794d206f5"
-memory.create_user(user_id=user_id)
-
-# register cube for user
-memory.register_mem_cube("examples/data/mem_cube_2", user_id=user_id)
-
-# add memory for user
-memory.add(
-    messages=[
-        {"role": "user", "content": "I like playing football."},
-        {"role": "assistant", "content": "I like playing football too."},
-    ],
-    user_id=user_id,
-)
-
-# Later, when you want to retrieve memory for user
-retrieved_memories = memory.search(query="What do you like?", user_id=user_id)
-# output text_memories: I like playing football, act_memories, para_memories
-print(f"text_memories: {retrieved_memories['text_mem']}")
-```
-
-For more detailed examples, please check out the [`examples`](./examples) directory.
-
-## 📦 Installation
+### Get API Key
+  - Sign up and get started on[`MemOS dashboard`](https://memos-dashboard.openmem.net/cn/quickstart/?source=landing)
+  - Open the API Keys Console in the MemOS dashboard and copy the API Key into the initialization code
 
 ### Install via pip
 
 ```bash
-pip install MemoryOS
+pip install MemoryOS -U
 ```
 
-### Optional Dependencies
+### Basic Usage
 
-MemOS provides several optional dependency groups for different features. You can install them based on your needs.
+- Initialize MemOS client with API Key to start sending requests
+```python
+# Please make sure MemoS is installed (pip install MemoryOS -U)
+from memos.api.client import MemOSClient
 
-| Feature               | Package Name              |
-| --------------------- | ------------------------- |
-| Tree Memory           | `MemoryOS[tree-mem]`      |
-| Memory Reader         | `MemoryOS[mem-reader]`    |
-| Memory Scheduler      | `MemoryOS[mem-scheduler]` |
-
-Example installation commands:
-
-```bash
-pip install MemoryOS[tree-mem]
-pip install MemoryOS[tree-mem,mem-reader]
-pip install MemoryOS[mem-scheduler]
-pip install MemoryOS[tree-mem,mem-reader,mem-scheduler]
+# Initialize the client using the API Key
+client = MemOSClient(api_key="YOUR_API_KEY")
 ```
 
-### External Dependencies
+- This API allows you to add one or more messages to a specific conversation. As illustrated in the examples bellow, you can add messages in real time during a user-assistant interaction, import historical messages in bulk, or enrich the conversation with user preferences and behavior data. All added messages are transformed into memories by MemOS, enabling their retrieval in future conversations to support chat history management, user behavior tracking, and personalized interactions.
+```python
+messages = [
+  {"role": "user", "content": "I have planned to travel to Guangzhou during the summer vacation. What chain hotels are available for accommodation?"},
+  {"role": "assistant", "content": "You can consider [7 Days, All Seasons, Hilton], and so on."},
+  {"role": "user", "content": "I'll choose 7 Days"},
+  {"role": "assistant", "content": "Okay, ask me if you have any other questions."}
+]
+user_id = "memos_user_123"
+conversation_id = "0610"
+res = client.add_message(messages=messages, user_id=user_id, conversation_id=conversation_id)
 
-#### Ollama Support
-
-To use MemOS with [Ollama](https://ollama.com/), first install the Ollama CLI:
-
-```bash
-curl -fsSL https://ollama.com/install.sh | sh
+print(f"result: {res}")
 ```
 
-#### Transformers Support
+- This API allows you to query a user’s memory and returns the fragments most relevant to the input. These can serve as references for the model when generating responses. As shown in the examples bellow, You can retrieve memory in real time during a user’s conversation with the AI, or perform a global search across their entire memory to create user profiles or support personalized recommendations, improving both dialogue coherence and personalization.
+In the latest update, in addition to “Fact Memory”, the system now supports “Preference Memory”, enabling LLM to respond in a way that better understands the user.
+```python
+query = "I want to go out to play during National Day. Can you recommend a city I haven't been to and a hotel brand I haven't stayed at?"
+user_id = "memos_user_123"
+conversation_id = "0610"
+res = client.search_memory(query=query, user_id=user_id, conversation_id=conversation_id)
 
-To use functionalities based on the `transformers` library, ensure you have [PyTorch](https://pytorch.org/get-started/locally/) installed (CUDA version recommended for GPU acceleration).
-
-#### Download Examples
-
-To download example code, data and configurations, run the following command:
-
-```bash
-memos download_examples
+print(f"result: {res}")
 ```
+
+
+### Self-Hosted Server
+1. Get the repository.
+    ```bash
+    git clone https://github.com/MemTensor/MemOS.git
+    cd MemOS
+    pip install -r ./docker/requirements.txt
+    ```
+2. Configure `docker/.env.example` and copy to `MemOS/.env`
+ - The `OPENAI_API_KEY`,`MOS_EMBEDDER_API_KEY`,`MEMRADER_API_KEY` and others can be applied for through [`BaiLian`](https://bailian.console.aliyun.com/?spm=a2c4g.11186623.0.0.2f2165b08fRk4l&tab=api#/api).
+ - Fill in the corresponding configuration in the `MemOS/.env` file.
+3. Start the service.
+
+- Launch via Docker
+  ###### Tips: Please ensure that Docker Compose is installed successfully and that you have navigated to the docker directory (via `cd docker`) before executing the following command.
+  ```bash
+  # Enter docker directory
+  docker compose up
+  ```
+  ##### If you prefer to deploy using Docker, please refer to the [`Docker Reference`](https://docs.openmem.net/open_source/getting_started/rest_api_server/#method-1-docker-use-repository-dependency-package-imagestart-recommended-use).
+
+- Launch via the uvicorn command line interface (CLI)
+  ###### Tips: Please ensure that Neo4j and Qdrant are running before executing the following command.
+  ```bash
+  uvicorn memos.api.server_api:app --host 0.0.0.0 --port 8001 --workers 1
+  ```
+  ##### For detailed integration steps, see the [`CLI Reference`](https://docs.openmem.net/open_source/getting_started/rest_api_server/#method-3client-install-with-CLI).
+
+
+
+Example
+  - Add User Message
+    ```python
+    import requests
+    import json
+
+    data = {
+        "user_id": "8736b16e-1d20-4163-980b-a5063c3facdc",
+        "mem_cube_id": "b32d0977-435d-4828-a86f-4f47f8b55bca",
+        "messages": [
+            {
+                "role": "user",
+                "content": "I like strawberry"
+            }
+        ],
+        "async_mode": "sync"
+    }
+    headers = {
+        "Content-Type": "application/json"
+    }
+    url = "http://localhost:8000/product/add"
+
+    res = requests.post(url=url, headers=headers, data=json.dumps(data))
+    print(f"result: {res.json()}")
+    ```
+  - Search User Memory
+    ```python
+    import requests
+    import json
+
+    data = {
+        "query": "What do I like",
+        "user_id": "8736b16e-1d20-4163-980b-a5063c3facdc",
+        "mem_cube_id": "b32d0977-435d-4828-a86f-4f47f8b55bca"
+    }
+    headers = {
+        "Content-Type": "application/json"
+    }
+    url = "http://localhost:8000/product/search"
+
+    res = requests.post(url=url, headers=headers, data=json.dumps(data))
+    print(f"result: {res.json()}")
+    ```
 
 ## 💬 Community & Support
 

@@ -53,7 +53,6 @@ class ImageParser(BaseMessageParser):
             return SourceMessage(
                 type="image",
                 content=url,
-                original_part=message,
                 url=url,
                 detail=detail,
             )
@@ -64,12 +63,12 @@ class ImageParser(BaseMessageParser):
         source: SourceMessage,
     ) -> ChatCompletionContentPartImageParam:
         """Rebuild image_url content part from SourceMessage."""
-        # Use original_part if available
-        if hasattr(source, "original_part") and source.original_part:
-            return source.original_part
-
         # Rebuild from source fields
-        url = getattr(source, "url", "") or (source.content or "").replace("[image_url]: ", "")
+        url = (
+            getattr(source, "url", "")
+            or getattr(source, "image_path", "")
+            or (source.content or "").replace("[image_url]: ", "")
+        )
         detail = getattr(source, "detail", "auto")
         return {
             "type": "image_url",
@@ -134,13 +133,18 @@ class ImageParser(BaseMessageParser):
         # Get context items if available
         context_items = kwargs.get("context_items")
 
-        # Determine language from context if available
-        lang = "en"
-        if context_items:
+        # Determine language: prioritize lang from source (passed via kwargs),
+        # fallback to detecting from context_items if lang not provided
+        lang = kwargs.get("lang")
+        if lang is None and context_items:
             for item in context_items:
                 if hasattr(item, "memory") and item.memory:
                     lang = detect_lang(item.memory)
                     break
+        if not lang:
+            lang = "en"
+        if not hasattr(source, "lang") or source.lang is None:
+            source.lang = lang
 
         # Select prompt based on language
         image_analysis_prompt = (

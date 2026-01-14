@@ -8,6 +8,8 @@ import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
+import pandas as pd
+
 from dotenv import load_dotenv
 from openai import OpenAI
 from tqdm import tqdm
@@ -67,7 +69,7 @@ def llm_answer(
     return resp.choices[0].message.content or "", resp.usage.prompt_tokens
 
 
-def print_metrics(results: list[dict], duration: float) -> None:
+def print_metrics(results: list[dict], duration: float) -> dict:
     easy, hard, short, medium, long = 0, 0, 0, 0, 0
     easy_acc, hard_acc, short_acc, medium_acc, long_acc = 0, 0, 0, 0, 0
     total_tokens = 0
@@ -99,7 +101,18 @@ def print_metrics(results: list[dict], duration: float) -> None:
     total = len(results)
     if total == 0:
         print("No results to calculate metrics.")
-        return
+        return {
+            "count": 0,
+            "overall_acc": 0,
+            "by_difficulty": {"easy": {"count": 0, "acc": 0}, "hard": {"count": 0, "acc": 0}},
+            "by_length": {
+                "short": {"count": 0, "acc": 0},
+                "medium": {"count": 0, "acc": 0},
+                "long": {"count": 0, "acc": 0},
+            },
+            "avg_prompt_tokens": 0,
+            "total_duration_sec": round(duration, 2),
+        }
 
     o_acc = round(100 * (easy_acc + hard_acc) / total, 2)
     e_acc = round(100 * easy_acc / easy, 2) if easy > 0 else 0
@@ -122,20 +135,106 @@ def print_metrics(results: list[dict], duration: float) -> None:
     print(f"{'Avg Tokens':<15} | {total:<10} | {avg_tokens:<10}")
     print(f"Total Duration: {duration:.2f} seconds")
     print("=" * 60 + "\n")
+    return {
+        "count": total,
+        "overall_acc": o_acc,
+        "by_difficulty": {
+            "easy": {"count": easy, "acc": e_acc},
+            "hard": {"count": hard, "acc": h_acc},
+        },
+        "by_length": {
+            "short": {"count": short, "acc": s_acc},
+            "medium": {"count": medium, "acc": m_acc},
+            "long": {"count": long, "acc": l_acc},
+        },
+        "avg_prompt_tokens": avg_tokens,
+        "total_duration_sec": round(duration, 2),
+    }
 
 
 def _load_json_list(path: Path) -> list[dict]:
     data = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(data, list):
-        raise ValueError(f"Invalid json format: {path}")
-    return data
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict) and isinstance(data.get("results"), list):
+        return data["results"]
+    raise ValueError(f"Invalid json format: {path}")
 
 
 def _save_json_list(path: Path, rows: list[dict]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.write_text(json.dumps({"results": rows}, ensure_ascii=False, indent=2), encoding="utf-8")
     os.replace(tmp, path)
+
+
+def _save_metrics(path: Path, metrics: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    obj = {"results": []}
+    if path.exists():
+        try:
+            current = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(current, dict) and isinstance(current.get("results"), list):
+                obj["results"] = current["results"]
+            elif isinstance(current, list):
+                obj["results"] = current
+        except Exception:
+            pass
+    obj = {"metrics": metrics, **obj}
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
+
+    # Also save metrics to xlsx (rows=category, columns=metric)
+    xlsx_path = path.with_suffix(".xlsx")
+    rows: list[dict] = []
+
+    # Overall row
+    rows.append(
+        {
+            "category": "overall",
+            "question_number": metrics.get("count", 0),
+            "accuracy": metrics.get("overall_acc", 0),
+            "avg_prompt_tokens": metrics.get("avg_prompt_tokens", 0),
+            "total_duration_sec": metrics.get("total_duration_sec", 0),
+        }
+    )
+
+    # By difficulty
+    by_diff = metrics.get("by_difficulty") or {}
+    for name in ("easy", "hard"):
+        info = by_diff.get(name) or {}
+        rows.append(
+            {
+                "category": f"difficulty_{name}",
+                "question_number": info.get("count", 0),
+                "accuracy": info.get("acc", 0),
+                "avg_prompt_tokens": None,
+                "total_duration_sec": None,
+            }
+        )
+
+    # By length
+    by_len = metrics.get("by_length") or {}
+    for name in ("short", "medium", "long"):
+        info = by_len.get(name) or {}
+        rows.append(
+            {
+                "category": f"length_{name}",
+                "question_number": info.get("count", 0),
+                "accuracy": info.get("acc", 0),
+                "avg_prompt_tokens": None,
+                "total_duration_sec": None,
+            }
+        )
+
+    df = pd.DataFrame(rows)
+    # Reorder columns
+    cols = ["category", "question_number", "accuracy", "avg_prompt_tokens", "total_duration_sec"]
+    remaining = [c for c in df.columns if c not in cols]
+    df = df[cols + remaining]
+
+    df.to_excel(xlsx_path, index=False)
 
 
 def evaluate_one(oai_client, model_name, row: dict) -> dict:
@@ -162,7 +261,6 @@ def main() -> None:
         "--lib",
         "-b",
         required=True,
-        choices=["memos", "mem0", "supermemory"],
         help="Product name to evaluate",
     )
     parser.add_argument("--workers", "-w", type=int, default=20, help="Number of parallel threads")
@@ -208,7 +306,8 @@ def main() -> None:
     pending = [r for r in search_rows if str(r.get("_id")) not in processed_ids]
     print(f"[Eval] total={len(search_rows)} pending={len(pending)} workers={args.workers}")
     if not pending:
-        print_metrics(results, time.time() - start_time)
+        metrics = print_metrics(results, time.time() - start_time)
+        _save_metrics(output_path, metrics)
         return
 
     print("[Response model]: ", args.chat_model)
@@ -234,7 +333,8 @@ def main() -> None:
 
     _save_json_list(output_path, results)
     print(f"Saved {len(results)} results to {output_path}")
-    print_metrics(results, time.time() - start_time)
+    metrics = print_metrics(results, time.time() - start_time)
+    _save_metrics(output_path, metrics)
 
 
 if __name__ == "__main__":

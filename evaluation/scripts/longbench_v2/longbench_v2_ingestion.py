@@ -16,6 +16,8 @@ from evaluation.scripts.utils.metrics import Metrics
 
 
 load_dotenv()
+fastgpt_dataset_id = os.getenv("FASTGPT_DATASET_ID_LONGBENCH_V2")
+memos_knowledgebase_id = os.getenv("MEMOS_KNOWLEDGEBASE_ID_LONGBENCH_V2")
 
 
 def retry_operation(func, *args, retries=5, delay=2, **kwargs):
@@ -24,6 +26,7 @@ def retry_operation(func, *args, retries=5, delay=2, **kwargs):
             return func(*args, **kwargs)
         except Exception as e:
             if attempt < retries - 1:
+                traceback.print_exc()
                 func_name = getattr(func, "__name__", "Operation")
                 print(f"[Retry] {func_name} failed: {e}. Retrying in {delay}s...")
                 time.sleep(delay)
@@ -41,9 +44,18 @@ def _get_lib_client(lib: str):
         from evaluation.scripts.utils.client import SupermemoryClient
 
         return SupermemoryClient()
-    from evaluation.scripts.utils.client import MemosApiClient
+    if lib == "fastgpt":
+        from evaluation.scripts.utils.client import FastGPTClient
 
-    return MemosApiClient()
+        return FastGPTClient()
+    if lib == "memos-online":
+        from evaluation.scripts.utils.client import MemosApiOnlineClient
+
+        return MemosApiOnlineClient()
+    if lib == "memos":
+        from evaluation.scripts.utils.client import MemosApiClient
+
+        return MemosApiClient()
 
 
 def _load_dataset_jsonl(dataset_path: Path) -> list[dict]:
@@ -80,64 +92,82 @@ def _load_dataset_jsonl(dataset_path: Path) -> list[dict]:
     return samples
 
 
-def _load_added_ids(records_path: Path) -> set[str]:
+def _load_added_ids(records_path: Path) -> dict[str, str | None]:
+    """
+    Load added records as a mapping: sample_id -> file_id (or None).
+    """
     if not records_path.exists():
-        return set()
+        return {}
+
     try:
         obj = json.loads(records_path.read_text(encoding="utf-8"))
-        ids = obj.get("added_ids") if isinstance(obj, dict) else None
-        if isinstance(ids, list):
-            return {str(x) for x in ids if x}
+        added = obj.get("added") if isinstance(obj, dict) else None
+        if isinstance(added, dict):
+            return {str(k): (str(v) if v is not None else None) for k, v in added.items()}
     except Exception:
-        return set()
-    return set()
+        return {}
+
+    return {}
 
 
-def _save_added_ids(records_path: Path, added_ids: set[str]) -> None:
+def _save_added_ids(
+    records_path: Path,
+    added: dict[str, str | None],
+    perf: dict | None = None,
+) -> None:
     records_path.parent.mkdir(parents=True, exist_ok=True)
     tmp = records_path.with_suffix(records_path.suffix + ".tmp")
+
+    obj = {
+        "added": dict(sorted(added.items())),
+    }
+    if perf is not None:
+        obj["perf"] = perf
+
     tmp.write_text(
-        json.dumps({"added_ids": sorted(added_ids)}, ensure_ascii=False, indent=2),
+        json.dumps(obj, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
     os.replace(tmp, records_path)
 
 
 def ingest_context(
-    client, sample: dict, lib: str, mode: str = "fine", async_mode: str = "sync"
-) -> str:
+    client,
+    sample: dict,
+    lib: str,
+    url_prefix: str,
+    mode: str = "fine",
+    async_mode: str = "sync",
+    version_dir: str | None = None,
+) -> tuple[str, str]:
     sample_id = str(sample.get("_id"))
-    user_id = sample_id
+    user_id = version_dir + "_" + sample_id
     context = sample.get("context") or ""
-    chunker = RecursiveCharacterTextSplitter.from_language(
-        language=Language.PYTHON, chunk_size=5120, chunk_overlap=128
-    )
-    chunks = [p for p in chunker.split_text(context or "") if p.strip()]
+    ts = int(time.time())
+    file_url = f"{url_prefix.rstrip('/')}/{sample_id}.txt"  # URL前缀 + 文件名
 
-    if lib == "memos":
-        messages = [{"type": "text", "text": p} for p in chunks]
-        writable_cube_ids = [user_id]
-        retry_operation(
-            client.add,
-            messages=messages,
-            user_id=user_id,
-            writable_cube_ids=writable_cube_ids,
-            source_type="batch_import",
-            mode=mode,
-            async_mode=async_mode,
+    file_id = ""
+    if lib == "memos" or lib == "memos-online":
+        result = retry_operation(client.upload_file, memos_knowledgebase_id, file_url)
+        file_id = result["data"][0]["id"]
+    if lib == "fastgpt":
+        result = retry_operation(
+            client.upload_file, datasetId=fastgpt_dataset_id, file_url=file_url
         )
-        return
-
+        file_id = result["data"]["collectionId"]
     if lib == "mem0":
+        chunker = RecursiveCharacterTextSplitter.from_language(
+            language=Language.PYTHON, chunk_size=2048, chunk_overlap=128
+        )
+        chunks = [p for p in chunker.split_text(context or "") if p.strip()]
+
         messages = [{"role": "user", "content": p} for p in chunks]
-        ts = int(time.time())
         retry_operation(client.add, messages=messages, user_id=user_id, timestamp=ts, batch_size=10)
-        return
 
     if lib == "supermemory":
         retry_operation(client.add, content=context, user_id=user_id)
 
-    return sample_id
+    return sample_id, file_id
 
 
 def parse_args():
@@ -170,6 +200,21 @@ def parse_args():
     parser.add_argument("--version-dir", "-v", default=None, help="Version directory name")
 
     parser.add_argument(
+        "--limit",
+        "-l",
+        type=int,
+        default=None,
+        help="Limit number of samples to process (for testing, default all)",
+    )
+
+    parser.add_argument(
+        "--url-prefix",
+        "-u",
+        default="https://memos-knowledge-base-file-pre.oss-cn-shanghai.aliyuncs.com/longbench_v2_text_files/",
+        help="URL prefix to be prepended to filenames",
+    )
+
+    parser.add_argument(
         "--dataset_path",
         "-p",
         default="evaluation/data/longbench_v2/longbenchv2_train.json",
@@ -187,13 +232,15 @@ def main() -> None:
 
     dataset_path = Path(args.dataset_path)
     dataset = _load_dataset_jsonl(dataset_path)
+    if args.limit is not None:
+        dataset = dataset[: args.limit]
 
     version_output_dir = os.path.join("evaluation/data/longbench_v2", args.version_dir)
     os.makedirs(version_output_dir, exist_ok=True)
     output_path = os.path.join(version_output_dir, f"{args.lib}_add_results.json")
     output_path = Path(output_path)
 
-    added_ids = _load_added_ids(output_path)
+    added_ids: dict[str, str | None] = _load_added_ids(output_path)
     pending = [s for s in dataset if str(s.get("_id")) not in added_ids]
     print(
         f"[Add] lib={args.lib} total={len(dataset)} pending={len(pending)} workers={args.workers}"
@@ -207,11 +254,20 @@ def main() -> None:
     def do_ingest(sample):
         start_time = time.perf_counter()
         try:
-            sid = ingest_context(client, sample, args.lib, args.mode, args.async_mode)
+            sample_id, file_id = ingest_context(
+                client,
+                sample,
+                args.lib,
+                args.url_prefix,
+                args.mode,
+                args.async_mode,
+                args.version_dir,
+            )
             duration = time.perf_counter() - start_time
             metrics.record(duration, True)
-            return sid
+            return sample_id, file_id
         except Exception as e:
+            traceback.print_exc()
             duration = time.perf_counter() - start_time
             metrics.record(duration, False, str(e))
             raise e
@@ -221,11 +277,13 @@ def main() -> None:
         futures = [executor.submit(do_ingest, sample) for sample in pending]
         for f in tqdm(as_completed(futures), total=len(futures), desc="Adding"):
             try:
-                sid = f.result()
+                sid, fid = f.result()
                 if sid:
-                    added_ids.add(str(sid))
+                    sid = str(sid)
+                    added_ids[sid] = str(fid) if fid else None
                     if len(added_ids) % 10 == 0:
                         _save_added_ids(output_path, added_ids)
+
             except Exception as e:
                 print(f"[Add] Error: {e}")
                 traceback.print_exc()
@@ -234,27 +292,23 @@ def main() -> None:
     print(f"[Add] saved records to {output_path}")
 
     total_duration = time.time() - start_time
-    perf_out = Path(version_output_dir) / f"{args.lib}_add_perf.json"
 
     summary = metrics.summary()
 
-    with open(perf_out, "w", encoding="utf-8") as f:
-        json.dump(
-            {
-                "summary": summary,
-                "total_duration": total_duration,
-                "config": {
-                    "workers": args.workers,
-                    "mode": args.mode,
-                    "async_mode": args.async_mode,
-                    "dataset_path": args.dataset_path,
-                },
+    _save_added_ids(
+        output_path,
+        added_ids,
+        perf={
+            "summary": summary,
+            "total_duration": total_duration,
+            "config": {
+                "workers": args.workers,
+                "mode": args.mode,
+                "async_mode": args.async_mode,
+                "dataset_path": args.dataset_path,
             },
-            f,
-            ensure_ascii=False,
-            indent=2,
-        )
-    print(f"[Add] saved performance metrics to {perf_out}")
+        },
+    )
 
     print("\n" + "=" * 60)
     print("Ingestion finished! Statistics:")

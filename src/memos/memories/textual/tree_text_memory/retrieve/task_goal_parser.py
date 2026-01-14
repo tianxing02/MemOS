@@ -5,7 +5,10 @@ from string import Template
 from memos.llms.base import BaseLLM
 from memos.log import get_logger
 from memos.memories.textual.tree_text_memory.retrieve.retrieval_mid_structs import ParsedTaskGoal
-from memos.memories.textual.tree_text_memory.retrieve.retrieve_utils import FastTokenizer
+from memos.memories.textual.tree_text_memory.retrieve.retrieve_utils import (
+    FastTokenizer,
+    parse_json_result,
+)
 from memos.memories.textual.tree_text_memory.retrieve.utils import TASK_PARSE_PROMPT
 
 
@@ -39,16 +42,13 @@ class TaskGoalParser:
         - mode == 'fast': use jieba to split words only
         - mode == 'fine': use LLM to parse structured topic/keys/tags
         """
-        # TODO: tmp mode for playground search goal parser, will be removed later
-        if kwargs.get("playground_search_goal_parser", False):
-            mode = "fine"
 
         if mode == "fast":
             return self._parse_fast(task_description, context=context, **kwargs)
         elif mode == "fine":
             if not self.llm:
                 raise ValueError("LLM not provided for slow mode.")
-            return self._parse_fine(task_description, context, conversation)
+            return self._parse_fine(task_description, context, conversation, **kwargs)
         else:
             raise ValueError(f"Unknown mode: {mode}")
 
@@ -81,7 +81,7 @@ class TaskGoalParser:
             )
 
     def _parse_fine(
-        self, query: str, context: str = "", conversation: list[dict] | None = None
+        self, query: str, context: str = "", conversation: list[dict] | None = None, **kwargs
     ) -> ParsedTaskGoal:
         """
         Slow mode: LLM structured parse.
@@ -114,8 +114,10 @@ class TaskGoalParser:
         for attempt_times in range(attempts):
             try:
                 context = kwargs.get("context", "")
-                response = response.replace("```", "").replace("json", "").strip()
-                response_json = eval(response)
+                response_json = parse_json_result(response)
+                if not response_json:
+                    raise ValueError("Parsed JSON is empty")
+
                 return ParsedTaskGoal(
                     memories=response_json.get("memories", []),
                     keys=response_json.get("keys", []),
@@ -126,6 +128,8 @@ class TaskGoalParser:
                     context=context,
                 )
             except Exception as e:
-                raise ValueError(
-                    f"Failed to parse LLM output: {e}\nRaw response:\n{response} retried: {attempt_times + 1}/{attempts + 1}"
-                ) from e
+                if attempt_times == attempts - 1:
+                    raise ValueError(
+                        f"Failed to parse LLM output: {e}\nRaw response:\n{response} retried: {attempt_times + 1}/{attempts}"
+                    ) from e
+                continue

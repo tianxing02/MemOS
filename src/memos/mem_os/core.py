@@ -2,7 +2,7 @@ import json
 import os
 import time
 
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
 from typing import Any, Literal
@@ -192,7 +192,7 @@ class MOSCore:
         self.chat_history_manager[user_id] = ChatHistory(
             user_id=user_id if user_id is not None else self.user_id,
             session_id=session_id if session_id is not None else self.session_id,
-            created_at=datetime.utcnow(),
+            created_at=datetime.now(timezone.utc),
             total_messages=0,
             chat_history=[],
         )
@@ -287,7 +287,7 @@ class MOSCore:
                         content=query,
                         timestamp=datetime.utcnow(),
                     )
-                    self.mem_scheduler.memos_message_queue.submit_messages(messages=[message_item])
+                    self.mem_scheduler.submit_messages(messages=[message_item])
 
                 memories = mem_cube.text_mem.search(
                     query,
@@ -311,7 +311,7 @@ class MOSCore:
         past_key_values = None
 
         if self.config.enable_activation_memory:
-            if self.config.chat_model.backend != "huggingface":
+            if self.config.chat_model.backend not in ["huggingface", "huggingface_singleton"]:
                 logger.error(
                     "Activation memory only used for huggingface backend. Skipping activation memory."
                 )
@@ -347,7 +347,7 @@ class MOSCore:
                     content=response,
                     timestamp=datetime.utcnow(),
                 )
-                self.mem_scheduler.memos_message_queue.submit_messages(messages=[message_item])
+                self.mem_scheduler.submit_messages(messages=[message_item])
 
         return response
 
@@ -498,7 +498,9 @@ class MOSCore:
         existing_cube = self.user_manager.get_cube(mem_cube_id)
 
         # check the embedder is it consistent with MOSConfig
-        if self.config.mem_reader.config.embedder != (
+        if hasattr(
+            self.mem_cubes[mem_cube_id].text_mem.config, "embedder"
+        ) and self.config.mem_reader.config.embedder != (
             cube_embedder := self.mem_cubes[mem_cube_id].text_mem.config.embedder
         ):
             logger.warning(
@@ -776,9 +778,7 @@ class MOSCore:
                                 timestamp=datetime.utcnow(),
                                 task_id=task_id,
                             )
-                            self.mem_scheduler.memos_message_queue.submit_messages(
-                                messages=[message_item]
-                            )
+                            self.mem_scheduler.submit_messages(messages=[message_item])
                         else:
                             message_item = ScheduleMessageItem(
                                 user_id=target_user_id,
@@ -791,9 +791,7 @@ class MOSCore:
                             logger.info(
                                 f"[DIAGNOSTIC] core.add: Submitting message to scheduler: {message_item.model_dump_json(indent=2)}"
                             )
-                            self.mem_scheduler.memos_message_queue.submit_messages(
-                                messages=[message_item]
-                            )
+                            self.mem_scheduler.submit_messages(messages=[message_item])
 
         def process_preference_memory():
             if (
@@ -828,7 +826,7 @@ class MOSCore:
                         content=json.dumps(messages_list),
                         timestamp=datetime.utcnow(),
                     )
-                    self.mem_scheduler.memos_message_queue.submit_messages(messages=[message_item])
+                    self.mem_scheduler.submit_messages(messages=[message_item])
 
         # Execute both memory processing functions in parallel
         with ContextThreadPoolExecutor(max_workers=2) as executor:
@@ -882,9 +880,7 @@ class MOSCore:
                             content=json.dumps(mem_ids),
                             timestamp=datetime.utcnow(),
                         )
-                        self.mem_scheduler.memos_message_queue.submit_messages(
-                            messages=[message_item]
-                        )
+                        self.mem_scheduler.submit_messages(messages=[message_item])
                     else:
                         message_item = ScheduleMessageItem(
                             user_id=target_user_id,
@@ -893,9 +889,7 @@ class MOSCore:
                             content=json.dumps(mem_ids),
                             timestamp=datetime.utcnow(),
                         )
-                        self.mem_scheduler.memos_message_queue.submit_messages(
-                            messages=[message_item]
-                        )
+                        self.mem_scheduler.submit_messages(messages=[message_item])
 
         # user doc input
         if (
@@ -924,7 +918,7 @@ class MOSCore:
                     content=json.dumps(mem_ids),
                     timestamp=datetime.utcnow(),
                 )
-                self.mem_scheduler.memos_message_queue.submit_messages(messages=[message_item])
+                self.mem_scheduler.submit_messages(messages=[message_item])
 
         logger.info(f"Add memory to {mem_cube_id} successfully")
 
