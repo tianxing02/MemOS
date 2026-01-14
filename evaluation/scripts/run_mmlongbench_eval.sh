@@ -17,14 +17,14 @@ CHAT_MODEL="gpt-4o-mini"
 LIMIT=10
 
 # Add / Ingestion
-# echo "Running mmlongbench_ingestion.py..."
-# python -m evaluation.scripts.mmlongbench.mmlongbench_ingestion \
-#  --lib "$LIB" \
-#  --workers "$WORKERS" \
-#  --version-dir "$VERSION_DIR" \
-#  --mode "$ADD_MODE" \
-#  --async-mode "$ASYNC_MODE" \
-# #  --limit "$LIMIT"
+ echo "Running mmlongbench_ingestion.py..."
+ python -m evaluation.scripts.mmlongbench.mmlongbench_ingestion \
+  --lib "$LIB" \
+  --workers "$WORKERS" \
+  --version-dir "$VERSION_DIR" \
+  --mode "$ADD_MODE" \
+  --async-mode "$ASYNC_MODE" \
+ #  --limit "$LIMIT"
 
 # #check
 # echo "Running mmllongbench_check_files.py..."
@@ -33,14 +33,14 @@ LIMIT=10
 #   --version-dir "$VERSION_DIR" \
 
 # Search
-# echo "Running mmlongbench_search.py..."
-# python -m evaluation.scripts.mmlongbench.mmlongbench_search \
-#   --lib "$LIB" \
-#   --workers "$WORKERS" \
-#   --version-dir "$VERSION_DIR" \
-#   --top-k "$TOPK" \
-#   --mode "$SEARCH_MODE"
-#   # --limit "$LIMIT"
+ echo "Running mmlongbench_search.py..."
+ python -m evaluation.scripts.mmlongbench.mmlongbench_search \
+   --lib "$LIB" \
+   --workers "$WORKERS" \
+   --version-dir "$VERSION_DIR" \
+   --top-k "$TOPK" \
+   --mode "$SEARCH_MODE"
+   # --limit "$LIMIT"
 
 # Eval
 echo "Running mmlongbench_eval.py..."
