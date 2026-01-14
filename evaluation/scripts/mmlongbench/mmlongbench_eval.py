@@ -104,11 +104,11 @@ def add_images_context(
     user_msg = messages[user_idx]
     content = user_msg.get("content", "")
 
-    parts: list[dict[str, Any]]
-    if isinstance(content, list):
-        parts = content
-    else:
-        parts = [{"type": "text", "text": str(content)}]
+    parts: list[dict[str, Any]] = (
+        content
+        if isinstance(content, list)
+        else [{"type": "text", "text": str(content)}]
+    )
 
     for img_path in image_paths[:6]:
         data_url = _encode_image_to_data_url(img_path)
