@@ -23,7 +23,7 @@ load_dotenv()
 
 
 def llm_response(
-    oai_client, chat_model: str, context: str, question: str, question_date: str | None = None
+    oai_client, chat_model: str, context: str, question: str
 ) -> str:
     prompt = HOTPOT_ANSWER_PROMPT.format(question=question, context=context)
     resp = oai_client.chat.completions.create(
@@ -68,6 +68,7 @@ def run_eval(pred_path: Path, gold_path: Path):
     metrics = m.eval(str(pred_path), str(gold_path))
 
     # Save metrics to pred_path (beginning of file)
+    results_path = ""
     try:
         results_path = pred_path
         current_data = {}
