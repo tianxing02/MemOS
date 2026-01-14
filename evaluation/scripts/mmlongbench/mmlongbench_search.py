@@ -152,7 +152,6 @@ def run_concurrent_search(
         doc_id = sample.get("doc_id", "")
         question = sample.get("question", "")
 
-        # user_id = user_prefix + "_" + doc_id
         user_id = doc_id[:20]
         start_time = time.perf_counter()
         try:

@@ -105,7 +105,7 @@ def _build_memory_texts(ctx: dict | list | None) -> list[str]:
         return texts
 
     for item in ctx:
-        if not isinstance(item, (list, tuple)) or len(item) != 2:
+        if not isinstance(item, list | tuple) or len(item) != 2:
             continue
 
         title, sentences = item
@@ -240,7 +240,7 @@ def main(argv: list[str] | None = None) -> None:
     start_time = time.time()
     with ThreadPoolExecutor(max_workers=args.workers) as executor:
         futures = [executor.submit(do_ingest, it) for it in pending_items]
-        for idx, f in enumerate(tqdm(as_completed(futures), total=len(futures), desc="Adding"), 1):
+        for _idx, f in enumerate(tqdm(as_completed(futures), total=len(futures), desc="Adding"), 1):
             try:
                 sid, fid = f.result()
                 if sid:
