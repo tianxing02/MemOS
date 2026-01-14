@@ -2,6 +2,7 @@ import argparse
 import json
 import os
 import sys
+import traceback
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from time import time
@@ -163,6 +164,7 @@ def main(frame, version, num_runs=3, num_workers=4):
                 result = future.result()
                 pm_responses[user_id] = result
             except Exception as exc:
+                traceback.print_exc()
                 print(f"\033[91m❌ Error processing user {user_id}: {exc}")
 
     end_time = time()

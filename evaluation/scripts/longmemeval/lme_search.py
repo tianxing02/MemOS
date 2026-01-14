@@ -178,7 +178,7 @@ def main(frame, version, top_k=20, num_workers=2):
     print(f"🔍 LONGMEMEVAL SEARCH - {frame.upper()} v{version}".center(80))
     print("=" * 80)
 
-    lme_df = pd.read_json("data/longmemeval/longmemeval_s.json")
+    lme_df = pd.read_json("evaluation/data/longmemeval/longmemeval_s.json")
     print("📚 Loaded LongMemeval dataset from data/longmemeval/longmemeval_s.json")
     num_multi_sessions = len(lme_df)
     print(f"👥 Number of users: {num_multi_sessions}")

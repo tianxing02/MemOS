@@ -318,7 +318,10 @@ async def main(concurrency_limit: int, input_file: str, output_file: str, output
     print(f"Output JSONL: {output_file}")
     print(f"Output Excel: {output_excel_file}")
 
-    client = OpenAI(api_key=API_KEY, base_url=API_URL)
+    client = OpenAI(
+        api_key=os.getenv("OPENAI_API_KEY", "sk-xxxxx"),
+        base_url=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+    )
 
     try:
         with open(input_file, encoding="utf-8") as f:

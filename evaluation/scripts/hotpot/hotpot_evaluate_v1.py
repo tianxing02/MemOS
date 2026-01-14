@@ -149,6 +149,7 @@ def eval(prediction_file, gold_file):
         print(metrics)
     else:
         print(metrics)
+    metrics["count"] = n
     return metrics
 
 

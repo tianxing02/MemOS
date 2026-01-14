@@ -28,7 +28,6 @@ def ingest_sample(
         return True
 
     user_id = f"longbench_v2_{sample_idx}_{version}"
-    conv_id = f"longbench_v2_{sample_idx}_{version}"
 
     # Get context and convert to messages
     context = sample.get("context", "")
@@ -46,7 +45,15 @@ def ingest_sample(
 
     if "memos-api" in frame:
         try:
-            client.add(messages=messages, user_id=user_id, conv_id=conv_id, batch_size=1)
+            writable_cube_ids = [user_id]
+            client.add(
+                messages=messages,
+                user_id=user_id,
+                writable_cube_ids=writable_cube_ids,
+                source_type="extreme_multimodal",
+                mode="fine",
+                async_mode="async",
+            )
             print(f"✅ [{frame}] Ingested sample {sample_idx}")
             # Record successful ingestion (thread-safe)
             with file_lock, open(record_file, "a") as f:
@@ -68,14 +75,18 @@ def load_dataset_from_local():
         "long_bench_v2",
     )
 
-    filepath = os.path.join(data_dir, "data.json")
+    filepath = os.path.join(data_dir, "longbenchv2_train.json")
 
     if not os.path.exists(filepath):
         raise FileNotFoundError(f"Dataset file not found: {filepath}")
 
-    # Load JSON file
+    samples: list[dict] = []
     with open(filepath, encoding="utf-8") as f:
-        samples = json.load(f)
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            samples.append(json.loads(line))
 
     return samples
 

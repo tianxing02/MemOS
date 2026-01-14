@@ -23,7 +23,11 @@ sys.path.insert(0, EVAL_SCRIPTS_DIR)
 def memos_api_search(client, query, user_id, top_k, frame):
     """Search using memos API."""
     start = time()
-    search_results = client.search(query=query, user_id=user_id, top_k=top_k)
+    readable_cube_ids = [user_id]
+    search_results = client.search(
+        query=query, user_id=user_id, top_k=top_k, readable_cube_ids=readable_cube_ids, mode="fast"
+    )
+    search_results = search_results["data"]
 
     # Extract raw memory texts in the same way as longbench_stx.memos_search
     memories_texts: list[str] = []
@@ -70,8 +74,8 @@ def process_sample(
     )
 
     if not (isinstance(memories_used, list) and any(str(m).strip() for m in memories_used)):
+        print("memories_used:", memories_used)
         return None
-
     result = {
         "sample_idx": sample_idx,
         "_id": sample.get("_id"),
@@ -108,14 +112,18 @@ def load_dataset_from_local():
         "long_bench_v2",
     )
 
-    filepath = os.path.join(data_dir, "data.json")
+    filepath = os.path.join(data_dir, "longbenchv2_train.json")
 
     if not os.path.exists(filepath):
         raise FileNotFoundError(f"Dataset file not found: {filepath}")
 
-    # Load JSON file
+    samples: list[dict] = []
     with open(filepath, encoding="utf-8") as f:
-        samples = json.load(f)
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            samples.append(json.loads(line))
 
     return samples
 

@@ -8,6 +8,8 @@ import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
+import pandas as pd
+
 from dotenv import load_dotenv
 from openai import OpenAI
 from tqdm import tqdm
@@ -183,6 +185,57 @@ def _save_metrics(path: Path, metrics: dict) -> None:
     tmp.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
     os.replace(tmp, path)
 
+    # Also save metrics to xlsx (rows=category, columns=metric)
+    xlsx_path = path.with_suffix(".xlsx")
+    rows: list[dict] = []
+
+    # Overall row
+    rows.append(
+        {
+            "category": "overall",
+            "question_number": metrics.get("count", 0),
+            "accuracy": metrics.get("overall_acc", 0),
+            "avg_prompt_tokens": metrics.get("avg_prompt_tokens", 0),
+            "total_duration_sec": metrics.get("total_duration_sec", 0),
+        }
+    )
+
+    # By difficulty
+    by_diff = metrics.get("by_difficulty") or {}
+    for name in ("easy", "hard"):
+        info = by_diff.get(name) or {}
+        rows.append(
+            {
+                "category": f"difficulty_{name}",
+                "question_number": info.get("count", 0),
+                "accuracy": info.get("acc", 0),
+                "avg_prompt_tokens": None,
+                "total_duration_sec": None,
+            }
+        )
+
+    # By length
+    by_len = metrics.get("by_length") or {}
+    for name in ("short", "medium", "long"):
+        info = by_len.get(name) or {}
+        rows.append(
+            {
+                "category": f"length_{name}",
+                "question_number": info.get("count", 0),
+                "accuracy": info.get("acc", 0),
+                "avg_prompt_tokens": None,
+                "total_duration_sec": None,
+            }
+        )
+
+    df = pd.DataFrame(rows)
+    # Reorder columns
+    cols = ["category", "question_number", "accuracy", "avg_prompt_tokens", "total_duration_sec"]
+    remaining = [c for c in df.columns if c not in cols]
+    df = df[cols + remaining]
+
+    df.to_excel(xlsx_path, index=False)
+
 
 def evaluate_one(oai_client, model_name, row: dict) -> dict:
     question = row.get("question") or ""
@@ -208,7 +261,6 @@ def main() -> None:
         "--lib",
         "-b",
         required=True,
-        choices=["memos", "mem0", "supermemory"],
         help="Product name to evaluate",
     )
     parser.add_argument("--workers", "-w", type=int, default=20, help="Number of parallel threads")

@@ -1,10 +1,10 @@
 #!/bin/bash
 
 # Common parameters for all scripts
-LIB="memos-api"
-VERSION="long-bench-v2-1208-1556-async"
-WORKERS=10
-TOPK=20
+LIB="memos-api-online"
+VERSION="long-bench-v2-0107-async-polar"
+WORKERS=4
+TOPK=30
 MAX_SAMPLES=""  # Empty means all samples
 WAIT_INTERVAL=2   # seconds between polls
 WAIT_TIMEOUT=900  # seconds per user
@@ -52,6 +52,22 @@ echo "  WORKERS: $WORKERS"
 echo "  TOPK: $TOPK"
 echo "  MAX_SAMPLES: ${MAX_SAMPLES:-all}"
 echo ""
+
+# Step 1: Add
+echo ""
+echo "=========================================="
+echo "Step 1: Running longbench_v2_ingestion.py..."
+echo "=========================================="
+python scripts/long_bench-v2/longbench_v2_ingestion.py \
+    --lib $LIB \
+    --version $VERSION \
+    --workers $WORKERS \
+    $MAX_SAMPLES_ARG
+
+if [ $? -ne 0 ]; then
+    echo "Error running longbench_v2_ingestion.py"
+    exit 1
+fi
 
 # Step 2: Search
 echo ""

@@ -51,7 +51,7 @@ def ingest_session(session, user_id, session_id, frame, client):
                     "chat_time": datetime.now().astimezone().isoformat(),
                 }
             )
-        client.add(messages, user_id)
+        client.add(messages=messages, user_id=user_id)
     elif frame == "memu":
         for _idx, msg in enumerate(session):
             messages.append({"role": msg["role"], "content": msg["content"]})
@@ -198,8 +198,8 @@ def main(frame, version, num_workers=2, clear=False):
     print(f"🚀 PERSONAMEM INGESTION - {frame.upper()} v{version}".center(80))
     print("=" * 80)
 
-    question_csv_path = "data/personamem/questions_32k.csv"
-    context_jsonl_path = "data/personamem/shared_contexts_32k.jsonl"
+    question_csv_path = "evaluation/data/personamem/questions_32k.csv"
+    context_jsonl_path = "evaluation/data/personamem/shared_contexts_32k.jsonl"
     total_rows = count_csv_rows(question_csv_path)
 
     print(f"📚 Loaded PersonaMem dataset from {question_csv_path} and {context_jsonl_path}")

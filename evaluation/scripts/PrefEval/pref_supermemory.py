@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import time
+import traceback
 
 import tiktoken
 
@@ -73,6 +74,7 @@ def add_memory_for_line(
         return original_data
 
     except Exception as e:
+        traceback.print_exc()
         print(f"Error adding memory for line {i + 1} (user_id: {user_id}): {e}")
         return None
 
@@ -102,7 +104,7 @@ def search_memory_for_line(line_data: tuple, mem_client, top_k_value: int) -> di
         relevant_memories = mem_client.search(query=question, user_id=user_id, top_k=top_k_value)
         search_memories_duration = time.monotonic() - start_time_search
         memories_str = relevant_memories
-
+        memories_str = "\n".join(memories_str)
         memory_tokens_used = len(tokenizer.encode(memories_str))
 
         metrics_dict.update(
@@ -118,6 +120,7 @@ def search_memory_for_line(line_data: tuple, mem_client, top_k_value: int) -> di
 
     except Exception as e:
         user_id_from_data = json.loads(line).get("user_id", "N/A")
+        traceback.print_exc()
         print(f"Error searching memory for line {i + 1} (user_id: {user_id_from_data}): {e}")
         return None
 
@@ -218,44 +221,7 @@ def main():
         print(f"Error: Input file '{args.input}' not found")
         return
 
-    class SupermemoryClient:
-        def __init__(self):
-            from supermemory import Supermemory
-
-            self.client = Supermemory(api_key=os.getenv("SUPERMEMORY_API_KEY"))
-
-        def add(self, messages, user_id):
-            content = "\n".join([f"{msg['role']}: {msg['content']}" for msg in messages])
-            max_retries = 5
-            for attempt in range(max_retries):
-                try:
-                    self.client.memories.add(content=content, container_tag=user_id)
-                    break
-                except Exception as e:
-                    if attempt < max_retries - 1:
-                        time.sleep(2**attempt)
-                    else:
-                        raise e
-
-        def search(self, query, user_id, top_k):
-            max_retries = 10
-            for attempt in range(max_retries):
-                try:
-                    results = self.client.search.memories(
-                        q=query,
-                        container_tag=user_id,
-                        threshold=0,
-                        rerank=True,
-                        rewrite_query=True,
-                        limit=top_k,
-                    )
-                    context = "\n\n".join([r.memory for r in results.results])
-                    return context
-                except Exception as e:
-                    if attempt < max_retries - 1:
-                        time.sleep(2**attempt)
-                    else:
-                        raise e
+    from evaluation.scripts.utils.client import SupermemoryClient
 
     mem_client = SupermemoryClient()
 

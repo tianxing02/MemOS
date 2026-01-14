@@ -1,6 +1,7 @@
 import argparse
 import os
 import sys
+import traceback
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
@@ -53,7 +54,7 @@ def ingest_session(session, date, user_id, session_id, frame, client):
                     "chat_time": date.isoformat(),
                 }
             )
-        client.add(messages, user_id)
+        client.add(messages=messages, user_id=user_id)
 
     print(
         f"[{frame}] ✅ Session {session_id}: Ingested {len(messages)} messages at {date.isoformat()}"
@@ -122,7 +123,7 @@ def main(frame, version, num_workers=2):
     print(f"🚀 LONGMEMEVAL INGESTION - {frame.upper()} v{version}".center(80))
     print("=" * 80)
 
-    lme_df = pd.read_json("data/longmemeval/longmemeval_s.json")
+    lme_df = pd.read_json("evaluation/data/longmemeval/longmemeval_s.json")
 
     print("📚 Loaded LongMemeval dataset from data/longmemeval/longmemeval_s.json")
     num_multi_sessions = len(lme_df)
@@ -152,6 +153,7 @@ def main(frame, version, num_workers=2):
             try:
                 future.result()
             except Exception as e:
+                traceback.print_exc()
                 print(f"❌ Error processing conversation: {e}")
 
     end_time = datetime.now()
