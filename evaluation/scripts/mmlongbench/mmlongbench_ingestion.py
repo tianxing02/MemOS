@@ -176,8 +176,7 @@ def run_concurrent_add(
             with completed_lock:
                 completed += 1
                 print(
-                    f"[{completed}/{total_files}] ✓ Success: {filename} "
-                    f"({duration * 1000:.0f}ms)"
+                    f"[{completed}/{total_files}] ✓ Success: {filename} ({duration * 1000:.0f}ms)"
                 )
 
             return True, result
@@ -188,9 +187,7 @@ def run_concurrent_add(
 
             with completed_lock:
                 completed += 1
-                print(
-                    f"[{completed}/{total_files}] ✗ Failed: {filename} - {exc!s:.100}"
-                )
+                print(f"[{completed}/{total_files}] ✗ Failed: {filename} - {exc!s:.100}")
 
             return False, str(exc)
 
@@ -204,21 +201,14 @@ def run_concurrent_add(
 
     results: list[dict[str, Any]] = []
     with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = [
-            executor.submit(add_single_file, fn, fn[:-3] + ".pdf")
-            for fn in filenames
-        ]
+        futures = [executor.submit(add_single_file, fn, fn[:-3] + ".pdf") for fn in filenames]
 
         for filename, future in zip(filenames, futures, strict=True):
             try:
                 success, result = future.result()
-                results.append(
-                    {"filename": filename, "success": success, "result": result}
-                )
+                results.append({"filename": filename, "success": success, "result": result})
             except Exception as exc:
-                results.append(
-                    {"filename": filename, "success": False, "result": str(exc)}
-                )
+                results.append({"filename": filename, "success": False, "result": str(exc)})
 
     total_duration = time.time() - start_time
     summary = metrics.summary()

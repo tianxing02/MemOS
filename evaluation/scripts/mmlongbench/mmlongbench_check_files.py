@@ -30,10 +30,7 @@ def _load_added_ids(records_path: Path) -> dict[str, str | None]:
     if not isinstance(added, dict):
         return {}
 
-    return {
-        str(key): str(value) if value is not None else None
-        for key, value in added.items()
-    }
+    return {str(key): str(value) if value is not None else None for key, value in added.items()}
 
 
 def _check_file_status(
@@ -89,15 +86,11 @@ def _reupload_failed_files(
     url_prefix: str,
 ) -> list[dict[str, str | None]]:
     fid_to_filename: dict[str, str] = {
-        str(fid): str(filename)
-        for filename, fid in added_ids.items()
-        if fid
+        str(fid): str(filename) for filename, fid in added_ids.items() if fid
     }
 
     failed_ids = [
-        fid
-        for fid, info in file_status.items()
-        if info.get("status") == "PROCESSING_FAILED"
+        fid for fid, info in file_status.items() if info.get("status") == "PROCESSING_FAILED"
     ]
 
     reupload_results: list[dict[str, str | None]] = []
@@ -215,18 +208,13 @@ def main(argv: list[str] | None = None) -> None:
             added_obj: dict[str, str | None]
             if isinstance(obj.get("added"), dict):
                 added_obj = {
-                    str(k): str(v) if v is not None else None
-                    for k, v in obj["added"].items()
+                    str(k): str(v) if v is not None else None for k, v in obj["added"].items()
                 }
             else:
                 added_obj = dict(added_ids)
 
             for item in reupload_results:
-                if (
-                    item.get("ok") == "true"
-                    and item.get("filename")
-                    and item.get("new_file_id")
-                ):
+                if item.get("ok") == "true" and item.get("filename") and item.get("new_file_id"):
                     added_obj[str(item["filename"])] = str(item["new_file_id"])
 
             obj["added"] = dict(sorted(added_obj.items()))
@@ -247,10 +235,7 @@ def main(argv: list[str] | None = None) -> None:
         "lib": args.lib,
         "version_dir": args.version_dir,
         "total": len(file_ids),
-        "file_detail_list": [
-            {"id": fid, **(file_status.get(fid) or {})}
-            for fid in file_ids
-        ],
+        "file_detail_list": [{"id": fid, **(file_status.get(fid) or {})} for fid in file_ids],
         "reupload_results": reupload_results,
     }
 

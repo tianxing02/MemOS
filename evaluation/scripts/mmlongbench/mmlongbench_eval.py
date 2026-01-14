@@ -98,16 +98,13 @@ def add_images_context(
         return messages
 
     user_idx = next(
-        i for i in range(len(messages) - 1, -1, -1)
-        if messages[i].get("role") == "user"
+        i for i in range(len(messages) - 1, -1, -1) if messages[i].get("role") == "user"
     )
     user_msg = messages[user_idx]
     content = user_msg.get("content", "")
 
     parts: list[dict[str, Any]] = (
-        content
-        if isinstance(content, list)
-        else [{"type": "text", "text": str(content)}]
+        content if isinstance(content, list) else [{"type": "text", "text": str(content)}]
     )
 
     for img_path in image_paths[:6]:

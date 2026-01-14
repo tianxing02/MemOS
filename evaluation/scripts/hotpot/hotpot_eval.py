@@ -62,8 +62,7 @@ def _save_pred(
     tmp_path = pred_path.with_suffix(pred_path.suffix + ".tmp")
 
     safe_pred_answers = {
-        k: v if isinstance(v, str) else "" if v is None else str(v)
-        for k, v in pred_answers.items()
+        k: v if isinstance(v, str) else "" if v is None else str(v) for k, v in pred_answers.items()
     }
 
     obj: dict[str, Any] = {
@@ -239,15 +238,10 @@ def main(argv: list[str] | None = None) -> None:
     if args.max_samples is not None:
         rows = rows[: args.max_samples]
 
-    pending = [
-        row
-        for row in rows
-        if str(row.get("_id")) not in pred_answers
-    ]
+    pending = [row for row in rows if str(row.get("_id")) not in pred_answers]
 
     print(
-        f"[Eval] lib={args.lib} total={len(rows)} "
-        f"pending={len(pending)} workers={args.workers}",
+        f"[Eval] lib={args.lib} total={len(rows)} pending={len(pending)} workers={args.workers}",
     )
 
     if not pending:
@@ -282,10 +276,7 @@ def main(argv: list[str] | None = None) -> None:
                 )
                 raise
 
-        futures = [
-            executor.submit(do_eval, row)
-            for row in pending
-        ]
+        futures = [executor.submit(do_eval, row) for row in pending]
 
         for idx, future in enumerate(
             tqdm(as_completed(futures), total=len(futures), desc="Evaluating"),
@@ -321,8 +312,7 @@ def main(argv: list[str] | None = None) -> None:
     print("=" * 60)
     print(f"Total duration: {total_duration:.2f}s")
     print(
-        f"Success: {summary['counts']['success']} / "
-        f"Failed: {summary['counts']['failed']}",
+        f"Success: {summary['counts']['success']} / Failed: {summary['counts']['failed']}",
     )
 
     if summary["errors"]:
