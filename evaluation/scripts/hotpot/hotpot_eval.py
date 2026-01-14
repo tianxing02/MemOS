@@ -7,6 +7,8 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
+import pandas as pd
+
 from dotenv import load_dotenv
 from openai import OpenAI
 from tqdm import tqdm
@@ -89,6 +91,38 @@ def run_eval(pred_path: Path, gold_path: Path):
             json.dump(new_data, f, indent=2, ensure_ascii=False)
     except Exception as e:
         print(f"Failed to save metrics to {results_path}: {e}")
+
+    # Save metrics to xlsx (rows=category, columns=metric)
+    try:
+        xlsx_path = pred_path.with_name(pred_path.stem + "_metrics.xlsx")
+        rows = []
+        if isinstance(metrics, dict):
+            row = {
+                "category": "overall",
+                "question_number": metrics.get("count"),
+                "em": metrics.get("em"),
+                "f1": metrics.get("f1"),
+                "sp_em": metrics.get("sp_em"),
+                "sp_f1": metrics.get("sp_f1"),
+                "joint_em": metrics.get("joint_em"),
+                "joint_f1": metrics.get("joint_f1"),
+            }
+            # Add other keys if they exist
+            for k, v in metrics.items():
+                if k not in row and k != "count":
+                    row[k] = v
+            rows.append(row)
+        
+        df = pd.DataFrame(rows)
+        # Reorder columns
+        cols = ["category", "question_number", "em", "f1", "sp_em", "sp_f1", "joint_em", "joint_f1"]
+        remaining = [c for c in df.columns if c not in cols]
+        df = df[cols + remaining]
+        
+        df.to_excel(xlsx_path, index=False)
+        print(f"[Eval] Metrics xlsx saved to: {xlsx_path}")
+    except Exception as e:
+        print(f"[Eval] Failed to save metrics xlsx: {e}")
 
 
 def evaluate_one(oai_client, row: dict, chat_model: str) -> tuple[str, str, list]:

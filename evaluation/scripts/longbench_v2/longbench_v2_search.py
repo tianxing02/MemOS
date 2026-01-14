@@ -14,12 +14,17 @@ from evaluation.scripts.utils.metrics import Metrics
 
 
 load_dotenv()
+fastgpt_dataset_id = os.getenv("FASTGPT_DATASET_ID_LONGBENCH_V2")
+memos_knowledgebase_id = os.getenv("MEMOS_KNOWLEDGEBASE_ID_LONGBENCH_V2")
 
 
 def retry_operation(func, *args, retries=5, delay=2, **kwargs):
     for attempt in range(retries):
         try:
-            return func(*args, **kwargs)
+            result = func(*args, **kwargs)
+            if isinstance(result, dict) and "data" in result:
+                return result["data"]
+            return result
         except Exception as e:
             if attempt < retries - 1:
                 func_name = getattr(func, "__name__", "Operation")
@@ -39,9 +44,14 @@ def _get_lib_client(lib: str):
         from evaluation.scripts.utils.client import SupermemoryClient
 
         return SupermemoryClient()
-    from evaluation.scripts.utils.client import MemosApiClient
+    if lib == "fastgpt":
+        from evaluation.scripts.utils.client import FastGPTClient
 
-    return MemosApiClient()
+        return FastGPTClient()
+    if lib == "memos-online":
+        from evaluation.scripts.utils.client import MemosApiOnlineClient
+
+        return MemosApiOnlineClient()
 
 
 def _load_dataset_jsonl(dataset_path: Path) -> list[dict]:
@@ -55,20 +65,46 @@ def _load_dataset_jsonl(dataset_path: Path) -> list[dict]:
     return samples
 
 
-def memos_search(client, user_id: str, query: str, top_k: int = 30) -> list[str]:
-    results = retry_operation(client.search, query=query, user_id=user_id, top_k=top_k)
+def memos_search(client, user_id: str, query: str, top_k: int, search_mode: str) -> list[str]:
+    readable_cube_ids = [user_id]
+    results = retry_operation(
+        client.search,
+        query=query,
+        user_id=user_id,
+        top_k=top_k,
+        readable_cube_ids=readable_cube_ids,
+        mode=search_mode,
+    )
     memories = results["text_mem"][0]["memories"]
     return [m["memory"] for m in memories]
 
 
-def mem0_search(client, user_id: str, query: str, top_k: int = 30) -> list[str]:
+def memos_online_search(client, user_id: str, query: str, top_k: int, mode: str) -> list[str]:
+    results = client.search(
+        query=query,
+        user_id=user_id,
+        top_k=top_k,
+        mode=mode,
+        knowledgebase_ids=[memos_knowledgebase_id],
+    )
+    if "memory_detail_list" in results["data"] and results["data"]["memory_detail_list"]:
+        memories = results["data"]["memory_detail_list"]
+        return [m.get("memory_value", "") for m in memories]
+    return []
+
+
+def mem0_search(client, user_id: str, query: str, top_k: int) -> list[str]:
     res = retry_operation(client.search, query, user_id, top_k)
     results = res.get("results", [])
     return [m.get("memory", "") for m in results if m.get("memory")]
 
 
-def supermemory_search(client, user_id: str, query: str, top_k: int = 30) -> list[str]:
+def supermemory_search(client, user_id: str, query: str, top_k: int) -> list[str]:
     return retry_operation(client.search, query, user_id, top_k)
+
+
+def fastgpt_search(client, query: str, top_k: int) -> list[str]:
+    return retry_operation(client.search, datasetId=fastgpt_dataset_id, query=query, top_k=top_k)
 
 
 def _load_existing_results(output_path: Path) -> tuple[list[dict], set[str]]:
@@ -95,9 +131,9 @@ def _save_json_list(path: Path, rows: list[dict]) -> None:
     os.replace(tmp, path)
 
 
-def search_one(client, sample: dict, lib: str, top_k: int) -> dict:
+def search_one(sample: dict, lib: str, top_k: int, version_dir: str, search_mode: str) -> dict:
     sample_id = str(sample.get("_id"))
-    user_id = sample_id
+    user_id = version_dir + "_" + sample_id
     question = sample.get("question") or ""
     choices = {
         "A": sample.get("choice_A") or "",
@@ -106,12 +142,25 @@ def search_one(client, sample: dict, lib: str, top_k: int) -> dict:
         "D": sample.get("choice_D") or "",
     }
 
+    client = _get_lib_client(lib)
     if lib == "memos":
-        memories = memos_search(client, user_id, str(question), top_k=top_k)
+        memories = memos_search(
+            client, user_id, str(question), top_k=top_k, search_mode=search_mode
+        )
+    elif lib == "memos-online":
+        memories = memos_online_search(
+            client=client,
+            query=str(question),
+            user_id=user_id,
+            top_k=top_k,
+            mode=search_mode,
+        )
     elif lib == "mem0":
         memories = mem0_search(client, user_id, str(question), top_k=top_k)
     elif lib == "supermemory":
         memories = supermemory_search(client, user_id, str(question), top_k=top_k)
+    elif lib == "fastgpt":
+        memories = fastgpt_search(client, str(question), top_k=top_k)
     else:
         memories = []
     print(f"[{lib} Search] sample_id: {sample_id} search memories: {len(memories)}")
@@ -204,8 +253,6 @@ def main() -> None:
     pending = [s for s in dataset if str(s.get("_id")) not in processed_ids]
     if not pending:
         return
-
-    client = _get_lib_client(args.lib)
     metrics = Metrics()
     start_time = time.time()
 
@@ -213,7 +260,7 @@ def main() -> None:
 
         def do_search(sample: dict) -> dict:
             st = time.perf_counter()
-            r = search_one(client, sample, args.lib, args.top_k)
+            r = search_one(sample, args.lib, args.top_k, args.version_dir, args.mode)
             dur = time.perf_counter() - st
             r["duration_ms"] = dur * 1000
             metrics.record(dur, True)
@@ -226,7 +273,7 @@ def main() -> None:
             try:
                 r = f.result()
                 results.append(r)
-                if idx % 10 == 0:
+                if idx % 20 == 0:
                     _save_json_list(output_path, results)
             except Exception as e:
                 metrics.record(0.0, False, str(e))
@@ -239,7 +286,6 @@ def main() -> None:
     total_duration = time.time() - start_time
     summary = metrics.summary()
     combined_obj = {
-        "results": results,
         "perf": {
             "summary": summary,
             "total_duration": total_duration,
@@ -251,6 +297,7 @@ def main() -> None:
                 "mode": args.mode,
             },
         },
+        "results": results,
     }
     tmp = output_path.with_suffix(output_path.suffix + ".tmp")
     tmp.write_text(json.dumps(combined_obj, ensure_ascii=False, indent=2), encoding="utf-8")

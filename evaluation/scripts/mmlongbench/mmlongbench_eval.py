@@ -7,12 +7,14 @@ import sys
 import time
 import traceback
 
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import openai
+import pandas as pd
 
 from dotenv import load_dotenv
 from tqdm import tqdm
@@ -200,28 +202,28 @@ def multimodal_answer(
     oai_client,
     memories: list[str],
     question: str,
-    top_k: int = 15,
     sources: list | None = None,
 ) -> tuple[str, int | None]:
     sources_texts: list[str] = []
-    for source in sources[:top_k]:
-        source = source[0]
-        content = source.get("content") if isinstance(source, dict) else str(source)
-        if content:
-            sources_texts.append(content)
+    for source in sources:
+        if isinstance(source, str):
+            sources_texts.append(source)
+        else:
+            source = source[0]
+            content = source.get("content") if isinstance(source, dict) else str(source)
+            if content:
+                sources_texts.append(content)
 
     image_paths = get_images(sources_texts)
     system_prompt = MMLONGBENCH_ANSWER_PROMPT.format(
-        memories="\n\n".join(memories[:top_k]), question=question
+        memories="\n\n".join(memories), question=question
     )
     messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": question}]
     messages = add_images_context(messages, image_paths)
     for _, msg in enumerate(messages):
         if msg.get("role") == "user" and isinstance(msg.get("content"), list):
             img_count = sum(1 for p in msg["content"] if p.get("type") == "image_url")
-            print(
-                f"DEBUG: user message has {len(memories[:top_k])} memories, {img_count} images attached"
-            )
+            print(f"DEBUG: user message has {len(memories)} memories, {img_count} images attached")
 
     resp = oai_client.chat.completions.create(
         model=args.chat_model, messages=messages, temperature=0
@@ -229,7 +231,7 @@ def multimodal_answer(
     return resp.choices[0].message.content or "", resp.usage.prompt_tokens
 
 
-def process_single_item(item: dict, index: int, top_k: int = 20) -> dict:
+def process_single_item(item: dict, index: int) -> dict:
     """Process a single evaluation item"""
     question = item["question"]
     memories = item.get("memories", [])
@@ -245,7 +247,7 @@ def process_single_item(item: dict, index: int, top_k: int = 20) -> dict:
         }
     try:
         # Get model response
-        response, prompt_tokens = multimodal_answer(oai_client, memories, question, top_k, sources)
+        response, prompt_tokens = multimodal_answer(oai_client, memories, question, sources)
 
         # Extract answer
         extracted_res = extract_answer(question, response)
@@ -292,7 +294,7 @@ def run_eval(
     output_file: str | Path | None = None,
     version_dir: str | Path | None = None,
     max_workers: int = 10,
-    top_k: int = 20,
+    limit: int | None = None
 ) -> None:
     """
     Run evaluation
@@ -311,6 +313,9 @@ def run_eval(
         data = json.load(f)
 
     items = data["results"]
+    if limit:
+        items = items[:limit]
+
     total = len(items)
     print(f"[Info] Starting evaluation, total {total} items, concurrency: {max_workers}")
 
@@ -319,9 +324,7 @@ def run_eval(
     start_time = time.time()
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {
-            executor.submit(process_single_item, item, i, top_k): i for i, item in enumerate(items)
-        }
+        futures = {executor.submit(process_single_item, item, i): i for i, item in enumerate(items)}
 
         # Use tqdm to show progress bar
         with tqdm(
@@ -423,7 +426,103 @@ def run_eval(
     }
     with open(metrics_path, "w", encoding="utf-8") as f:
         json.dump(metrics, f, ensure_ascii=False, indent=2)
-    print(f"[Metrics] Metrics saved to: {metrics_path}")
+
+    # Save metrics to xlsx (rows=category, columns=metric)
+    xlsx_path = metrics_path.with_suffix(".xlsx")
+
+    rows = []
+
+    # Overall
+    rows.append(
+        {
+            "category": "Overall",
+            "accuracy": acc,
+            "f1_score": f1,
+            "question_number": len(eval_results),
+            "avg_score": data["eval_summary"]["avg_score"],
+            "avg_prompt_tokens": data["eval_summary"]["avg_prompt_tokens"],
+            "total_samples": total,
+            "success_count": success_count,
+            "failed_count": failed_count,
+            "eval_duration_seconds": eval_duration,
+        }
+    )
+
+    # Single-page
+    single_page_samples = [sample for sample in eval_results if len(sample["evidence_pages"]) == 1]
+    acc_single_page, _ = eval_acc_and_f1(single_page_samples)
+    rows.append(
+        {
+            "category": "Single-page",
+            "accuracy": acc_single_page,
+            "question_number": len(single_page_samples),
+        }
+    )
+
+    # Cross-page
+    multi_page_samples = [
+        sample
+        for sample in eval_results
+        if len(sample["evidence_pages"]) != 1 and sample["answer"] != "Not answerable"
+    ]
+    acc_multi_page, _ = eval_acc_and_f1(multi_page_samples)
+    rows.append(
+        {
+            "category": "Cross-page",
+            "accuracy": acc_multi_page,
+            "question_number": len(multi_page_samples),
+        }
+    )
+
+    # Unanswerable
+    unanswerable_samples = [
+        sample for sample in eval_results if sample["answer"] == "Not answerable"
+    ]
+    acc_neg, _ = eval_acc_and_f1(unanswerable_samples)
+    rows.append(
+        {
+            "category": "Unanswerable",
+            "accuracy": acc_neg,
+            "question_number": len(unanswerable_samples),
+        }
+    )
+
+    # Evidence Sources and Document Types
+    source_sample_dict = defaultdict(list)
+    document_type_dict = defaultdict(list)
+    for sample in eval_results:
+        for answer_source in sample["evidence_sources"]:
+            source_sample_dict[answer_source].append(sample)
+        document_type_dict[sample["doc_type"]].append(sample)
+
+    for type_name, sub_samples in source_sample_dict.items():
+        sub_acc, _ = eval_acc_and_f1(sub_samples)
+        rows.append(
+            {
+                "category": f"Evidence Sources: {type_name}",
+                "accuracy": sub_acc,
+                "question_number": len(sub_samples),
+            }
+        )
+
+    for type_name, sub_samples in document_type_dict.items():
+        sub_acc, _ = eval_acc_and_f1(sub_samples)
+        rows.append(
+            {
+                "category": f"Document Type: {type_name}",
+                "accuracy": sub_acc,
+                "question_number": len(sub_samples),
+            }
+        )
+
+    df = pd.DataFrame(rows)
+    # Reorder columns to put category first, others follow
+    cols = ["category", "accuracy", "question_number", "f1_score"]
+    remaining_cols = [c for c in df.columns if c not in cols]
+    df = df[cols + remaining_cols]
+
+    df.to_excel(xlsx_path, index=False)
+    print(f"[Metrics] Metrics saved to: {xlsx_path}")
 
 
 if __name__ == "__main__":
@@ -432,11 +531,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="MMlongbench Evaluation Script")
     parser.add_argument("--lib", "-b", required=True, help="Product name to evaluate")
     parser.add_argument("--workers", "-w", type=int, default=20, help="Concurrent workers")
-    parser.add_argument(
-        "--top-k", "-k", type=int, default=20, help="Top K results to use (default: 20)"
-    )
     parser.add_argument("--version-dir", "-v", default=None, help="Version directory name")
     parser.add_argument("--chat-model", "-m", default=None, help="chat model name")
+    parser.add_argument("--limit", "-l", type=int, default=None, help="Limit number of samples to process (for testing, default all)")
 
     args = parser.parse_args()
 
@@ -466,5 +563,5 @@ if __name__ == "__main__":
         output_file=output_path,
         version_dir=version_dir,
         max_workers=args.workers,
-        top_k=args.top_k,
+        limit=args.limit
     )

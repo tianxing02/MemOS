@@ -2,12 +2,36 @@
 
 import argparse
 import json
+import os
 import threading
 import time
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+
+from dotenv import load_dotenv
 
 from evaluation.scripts.utils.metrics import Metrics
+
+
+load_dotenv()
+
+fastgpt_dataset_id = os.getenv("FASTGPT_DATASET_ID_MM_LONGBENCH")
+memos_knowledgebase_id = os.getenv("MEMOS_KNOWLEDGEBASE_ID_MM_LONGBENCH")
+
+
+def retry_operation(func, *args, retries=5, delay=2, **kwargs):
+    for attempt in range(retries):
+        try:
+            return func(*args, **kwargs)
+        except Exception as e:
+            if attempt < retries - 1:
+                func_name = getattr(func, "__name__", "Operation")
+                print(f"[Retry] {func_name} failed: {e}. Retrying in {delay}s...")
+                time.sleep(delay)
+                delay *= 2
+            else:
+                raise e
 
 
 def load_samples(filepath: str) -> list[dict]:
@@ -19,36 +43,54 @@ def load_samples(filepath: str) -> list[dict]:
     return samples
 
 
-def memos_search(
-    client, user_id: str, query: str, top_k: int, mode: str, readable_cube_ids: list[str]
-) -> tuple[list[str], list[str]]:
-    results = client.search(
-        query=query, user_id=user_id, readable_cube_ids=readable_cube_ids, top_k=top_k, mode=mode
+def memos_search(client, user_id: str, query: str, top_k: int, mode: str) -> list[str]:
+    results = retry_operation(
+        client.search,
+        query=query,
+        user_id=user_id,
+        top_k=top_k,
+        mode=mode,
+        knowledgebase_ids=[memos_knowledgebase_id],
     )
-    sources = []
-    if "text_mem" in results["data"] and results["data"]["text_mem"]:
-        memories = results["data"]["text_mem"][0].get("memories", [])
-        sources.extend(
-            m["metadata"].get("sources", []) for m in memories if m["metadata"].get("sources", [])
-        )
-        return [m.get("memory", "") for m in memories], sources
-    return [], []
+    if "memory_detail_list" in results["data"] and results["data"]["memory_detail_list"]:
+        memories = results["data"]["memory_detail_list"]
+        return [m.get("memory_value", "") for m in memories]
+    return []
 
 
-def mem0_search(client, user_id: str, query: str, top_k: int = 15) -> tuple[list[str], list[str]]:
-    res = client.search(query, user_id, top_k)
+def mem0_search(client, user_id: str, query: str, top_k: int) -> tuple[list[str], list[str]]:
+    res = retry_operation(client.search, query, user_id, top_k)
     results = res.get("results", [])
     mem_texts = [m.get("memory", "") for m in results if m.get("memory")]
     return mem_texts, mem_texts
 
 
-def supermemory_search(
-    client, user_id: str, query: str, top_k: int = 15
-) -> tuple[list[str], list[str]]:
-    chunk_list = client.search(query, user_id, top_k)
-    print(chunk_list)
-
+def supermemory_search(client, user_id: str, query: str, top_k: int) -> tuple[list[str], list[str]]:
+    chunk_list = retry_operation(client.search, query, user_id, top_k)
     return chunk_list, chunk_list
+
+
+def fastgpt_search(client, query: str, top_k: int) -> list[str]:
+    result = retry_operation(client.search, datasetId=fastgpt_dataset_id, query=query, top_k=top_k)
+    return [item["q"] for item in result[:top_k]]
+
+
+def _load_existing_results(path: str | os.PathLike[str]) -> tuple[list[dict], set[str]]:
+    p = Path(path)
+    if not p.exists():
+        return [], set()
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        rows: list[dict] = []
+        if isinstance(data, dict) and isinstance(data.get("results"), list):
+            rows = data.get("results") or []
+        elif isinstance(data, list):
+            rows = data
+        success_rows = [r for r in rows if r.get("success") is True]
+        ids = {str(r.get("doc_id")) for r in success_rows if r.get("doc_id")}
+        return success_rows, ids
+    except Exception:
+        return [], set()
 
 
 def _get_lib_client(lib: str):
@@ -64,6 +106,14 @@ def _get_lib_client(lib: str):
         from evaluation.scripts.utils.client import SupermemoryClient
 
         return SupermemoryClient()
+    if lib == "fastgpt":
+        from evaluation.scripts.utils.client import FastGPTClient
+
+        return FastGPTClient()
+    if lib == "memos-online":
+        from evaluation.scripts.utils.client import MemosApiOnlineClient
+
+        return MemosApiOnlineClient()
 
 
 def run_concurrent_search(
@@ -102,17 +152,16 @@ def run_concurrent_search(
         doc_id = sample.get("doc_id", "")
         question = sample.get("question", "")
 
-        user_id = user_prefix + "_" + doc_id
-        readable_cube_ids = [user_id]
+        # user_id = user_prefix + "_" + doc_id
+        user_id = doc_id[:20]
         start_time = time.perf_counter()
         try:
             memories, sources = [], []
-            if lib == "memos":
-                memories, sources = memos_search(
+            if lib == "memos" or lib == "memos-online":
+                memories = memos_search(
                     client=client,
                     query=question,
                     user_id=user_id,
-                    readable_cube_ids=readable_cube_ids,
                     top_k=top_k,
                     mode=mode,
                 )
@@ -120,6 +169,8 @@ def run_concurrent_search(
                 memories, sources = mem0_search(client, user_id, question, top_k=top_k)
             elif lib == "supermemory":
                 memories, sources = supermemory_search(client, user_id, question, top_k=top_k)
+            elif lib == "fastgpt":
+                memories = fastgpt_search(client, question, top_k=top_k)
 
             duration = time.perf_counter() - start_time
             metrics.record(duration, True)
@@ -134,7 +185,6 @@ def run_concurrent_search(
                 "answer_format": sample.get("answer_format", ""),
                 "doc_type": sample.get("doc_type", ""),
                 "memories": memories,
-                "sources": sources,
                 "memory_count": len(memories),
                 "success": True,
                 "duration_ms": duration * 1000,
@@ -273,7 +323,7 @@ def parse_args():
         "--top-k",
         "-k",
         type=int,
-        default=20,
+        default=15,
         help="Number of results to return per search (default: 20)",
     )
 
@@ -317,15 +367,6 @@ def main():
             print("Error: Sample list is empty!")
             return
 
-        # Show first few samples
-        print("First 3 samples:")
-        for sample in samples[:3]:
-            doc_id = sample.get("doc_id", "N/A")
-            question = sample.get("question", "N/A")[:50]
-            print(f"  - {doc_id}: {question}...")
-        if len(samples) > 3:
-            print(f"  ... and {len(samples) - 3} more samples")
-
     except FileNotFoundError:
         print(f"Error: File not found {args.samples_file}")
         return
@@ -336,7 +377,28 @@ def main():
         print(f"Error: Failed to read file - {e}")
         return
 
-    # Execute concurrent search
+    # Determine output file path
+    import os
+
+    output_dir = os.path.join("evaluation/data/mmlongbench", args.version_dir)
+    os.makedirs(output_dir, exist_ok=True)
+    output_filename = f"{args.lib}_search_results.json"
+    output_path = os.path.join(output_dir, output_filename)
+
+    existing_results, processed_ids = _load_existing_results(output_path)
+    if processed_ids:
+        before = len(samples)
+        samples = [s for s in samples if str(s.get("doc_id", "")) not in processed_ids]
+        print(
+            f"[Resume] found {len(processed_ids)} successful samples in checkpoint, "
+            f"skip {before - len(samples)} samples, pending={len(samples)}"
+        )
+
+    if not samples:
+        print("[Search] no pending samples, nothing to do.")
+        return
+
+    # Execute concurrent search only on pending samples
     result = run_concurrent_search(
         lib=args.lib,
         samples=samples,
@@ -346,13 +408,8 @@ def main():
         mode=args.mode,
     )
 
-    # Determine output file path
-    import os
-
-    output_dir = os.path.join("evaluation/data/mmlongbench", args.version_dir)
-    os.makedirs(output_dir, exist_ok=True)
-    output_filename = f"{args.lib}_search_results.json"
-    output_path = os.path.join(output_dir, output_filename)
+    new_results = [r for r in result["results"] if r.get("success")]
+    all_results = existing_results + new_results
 
     # Save results
     output_data = {
@@ -364,7 +421,7 @@ def main():
             "workers": args.workers,
             "top_k": args.top_k,
         },
-        "results": result["results"],
+        "results": all_results,
     }
 
     with open(output_path, "w", encoding="utf-8") as f:
@@ -373,7 +430,7 @@ def main():
     print(f"\nResults saved to: {output_path}")
 
     # Calculate valid results
-    success_results = [r for r in result["results"] if r["success"]]
+    success_results = all_results
     total_memories = sum(r["memory_count"] for r in success_results)
     avg_memories = total_memories / len(success_results) if success_results else 0
     print(f"Average {avg_memories:.1f} memories returned per question")

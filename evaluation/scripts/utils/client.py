@@ -11,6 +11,7 @@ from datetime import datetime
 import requests
 
 from dotenv import load_dotenv
+from typing import Optional
 
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -230,84 +231,84 @@ class MemosApiClient:
 class MemosApiOnlineClient:
     def __init__(self):
         self.memos_url = os.getenv("MEMOS_ONLINE_URL")
-        self.headers = {"Content-Type": "application/json", "Authorization": os.getenv("MEMOS_KEY")}
+        self.headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Token {os.environ['MEMOS_API_KEY']}",
+        }
 
-    def add(self, messages, user_id, conv_id=None, batch_size: int = 9999):
+    def add(
+        self,
+        messages,
+        user_id,
+        writable_cube_ids: list[str],
+        source_type: str,
+        mode: str,
+        async_mode: str,
+    ):
         url = f"{self.memos_url}/add/message"
-        for i in range(0, len(messages), batch_size):
-            batch_messages = messages[i : i + batch_size]
-            payload = json.dumps(
-                {
-                    "messages": batch_messages,
-                    "user_id": user_id,
-                    "conversation_id": conv_id,
-                }
-            )
-
-            max_retries = 5
-            for attempt in range(max_retries):
-                try:
-                    response = requests.request("POST", url, data=payload, headers=self.headers)
-                    assert response.status_code == 200, response.text
-                    assert json.loads(response.text)["message"] == "ok", response.text
-                    break
-                except Exception as e:
-                    if attempt < max_retries - 1:
-                        time.sleep(2**attempt)
-                    else:
-                        raise e
-
-    def search(self, query, user_id, top_k):
-        """Search memories."""
-        url = f"{self.memos_url}/search/memory"
         payload = json.dumps(
             {
-                "query": query,
                 "user_id": user_id,
-                "memory_limit_number": top_k,
-                "mode": os.getenv("SEARCH_MODE", "fast"),
-                "include_preference": True,
-                "pref_top_k": 6,
+                "conversation_id": user_id,
+                "messages": messages,
+                "writable_cube_ids": writable_cube_ids,
+                "info": {"source_type": source_type},
+                "mode": mode,
+                "async_mode": async_mode,
             }
         )
 
-        max_retries = 5
-        for attempt in range(max_retries):
-            try:
-                response = requests.request("POST", url, data=payload, headers=self.headers)
-                assert response.status_code == 200, response.text
-                assert json.loads(response.text)["message"] == "ok", response.text
-                text_mem_res = json.loads(response.text)["data"]["memory_detail_list"]
-                pref_mem_res = json.loads(response.text)["data"]["preference_detail_list"]
-                preference_note = json.loads(response.text)["data"]["preference_note"]
-                for i in text_mem_res:
-                    i.update({"memory": i.pop("memory_value")})
-                explicit_pref_string = "Explicit Preference:"
-                implicit_pref_string = "\n\nImplicit Preference:"
-                explicit_idx = 0
-                implicit_idx = 0
-                for pref in pref_mem_res:
-                    if pref["preference_type"] == "explicit_preference":
-                        explicit_pref_string += f"\n{explicit_idx + 1}. {pref['preference']}"
-                        explicit_idx += 1
-                    if pref["preference_type"] == "implicit_preference":
-                        implicit_pref_string += f"\n{implicit_idx + 1}. {pref['preference']}"
-                        implicit_idx += 1
+        response = requests.request("POST", url, data=payload, headers=self.headers)
+        assert response.status_code == 200, response.text
+        assert json.loads(response.text)["message"] == "ok", response.text
+        return response.json()
 
-                return {
-                    "text_mem": [{"memories": text_mem_res}],
-                    "pref_string": explicit_pref_string + implicit_pref_string + preference_note,
+    def search(self, query: str, user_id: str, top_k: int, mode: str, knowledgebase_ids: list[str]):
+        """Search memories."""
+        url = f"{self.memos_url}/search/memory"
+        data = {
+            "query": query,
+            "user_id": user_id,
+            "memory_limit_number": top_k,
+            "knowledgebase_ids": knowledgebase_ids,
+            "mode": mode,
+        }
+
+        resp = requests.post(url, headers=self.headers, json=data, timeout=60)
+        resp.raise_for_status()
+        return resp.json()
+
+    def upload_file(self, knowledgebase_id: str, file_url: str):
+        """Upload file."""
+        url = f"{self.memos_url}/add/knowledgebase-file"
+        data = {
+            "knowledgebase_id": knowledgebase_id,
+            "file": [
+                {
+                    "content": file_url,
                 }
+            ],
+        }
 
-            except Exception as e:
-                if attempt < max_retries - 1:
-                    time.sleep(2**attempt)
-                else:
-                    raise e
+        resp = requests.post(url, headers=self.headers, json=data, timeout=60)
+        resp.raise_for_status()
+        return resp.json()
+
+    def check_file(self, file_ids: list[str]):
+        """Check file state."""
+        url = f"{self.memos_url}/get/knowledgebase-file"
+        data = {"file_ids": file_ids}
+        resp = requests.post(url, headers=self.headers, json=data, timeout=60)
+        resp.raise_for_status()
+        return resp.json()
 
 
 class SupermemoryClient:
     def __init__(self):
+        from supermemory import Supermemory
+
+        self.client = Supermemory(api_key=os.getenv("SUPERMEMORY_API_KEY"))
+
         self.api_key = os.getenv("SUPERMEMORY_API_KEY")
         if not self.api_key:
             raise ValueError(
@@ -328,7 +329,25 @@ class SupermemoryClient:
             t = f"tag_{t}" if t else "tag_default"
         return t
 
-    def add(self, content: str, user_id: str):
+    def add(self, content: Optional[str] = None, user_id: Optional[str] = None, messages: Optional[list] = None):
+        if messages:
+            content = "\n".join(
+                f"{msg.get('chat_time', '')} {msg.get('role', '')}: {msg.get('content', '')}"
+                for msg in messages
+            )
+
+            max_retries = 5
+            for attempt in range(max_retries):
+                try:
+                    self.client.memories.add(content=content, container_tag=user_id)
+                    break
+                except Exception as e:
+                    if attempt < max_retries - 1:
+                        time.sleep(2**attempt)
+                    else:
+                        raise e
+            return
+
         payload = {
             "content": content,
             "raw": content,
@@ -407,21 +426,124 @@ class MemuClient:
             time.sleep(2)
 
 
+class FastGPTClient:
+    def __init__(self):
+        self.base_url = os.getenv("FASTGPT_BASE_URL")
+        self.api_key = os.getenv("FASTGPT_API_KEY")
+
+    def create_dataset(self, dataset_name: str):
+        # 创建一个知识库
+        url = f"{self.base_url}/core/dataset/create"
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        data = {
+            "name": dataset_name,
+        }
+        resp = requests.post(url, headers=headers, json=data, timeout=30)
+        resp.raise_for_status()
+        datasetId = resp.json()["data"]
+        return datasetId
+
+    def delete_dataset(self, datasetId: str):
+        # 删除特定ID的知识库（每个fastgpt账号创建的知识库数量受限制，因此需要删除测试完毕的知识库再创建新的）
+        url = f"{self.base_url}/core/dataset/delete?id={datasetId}"
+        headers = {"Authorization": f"Bearer {self.api_key}"}
+        resp = requests.delete(url, headers=headers, timeout=30)
+        resp.raise_for_status()
+        return resp.json()
+
+    def add_content(self, datasetId: str, content: str, collection_name: str):
+        url = f"{self.base_url}/core/dataset/collection/create/text"
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        data = {
+            "text": content,
+            "datasetId": datasetId,
+            "name": collection_name,
+            "trainingType": "chunk",
+            "chunkSettingMode": "auto",
+        }
+        resp = requests.post(url, headers=headers, json=data, timeout=60)
+        resp.raise_for_status()
+        return resp.json()
+
+    def upload_file(self, datasetId: str, file_url: str):
+        url = f"{self.base_url}/proApi/core/dataset/collection/create/externalFileUrl"
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        data = {
+            "externalFileUrl": file_url,
+            "externalFileId": file_url,
+            "datasetId": datasetId,
+            "trainingType": "chunk",
+            "chunkSize": 512,
+        }
+        resp = requests.post(url, headers=headers, json=data, timeout=60)
+        resp.raise_for_status()
+        return resp.json()
+
+    def batch_add_content(self, collectionId: str, data: list[str]):
+        # 在集合内部批量添加数据（纯文本形式，其他形式的数据添加参考https://doc.fastgpt.cn/docs/introduction/development/openapi/dataset#%E9%9B%86%E5%90%88）
+        url = f"{self.base_url}/core/dataset/data/pushData"
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        data = {"collectionId": collectionId, "data": [{"q": d} for d in data]}
+        resp = requests.post(url, headers=headers, json=data, timeout=30)
+        resp.raise_for_status()
+        return resp.json()
+
+    def search(self, datasetId: str, query: str, top_k: int):
+        # 在知识库内部进行检索
+        url = f"{self.base_url}/core/dataset/searchTest"
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        data = {"datasetId": datasetId, "text": query, "searchMode": "embedding"}
+        resp = requests.post(url, headers=headers, json=data, timeout=30)
+        resp.raise_for_status()
+
+        result = resp.json()
+        data_list = result["data"]["list"]
+        return data_list
+
+    def create_collection(self, datasetId: str, collection_name: str):
+        # 在知识库内部创建集合
+        url = f"{self.base_url}/core/dataset/collection/create"
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        data = {"datasetId": datasetId, "name": collection_name, "type": "virtual"}
+        resp = requests.post(url, headers=headers, json=data, timeout=30)
+        resp.raise_for_status()
+        collectionId = resp.json()["data"]
+        return collectionId
+
+
 if __name__ == "__main__":
     messages = [
         {"role": "user", "content": "杭州西湖有什么好玩的"},
         {"role": "assistant", "content": "杭州西湖有好多松鼠，还有断桥"},
     ]
-    user_id = "test_user"
+    user_id = "lme_exper_user_default_499"
     iso_date = "2023-05-01T00:00:00.000Z"
     timestamp = 1682899200
     query = "杭州西湖有什么"
     top_k = 5
 
     # MEMOS-API
-    client = MemosApiClient()
+    client = SupermemoryClient()
     for m in messages:
         m["created_at"] = iso_date
-    client.add(messages, user_id, user_id)
+    # client.add(messages, user_id, user_id)
     memories = client.search(query, user_id, top_k)
     print(memories)
