@@ -77,8 +77,8 @@ async def process_qa(frame, qa, search_result, oai_client):
 
 
 async def main(frame, version="default"):
-    search_path = f"results/locomo/{frame}-{version}/{frame}_locomo_search_results.json"
-    response_path = f"results/locomo/{frame}-{version}/{frame}_locomo_responses.json"
+    search_path = f"evaluation/results/locomo/{frame}-{version}/{frame}_locomo_search_results.json"
+    response_path = f"evaluation/results/locomo/{frame}-{version}/{frame}_locomo_responses.json"
 
     load_dotenv()
     oai_client = AsyncOpenAI(

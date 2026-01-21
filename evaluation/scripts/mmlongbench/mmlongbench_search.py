@@ -71,7 +71,7 @@ def supermemory_search(client, user_id: str, query: str, top_k: int) -> tuple[li
 
 
 def fastgpt_search(client, query: str, top_k: int) -> list[str]:
-    result = retry_operation(client.search, datasetId=fastgpt_dataset_id, query=query, top_k=top_k)
+    result = retry_operation(client.search, dataset_id=fastgpt_dataset_id, query=query, top_k=top_k)
     return [item["q"] for item in result[:top_k]]
 
 

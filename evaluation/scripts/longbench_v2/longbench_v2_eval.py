@@ -168,7 +168,7 @@ def _save_json_list(path: Path, rows: list[dict]) -> None:
     os.replace(tmp, path)
 
 
-def _save_metrics(path: Path, metrics: dict) -> None:
+def _save_metrics(path: Path, metrics: dict, lib_name: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     obj = {"results": []}
     if path.exists():
@@ -185,56 +185,25 @@ def _save_metrics(path: Path, metrics: dict) -> None:
     tmp.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
     os.replace(tmp, path)
 
-    # Also save metrics to xlsx (rows=category, columns=metric)
+    # Also save metrics to xlsx
     xlsx_path = path.with_suffix(".xlsx")
-    rows: list[dict] = []
 
-    # Overall row
-    rows.append(
-        {
-            "category": "overall",
-            "question_number": metrics.get("count", 0),
-            "accuracy": metrics.get("overall_acc", 0),
-            "avg_prompt_tokens": metrics.get("avg_prompt_tokens", 0),
-            "total_duration_sec": metrics.get("total_duration_sec", 0),
-        }
-    )
+    by_diff = metrics.get("by_difficulty", {})
+    by_len = metrics.get("by_length", {})
 
-    # By difficulty
-    by_diff = metrics.get("by_difficulty") or {}
-    for name in ("easy", "hard"):
-        info = by_diff.get(name) or {}
-        rows.append(
-            {
-                "category": f"difficulty_{name}",
-                "question_number": info.get("count", 0),
-                "accuracy": info.get("acc", 0),
-                "avg_prompt_tokens": None,
-                "total_duration_sec": None,
-            }
-        )
+    row_data = {
+        "Model": lib_name,
+        "Easy (%)": by_diff.get("easy", {}).get("acc", 0),
+        "Hard (%)": by_diff.get("hard", {}).get("acc", 0),
+        "Short (%)": by_len.get("short", {}).get("acc", 0),
+        "Medium (%)": by_len.get("medium", {}).get("acc", 0),
+        "Long (%)": by_len.get("long", {}).get("acc", 0),
+        "Overall (%)": metrics.get("overall_acc", 0),
+    }
 
-    # By length
-    by_len = metrics.get("by_length") or {}
-    for name in ("short", "medium", "long"):
-        info = by_len.get(name) or {}
-        rows.append(
-            {
-                "category": f"length_{name}",
-                "question_number": info.get("count", 0),
-                "accuracy": info.get("acc", 0),
-                "avg_prompt_tokens": None,
-                "total_duration_sec": None,
-            }
-        )
-
-    df = pd.DataFrame(rows)
-    # Reorder columns
-    cols = ["category", "question_number", "accuracy", "avg_prompt_tokens", "total_duration_sec"]
-    remaining = [c for c in df.columns if c not in cols]
-    df = df[cols + remaining]
-
+    df = pd.DataFrame([row_data])
     df.to_excel(xlsx_path, index=False)
+    print(f"[Metrics] Metrics saved to: {xlsx_path}")
 
 
 def evaluate_one(oai_client, model_name, row: dict) -> dict:
@@ -307,7 +276,7 @@ def main() -> None:
     print(f"[Eval] total={len(search_rows)} pending={len(pending)} workers={args.workers}")
     if not pending:
         metrics = print_metrics(results, time.time() - start_time)
-        _save_metrics(output_path, metrics)
+        _save_metrics(output_path, metrics, args.lib)
         return
 
     print("[Response model]: ", args.chat_model)
@@ -334,7 +303,7 @@ def main() -> None:
     _save_json_list(output_path, results)
     print(f"Saved {len(results)} results to {output_path}")
     metrics = print_metrics(results, time.time() - start_time)
-    _save_metrics(output_path, metrics)
+    _save_metrics(output_path, metrics, args.lib)
 
 
 if __name__ == "__main__":

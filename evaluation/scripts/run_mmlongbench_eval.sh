@@ -6,15 +6,15 @@ cd "$ROOT_DIR"
 export PYTHONPATH="$ROOT_DIR"
 
 # Common parameters
-LIB="memos-online"
+LIB="fastgpt"
 WORKERS=5
 TOPK=15
 ADD_MODE="fine"
 SEARCH_MODE="fine"
-VERSION_DIR="mmlongbench_fastgpt_0114_03"
+VERSION_DIR="mmlongbench_fastgpt_0119_01"
 ASYNC_MODE="sync"
 CHAT_MODEL="gpt-4o-mini"
-LIMIT=10
+LIMIT=5
 
 # Add / Ingestion
 # echo "Running mmlongbench_ingestion.py..."
@@ -39,7 +39,7 @@ LIMIT=10
 #   --workers "$WORKERS" \
 #   --version-dir "$VERSION_DIR" \
 #   --top-k "$TOPK" \
-#   --mode "$SEARCH_MODE"
+#   --mode "$SEARCH_MODE" \
 #   # --limit "$LIMIT"
 
 # Eval
@@ -49,5 +49,6 @@ python -m evaluation.scripts.mmlongbench.mmlongbench_eval \
   --version-dir "$VERSION_DIR" \
   --workers "$WORKERS" \
   --chat-model "$CHAT_MODEL" \
+  --limit "$LIMIT"
 
 # echo "All scripts completed successfully!"

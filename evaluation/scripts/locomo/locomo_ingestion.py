@@ -167,16 +167,16 @@ def process_user(conv_idx, frame, locomo_df, version, success_records, f):
 
 def main(frame, version="default", num_workers=4):
     load_dotenv()
-    locomo_df = pd.read_json("data/locomo/locomo10.json")
+    locomo_df = pd.read_json("evaluation/data/locomo/locomo10.json")
     num_users = 10
     start_time = time.time()
     total_time = 0
     print(
         f"Starting processing for {num_users} users in serial mode, each user using {num_workers} workers for sessions..."
     )
-    os.makedirs(f"results/locomo/{frame}-{version}/", exist_ok=True)
+    os.makedirs(f"evaluation/results/locomo/{frame}-{version}/", exist_ok=True)
     success_records = []
-    record_file = f"results/locomo/{frame}-{version}/success_records.txt"
+    record_file = f"evaluation/results/locomo/{frame}-{version}/success_records.txt"
     if os.path.exists(record_file):
         with open(record_file) as f:
             for i in f.readlines():

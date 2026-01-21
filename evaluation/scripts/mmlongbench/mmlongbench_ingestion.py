@@ -87,13 +87,11 @@ def run_concurrent_add(
     def add_single_file(filename: str, doc_id: str = ""):
         nonlocal completed
 
-        file_id = filename  # 文件名作为file_id
         file_url = f"{url_prefix.rstrip('/')}/{filename}"  # URL前缀 + 文件名
-
         base_dir = Path("ppt_test_result")
         all_md_files = list(base_dir.rglob("*.md"))
-        stem = Path(file_id).stem.lower()
-        name = file_id.lower()
+        stem = Path(filename).stem.lower()
+        name = filename.lower()
         md_path = ""
         for md in all_md_files:
             pstr = str(md).lower()
@@ -120,9 +118,10 @@ def run_concurrent_add(
                     added_ids[filename] = file_id
             elif lib == "fastgpt":
                 result = retry_operation(
-                    client.upload_file, datasetId=fastgpt_dataset_id, file_url=file_url
+                    client.upload_file, dataset_id=fastgpt_dataset_id, file_url=file_url
                 )
-
+                file_id = result["data"]["collectionId"]
+                added_ids[filename] = file_id
             elif lib == "supermemory":
                 result = client.add(content=text, user_id=user_id)
             elif lib == "mem0":

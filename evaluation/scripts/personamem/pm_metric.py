@@ -375,9 +375,9 @@ if __name__ == "__main__":
     lib, version = args.lib, args.version
 
     # Define file paths
-    responses_path = f"results/pm/{lib}-{version}/{lib}_pm_responses.json"
-    grade_path = f"results/pm/{lib}-{version}/{lib}_pm_grades.json"
-    output_path = f"results/pm/{lib}-{version}/{lib}_pm_results.xlsx"
+    responses_path = f"evaluation/results/pm/{lib}-{version}/{lib}_pm_responses.json"
+    grade_path = f"evaluation/results/pm/{lib}-{version}/{lib}_pm_grades.json"
+    output_path = f"evaluation/results/pm/{lib}-{version}/{lib}_pm_results.xlsx"
 
     print(f"📂 Loading response data from: {responses_path}")
 

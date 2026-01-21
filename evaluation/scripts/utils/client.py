@@ -239,30 +239,33 @@ class MemosApiOnlineClient:
         self,
         messages,
         user_id,
-        writable_cube_ids: list[str],
-        source_type: str,
-        mode: str,
-        async_mode: str,
+        conv_id,
+        batch_size: int = 2,
+        mode: str = "fine",
+        async_mode: str = "async",
     ):
         url = f"{self.memos_url}/add/message"
-        payload = json.dumps(
-            {
-                "user_id": user_id,
-                "conversation_id": user_id,
-                "messages": messages,
-                "writable_cube_ids": writable_cube_ids,
-                "info": {"source_type": source_type},
-                "mode": mode,
-                "async_mode": async_mode,
-            }
-        )
+        for i in range(0, len(messages), batch_size):
+            batch_messages = messages[i : i + batch_size]
+            payload = json.dumps(
+                {
+                    "user_id": user_id,
+                    "conversation_id": conv_id,
+                    "messages": batch_messages,
+                    "mode": mode,
+                    "async_mode": async_mode,
+                }
+            )
+            requests.request("POST", url, data=payload, headers=self.headers)
 
-        response = requests.request("POST", url, data=payload, headers=self.headers)
-        assert response.status_code == 200, response.text
-        assert json.loads(response.text)["message"] == "ok", response.text
-        return response.json()
-
-    def search(self, query: str, user_id: str, top_k: int, mode: str, knowledgebase_ids: list[str]):
+    def search(
+        self,
+        query: str,
+        user_id: str,
+        top_k: int,
+        mode: str = "fast",
+        knowledgebase_ids: list[str] | None = None,
+    ):
         """Search memories."""
         url = f"{self.memos_url}/search/memory"
         data = {

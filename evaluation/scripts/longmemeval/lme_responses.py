@@ -77,8 +77,8 @@ def main(frame, version, num_workers=4):
 
     print(f"🔌 Using OpenAI client with model: {os.getenv('CHAT_MODEL')}")
 
-    search_path = f"results/lme/{frame}-{version}/{frame}_lme_search_results.json"
-    response_path = f"results/lme/{frame}-{version}/{frame}_lme_responses.json"
+    search_path = f"evaluation/results/lme/{frame}-{version}/{frame}_lme_search_results.json"
+    response_path = f"evaluation/results/lme/{frame}-{version}/{frame}_lme_responses.json"
 
     print(f"📂 Loading search results from: {search_path}")
     with open(search_path) as file:

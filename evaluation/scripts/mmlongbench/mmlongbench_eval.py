@@ -427,101 +427,95 @@ def run_eval(
     with open(metrics_path, "w", encoding="utf-8") as f:
         json.dump(metrics, f, ensure_ascii=False, indent=2)
 
-    # Save metrics to xlsx (rows=category, columns=metric)
     xlsx_path = metrics_path.with_suffix(".xlsx")
 
-    rows = []
+    import ast
 
-    # Overall
-    rows.append(
-        {
-            "category": "Overall",
-            "accuracy": acc,
-            "f1_score": f1,
-            "question_number": len(eval_results),
-            "avg_score": data["eval_summary"]["avg_score"],
-            "avg_prompt_tokens": data["eval_summary"]["avg_prompt_tokens"],
-            "total_samples": total,
-            "success_count": success_count,
-            "failed_count": failed_count,
-            "eval_duration_seconds": eval_duration,
-        }
-    )
+    def parse_list(s):
+        if isinstance(s, list):
+            return s
+        try:
+            return ast.literal_eval(s)
+        except (ValueError, SyntaxError):
+            return []
 
-    # Single-page
-    single_page_samples = [sample for sample in eval_results if len(sample["evidence_pages"]) == 1]
-    acc_single_page, _ = eval_acc_and_f1(single_page_samples)
-    rows.append(
-        {
-            "category": "Single-page",
-            "accuracy": acc_single_page,
-            "question_number": len(single_page_samples),
-        }
-    )
+    # Evidence Sources
+    source_sample_dict = defaultdict(list)
+    for sample in eval_results:
+        sources = parse_list(sample.get("evidence_sources", "[]"))
+        for answer_source in sources:
+            source_sample_dict[answer_source].append(sample)
 
-    # Cross-page
+    # Calculate accuracies for specific categories
+    def get_acc(samples):
+        if not samples:
+            return 0
+        acc, _ = eval_acc_and_f1(samples)
+        return acc
+
+    acc_txt = get_acc(source_sample_dict.get("Pure-text (Plain-text)", []))
+    acc_lay = get_acc(source_sample_dict.get("Generalized-text (Layout)", []))
+    acc_cha = get_acc(source_sample_dict.get("Chart", []))
+    acc_tab = get_acc(source_sample_dict.get("Table", []))
+    acc_fig = get_acc(source_sample_dict.get("Figure", []))
+
+    # Pages
+    single_page_samples = [
+        sample
+        for sample in eval_results
+        if len(parse_list(sample.get("evidence_pages", "[]"))) == 1
+    ]
+    acc_sin = get_acc(single_page_samples)
+
     multi_page_samples = [
         sample
         for sample in eval_results
-        if len(sample["evidence_pages"]) != 1 and sample["answer"] != "Not answerable"
+        if len(parse_list(sample.get("evidence_pages", "[]"))) > 1
+        and sample["answer"] != "Not answerable"
     ]
-    acc_multi_page, _ = eval_acc_and_f1(multi_page_samples)
-    rows.append(
-        {
-            "category": "Cross-page",
-            "accuracy": acc_multi_page,
-            "question_number": len(multi_page_samples),
-        }
-    )
+    acc_mul = get_acc(multi_page_samples)
 
-    # Unanswerable
     unanswerable_samples = [
         sample for sample in eval_results if sample["answer"] == "Not answerable"
     ]
-    acc_neg, _ = eval_acc_and_f1(unanswerable_samples)
-    rows.append(
-        {
-            "category": "Unanswerable",
-            "accuracy": acc_neg,
-            "question_number": len(unanswerable_samples),
-        }
-    )
+    acc_una = get_acc(unanswerable_samples)
 
-    # Evidence Sources and Document Types
-    source_sample_dict = defaultdict(list)
-    document_type_dict = defaultdict(list)
-    for sample in eval_results:
-        for answer_source in sample["evidence_sources"]:
-            source_sample_dict[answer_source].append(sample)
-        document_type_dict[sample["doc_type"]].append(sample)
+    template_path = Path("evaluation/data/MMLongbench.xlsx")
+    if template_path.exists():
+        pd.read_excel(template_path)
 
-    for type_name, sub_samples in source_sample_dict.items():
-        sub_acc, _ = eval_acc_and_f1(sub_samples)
-        rows.append(
-            {
-                "category": f"Evidence Sources: {type_name}",
-                "accuracy": sub_acc,
-                "question_number": len(sub_samples),
-            }
-        )
+    columns = [
+        "Model",
+        "TXT",
+        "LAY",
+        "CHA",
+        "TAB",
+        "FIG",
+        "SIN",
+        "MUL",
+        "UNA",
+        "ACC",
+        "F1",
+        "avg tokens",
+    ]
 
-    for type_name, sub_samples in document_type_dict.items():
-        sub_acc, _ = eval_acc_and_f1(sub_samples)
-        rows.append(
-            {
-                "category": f"Document Type: {type_name}",
-                "accuracy": sub_acc,
-                "question_number": len(sub_samples),
-            }
-        )
+    row_values = [
+        args.lib,
+        acc_txt,
+        acc_lay,
+        acc_cha,
+        acc_tab,
+        acc_fig,
+        acc_sin,
+        acc_mul,
+        acc_una,
+        acc,
+        f1,
+        data["eval_summary"]["avg_prompt_tokens"],
+    ]
 
-    df = pd.DataFrame(rows)
-    # Reorder columns to put category first, others follow
-    cols = ["category", "accuracy", "question_number", "f1_score"]
-    remaining_cols = [c for c in df.columns if c not in cols]
-    df = df[cols + remaining_cols]
-
-    df.to_excel(xlsx_path, index=False)
+    df_out = pd.DataFrame([row_values], columns=columns)
+    df_out.to_excel(xlsx_path, index=False)
     print(f"[Metrics] Metrics saved to: {xlsx_path}")
 
 

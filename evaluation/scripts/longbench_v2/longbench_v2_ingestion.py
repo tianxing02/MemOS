@@ -152,7 +152,7 @@ def ingest_context(
         file_id = result["data"][0]["id"]
     if lib == "fastgpt":
         result = retry_operation(
-            client.upload_file, datasetId=fastgpt_dataset_id, file_url=file_url
+            client.upload_file, dataset_id=fastgpt_dataset_id, file_url=file_url
         )
         file_id = result["data"]["collectionId"]
     if lib == "mem0":

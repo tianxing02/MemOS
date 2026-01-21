@@ -7,14 +7,14 @@ export PYTHONPATH="$ROOT_DIR"
 
 # Common parameters
 LIB="fastgpt"
-WORKERS=20
+WORKERS=2
 TOPK=7
 ADD_MODE="fine"
 SEARCH_MODE="fine"
-VERSION_DIR="hotpot_fastgpt_0114"
+VERSION_DIR="hotpot_fastgpt_0119"
 ASYNC_MODE="sync"
 CHAT_MODEL="gpt-4o-mini"
-LIMIT=1000
+LIMIT=10
 
 # Add / Ingestion
 echo "Running hotpot_ingestion.py..."
@@ -24,7 +24,7 @@ python -m evaluation.scripts.hotpot.hotpot_ingestion \
   --version-dir "$VERSION_DIR" \
   --mode "$ADD_MODE" \
   --async-mode "$ASYNC_MODE" \
-  --limit "$LIMIT"
+  # --limit "$LIMIT"
 
 # #check
 # echo "Running hotpot_check_files.py..."

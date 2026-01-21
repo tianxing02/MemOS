@@ -30,7 +30,7 @@ def ingest_session(session, date, user_id, session_id, frame, client):
                 }
             )
         client.add(messages, user_id, batch_size=2)
-    elif "memos-api" in frame:
+    elif "memos-api" in frame or "memos-api-online" in frame:
         for msg in session:
             messages.append(
                 {
@@ -131,9 +131,9 @@ def main(frame, version, num_workers=2):
     print("-" * 80)
 
     start_time = datetime.now()
-    os.makedirs(f"results/lme/{frame}-{version}/", exist_ok=True)
+    os.makedirs(f"evaluation/results/lme/{frame}-{version}/", exist_ok=True)
     success_records = []
-    record_file = f"results/lme/{frame}-{version}/success_records.txt"
+    record_file = f"evaluation/results/lme/{frame}-{version}/success_records.txt"
     if os.path.exists(record_file):
         with open(record_file) as f:
             for i in f.readlines():

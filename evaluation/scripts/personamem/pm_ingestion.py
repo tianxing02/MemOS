@@ -187,8 +187,8 @@ def ingest_conv(row_data, context, version, conv_idx, frame, success_records, f)
 
 
 def main(frame, version, num_workers=2, clear=False):
-    os.makedirs(f"results/pm/{frame}-{version}/", exist_ok=True)
-    record_file = f"results/pm/{frame}-{version}/success_records.txt"
+    os.makedirs(f"evaluation/results/pm/{frame}-{version}/", exist_ok=True)
+    record_file = f"evaluation/results/pm/{frame}-{version}/success_records.txt"
 
     if clear and os.path.exists(record_file):
         os.remove(record_file)

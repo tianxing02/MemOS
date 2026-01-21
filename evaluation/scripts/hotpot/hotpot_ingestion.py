@@ -2,6 +2,7 @@ import argparse
 import json
 import os
 import time
+import traceback
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -15,6 +16,7 @@ from evaluation.scripts.utils.metrics import Metrics
 
 load_dotenv()
 memos_knowledgebase_id = os.getenv("MEMOS_KNOWLEDGEBASE_ID_HOTPOT")
+fastgpt_dataset_id = os.getenv("FASTGPT_DATASET_ID_HOTPOT")
 
 
 def retry_operation(func, *args, retries=5, delay=2, **kwargs):
@@ -22,6 +24,7 @@ def retry_operation(func, *args, retries=5, delay=2, **kwargs):
         try:
             return func(*args, **kwargs)
         except Exception as e:
+            traceback.print_exc()
             if attempt < retries - 1:
                 func_name = getattr(func, "__name__", "Operation")
                 print(f"[Retry] {func_name} failed: {e}. Retrying in {delay}s...")
@@ -44,9 +47,14 @@ def _get_lib_client(lib: str):
         from evaluation.scripts.utils.client import MemosApiOnlineClient
 
         return MemosApiOnlineClient()
-    from evaluation.scripts.utils.client import MemosApiClient
+    if lib == "fastgpt":
+        from evaluation.scripts.utils.client import FastGPTClient
 
-    return MemosApiClient()
+        return FastGPTClient()
+    if lib == "memos":
+        from evaluation.scripts.utils.client import MemosApiClient
+
+        return MemosApiClient()
 
 
 def _load_added_ids(records_path: Path) -> dict[str, str | None]:
@@ -132,9 +140,9 @@ def add_context_memories(
         return None
 
     file_id = None
+    file_url = f"{url_prefix.rstrip('/')}/{user_id}_context.txt"
 
     if lib == "memos-online":
-        file_url = f"{url_prefix.rstrip('/')}/{user_id}_context.txt"
         result = retry_operation(
             client.upload_file,
             memos_knowledgebase_id,
@@ -154,6 +162,11 @@ def add_context_memories(
             mode=mode,
             async_mode=async_mode,
         )
+    if lib == "fastgpt":
+        result = retry_operation(
+            client.upload_file, dataset_id=fastgpt_dataset_id, file_url=file_url
+        )
+        file_id = result["data"]["collectionId"]
 
     if lib == "mem0":
         ts = int(time.time())
@@ -244,10 +257,7 @@ def main(argv: list[str] | None = None) -> None:
             try:
                 sid, fid = f.result()
                 if sid:
-                    if args.lib == "memos-online":
-                        added_ids[sid] = str(fid) if fid else None
-                    else:
-                        added_ids.setdefault(sid, None)
+                    added_ids[sid] = str(fid) if fid else None
 
                     if len(added_ids) % 20 == 0:
                         _save_added_ids(records_path, added_ids)

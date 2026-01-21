@@ -254,9 +254,10 @@ def process_user(row_data, conv_idx, frame, version, top_k=20):
         }
     )
 
-    os.makedirs(f"results/pm/{frame}-{version}/tmp", exist_ok=True)
+    os.makedirs(f"evaluation/results/pm/{frame}-{version}/tmp", exist_ok=True)
     with open(
-        f"results/pm/{frame}-{version}/tmp/{frame}_pm_search_results_{conv_idx}.json", "w"
+        f"evaluation/results/pm/{frame}-{version}/tmp/{frame}_pm_search_results_{conv_idx}.json",
+        "w",
     ) as f:
         json.dump(search_results, f, indent=4)
     print(f"💾 Search results for conversation {conv_idx} saved...")
@@ -266,7 +267,9 @@ def process_user(row_data, conv_idx, frame, version, top_k=20):
 
 
 def load_existing_results(frame, version, group_idx):
-    result_path = f"results/pm/{frame}-{version}/tmp/{frame}_pm_search_results_{group_idx}.json"
+    result_path = (
+        f"evaluation/results/pm/{frame}-{version}/tmp/{frame}_pm_search_results_{group_idx}.json"
+    )
     if os.path.exists(result_path):
         try:
             with open(result_path) as f:
@@ -328,9 +331,11 @@ def main(frame, version, top_k=20, num_workers=2):
     print(f"⏱️  Total time taken to search {total_rows} users: {elapsed_time_str}")
     print(f"🔄 Framework: {frame} | Version: {version} | Workers: {num_workers}")
 
-    with open(f"results/pm/{frame}-{version}/{frame}_pm_search_results.json", "w") as f:
+    with open(f"evaluation/results/pm/{frame}-{version}/{frame}_pm_search_results.json", "w") as f:
         json.dump(dict(all_search_results), f, indent=4)
-    print(f"📁 Results saved to: mresults/pm/{frame}-{version}/{frame}_pm_search_results.json")
+    print(
+        f"📁 Results saved to: mevaluation/results/pm/{frame}-{version}/{frame}_pm_search_results.json"
+    )
     print("=" * 80 + "\n")
 
 

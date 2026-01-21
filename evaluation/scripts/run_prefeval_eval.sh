@@ -11,8 +11,8 @@ WORKERS=5
 # Parameters for pref_memos.py
 TOP_K=10
 ADD_TURN=10  # Options: 0, 10, or 300
-LIB="supermemory"  # Options: memos-api, memos-api-online, mem0, mem0-graph, memobase, supermemory, memu, zep
-VERSION="default_10_turn"
+LIB="memos-api-online"  # Options: memos-api, memos-api-online, mem0, mem0-graph, memobase, supermemory, memu, zep
+VERSION="default_memos_10_turn"
 
 # --- File Paths ---
 # You may need to adjust these paths based on your project structure.
@@ -20,7 +20,7 @@ VERSION="default_10_turn"
 PREPROCESSED_FILE="evaluation/data/prefeval/pref_processed.jsonl"
 
 # Create a directory name based on the *specific* LIB (e.g., "memos")
-OUTPUT_DIR="results/prefeval/${LIB}_${VERSION}"
+OUTPUT_DIR="evaluation/results/prefeval/${LIB}_${VERSION}"
 
 
 if [[ "$LIB" == *"mem0"* ]]; then

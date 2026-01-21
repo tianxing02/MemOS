@@ -104,7 +104,7 @@ def supermemory_search(client, user_id: str, query: str, top_k: int) -> list[str
 
 
 def fastgpt_search(client, query: str, top_k: int) -> list[str]:
-    return retry_operation(client.search, datasetId=fastgpt_dataset_id, query=query, top_k=top_k)
+    return retry_operation(client.search, dataset_id=fastgpt_dataset_id, query=query, top_k=top_k)
 
 
 def _load_existing_results(output_path: Path) -> tuple[list[dict], set[str]]:

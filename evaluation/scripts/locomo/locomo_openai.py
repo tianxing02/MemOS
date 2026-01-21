@@ -154,8 +154,8 @@ class OpenAIPredict:
 
 
 def main(version):
-    os.makedirs(f"results/locomo/openai-{version}/", exist_ok=True)
-    output_file_path = f"results/locomo/openai-{version}/openai_locomo_responses.json"
+    os.makedirs(f"evaluation/results/locomo/openai-{version}/", exist_ok=True)
+    output_file_path = f"evaluation/results/locomo/openai-{version}/openai_locomo_responses.json"
     openai_predict = OpenAIPredict()
     openai_predict.process_data_file("data/locomo/locomo10.json", output_file_path)
 
