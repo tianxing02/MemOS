@@ -85,7 +85,7 @@ async def main(frame, version="default"):
         api_key=os.getenv("CHAT_MODEL_API_KEY"), base_url=os.getenv("CHAT_MODEL_BASE_URL")
     )
 
-    locomo_df = pd.read_json("data/locomo/locomo10.json")
+    locomo_df = pd.read_json("evaluation/data/locomo/locomo10.json")
     with open(search_path) as file:
         locomo_search_results = json.load(file)
 

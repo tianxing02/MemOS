@@ -3,6 +3,7 @@ import os
 import re
 import sys
 import time
+import traceback
 import uuid
 
 from contextlib import suppress
@@ -15,6 +16,35 @@ from dotenv import load_dotenv
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 load_dotenv()
+
+
+def retry_operation(func, *args, retries=5, delay=2, **kwargs):
+    for attempt in range(retries):
+        try:
+            return func(*args, **kwargs)
+        except Exception as e:
+            traceback.print_exc()
+            if attempt < retries - 1:
+                func_name = getattr(func, "__name__", "Operation")
+                print(f"[Retry] {func_name} failed: {e}. Retrying in {delay}s...")
+                time.sleep(delay)
+                delay *= 2
+            else:
+                raise e
+
+
+def get_lib_client(lib: str):
+    if lib == "mem0":
+        return Mem0Client(enable_graph=False)
+    if lib == "supermemory":
+        return SupermemoryClient()
+    if lib == "memos-api-online":
+        return MemosApiOnlineClient()
+    if lib == "fastgpt":
+        return FastGPTClient()
+    if lib == "memos":
+        return MemosApiClient()
+    raise ValueError(f"Unknown library: {lib}")
 
 
 class ZepClient:
@@ -252,11 +282,10 @@ class MemosApiOnlineClient:
                     "user_id": user_id,
                     "conversation_id": conv_id,
                     "messages": batch_messages,
-                    "mode": mode,
-                    "async_mode": async_mode,
                 }
             )
-            requests.request("POST", url, data=payload, headers=self.headers)
+            resp = requests.request("POST", url, data=payload, headers=self.headers)
+            resp.raise_for_status()
 
     def search(
         self,
@@ -275,8 +304,8 @@ class MemosApiOnlineClient:
             "knowledgebase_ids": knowledgebase_ids,
             "mode": mode,
         }
-
         resp = requests.post(url, headers=self.headers, json=data, timeout=60)
+        print("search results:", resp.json())
         resp.raise_for_status()
         return resp.json()
 
@@ -291,8 +320,8 @@ class MemosApiOnlineClient:
                 }
             ],
         }
-
         resp = requests.post(url, headers=self.headers, json=data, timeout=60)
+        print(resp.json())
         resp.raise_for_status()
         return resp.json()
 
@@ -487,6 +516,7 @@ class FastGPTClient:
             "chunkSize": 512,
         }
         resp = requests.post(url, headers=headers, json=data, timeout=60)
+        print(resp.json())
         resp.raise_for_status()
         return resp.json()
 
@@ -509,8 +539,8 @@ class FastGPTClient:
         }
         data = {"datasetId": dataset_id, "text": query, "searchMode": "embedding"}
         resp = requests.post(url, headers=headers, json=data, timeout=30)
-        resp.raise_for_status()
 
+        resp.raise_for_status()
         result = resp.json()
         data_list = result["data"]["list"]
         return data_list

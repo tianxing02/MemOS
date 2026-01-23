@@ -16,6 +16,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 def ingest_session(session, user_id, session_id, frame, client):
     messages = []
+
     if frame == "zep":
         pass
     elif "mem0" in frame:
@@ -27,7 +28,7 @@ def ingest_session(session, user_id, session_id, frame, client):
         timestamp_add = int(time.time() * 100)
         client.add(messages=messages, user_id=user_id, timestamp=timestamp_add, batch_size=10)
         print(f"[{frame}] ✅ Session [{session_id}]: Ingested {len(messages)} messages")
-    elif frame == "memos-api":
+    elif frame == "memos-api" or frame == "memos-api-online":
         client.add(messages=session, user_id=user_id, conv_id=session_id, batch_size=10)
         print(f"[{frame}] ✅ Session [{session_id}]: Ingested {len(session)} messages")
     elif frame == "memobase":
@@ -56,8 +57,6 @@ def ingest_session(session, user_id, session_id, frame, client):
         for _idx, msg in enumerate(session):
             messages.append({"role": msg["role"], "content": msg["content"]})
         client.add(messages, user_id, datetime.now().astimezone().isoformat())
-    elif frame == "memos-api-online":
-        client.add(messages, user_id, session_id, batch_size=10)
 
 
 def build_jsonl_index(jsonl_path):

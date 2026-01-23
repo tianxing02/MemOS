@@ -10,38 +10,12 @@ from pathlib import Path
 from tqdm import tqdm
 
 from evaluation.scripts.hotpot.data_loader import load_hotpot_data
+from evaluation.scripts.utils.client import get_lib_client, retry_operation
 from evaluation.scripts.utils.metrics import Metrics
 
 
-def retry_operation(func, *args, retries=5, delay=2, **kwargs):
-    for attempt in range(retries):
-        try:
-            result = func(*args, **kwargs)
-            if isinstance(result, dict) and "data" in result:
-                return result["data"]
-            return result
-        except Exception as e:
-            if attempt < retries - 1:
-                func_name = getattr(func, "__name__", "Operation")
-                print(f"[Retry] {func_name} failed: {e}. Retrying in {delay}s...")
-                time.sleep(delay)
-                delay *= 2
-            else:
-                raise e
-
-
-def _get_lib_client(lib: str):
-    if lib == "mem0":
-        from evaluation.scripts.utils.client import Mem0Client
-
-        return Mem0Client(enable_graph=False)
-    if lib == "supermemory":
-        from evaluation.scripts.utils.client import SupermemoryClient
-
-        return SupermemoryClient()
-    from evaluation.scripts.utils.client import MemosApiClient
-
-    return MemosApiClient()
+memos_knowledgebase_id = os.getenv("MEMOS_KNOWLEDGEBASE_ID_HOTPOT")
+fastgpt_dataset_id = os.getenv("FASTGPT_DATASET_ID_HOTPOT")
 
 
 def _load_existing_results(output_path: Path) -> tuple[list[dict], set[str]]:
@@ -108,8 +82,15 @@ def memos_search(
         top_k=top_k,
         mode=search_mode,
     )
-    memories = results["text_mem"][0]["memories"]
-    mem_texts = [i["memory"] for i in memories]
+    if isinstance(results, dict) and "data" in results:
+        results = results["data"]
+
+    if results.get("memory_detail_list"):
+        memories = results["memory_detail_list"]
+        mem_texts = [m.get("memory_value", "") for m in memories]
+    else:
+        mem_texts = []
+        memories = []
 
     sources = []
     for m in memories:
@@ -138,6 +119,12 @@ def supermemory_search(
     return mem_texts, dedup_sp
 
 
+def fastgpt_search(client, query: str, top_k: int) -> tuple[str, list[list[str | int]]]:
+    result = retry_operation(client.search, dataset_id=fastgpt_dataset_id, query=query, top_k=top_k)
+    sources = [item["q"] for item in result[:top_k]]
+    return sources, []
+
+
 def search_one(
     client, lib: str, item: dict, top_k: int, version_dir: str, search_mode: str
 ) -> dict:
@@ -145,12 +132,14 @@ def search_one(
     question = item.get("question") or ""
     user_id = version_dir + "_" + str(qid)
 
-    if lib == "memos":
+    if lib == "memos" or lib == "memos-api-online":
         memories, sp_list = memos_search(client, user_id, str(question), top_k, search_mode)
     elif lib == "mem0":
         memories, sp_list = mem0_search(client, user_id, str(question), top_k)
     elif lib == "supermemory":
         memories, sp_list = supermemory_search(client, user_id, str(question), top_k)
+    elif lib == "fastgpt":
+        memories, sp_list = fastgpt_search(client, str(question), top_k)
     else:
         memories, sp_list = [], []
 
@@ -169,26 +158,23 @@ def main(argv: list[str] | None = None) -> None:
         "--lib",
         type=str,
         default="memos",
-        choices=["memos", "mem0", "supermemory"],
     )
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--top-k", type=int, default=7)
-    parser.add_argument(
-        "--limit", type=int, default=None, help="Limit number of samples (was max_samples)"
-    )
+    parser.add_argument("--limit", type=int, default=None, help="Limit number of samples")
     parser.add_argument("--version-dir", "-v", default=None, help="Version directory name")
     parser.add_argument("--search-mode", default="fine", help="Search mode")
 
     args = parser.parse_args(argv)
 
-    # Handle limit/max_samples compatibility
-    limit = args.limit if args.limit is not None else args.max_samples
+    # Handle limit
+    limit = args.limit
 
     items_list = load_hotpot_data("evaluation/data/hotpot")
     if limit is not None:
         items_list = items_list[:limit]
 
-    output_dir = Path(f"evaluation/data/hotpot/{args.version_dir}")
+    output_dir = Path(f"evaluation/results/hotpot/{args.version_dir}")
     output_dir.mkdir(parents=True, exist_ok=True)
 
     if args.lib == "memos":
@@ -211,7 +197,7 @@ def main(argv: list[str] | None = None) -> None:
     if not pending_items:
         return
 
-    client = _get_lib_client(args.lib)
+    client = get_lib_client(args.lib)
     metrics = Metrics()
     start_time = time.time()
 

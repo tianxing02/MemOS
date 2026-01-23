@@ -49,6 +49,6 @@ python -m evaluation.scripts.mmlongbench.mmlongbench_eval \
   --version-dir "$VERSION_DIR" \
   --workers "$WORKERS" \
   --chat-model "$CHAT_MODEL" \
-  --limit "$LIMIT"
+#  --limit "$LIMIT"
 
 # echo "All scripts completed successfully!"

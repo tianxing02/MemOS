@@ -543,7 +543,7 @@ if __name__ == "__main__":
 
     print("[Response model]: ", os.getenv("CHAT_MODEL"))
 
-    base_dir = Path("evaluation/data/mmlongbench")
+    base_dir = Path("evaluation/results/mmlongbench")
     version_dir = base_dir / args.version_dir
     input_filename = f"{args.lib}_search_results.json"
     input_path = version_dir / input_filename

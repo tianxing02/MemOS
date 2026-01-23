@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import time
+import traceback
 
 import tiktoken
 
@@ -56,7 +57,7 @@ def add_memory_for_line(
                 mem_client.add(
                     messages=conversation[msg_idx : msg_idx + 2],
                     user_id=user_id,
-                    conv_id=None,
+                    conv_id=user_id,
                     batch_size=2,
                 )
                 f.write(f"{record_id}\n")
@@ -71,6 +72,7 @@ def add_memory_for_line(
 
     except Exception as e:
         print(f"Error adding memory for line {i + 1} (user_id: {user_id}): {e}")
+        traceback.print_exc()
         return None
 
 
@@ -99,12 +101,18 @@ def search_memory_for_line(line_data, mem_client, top_k_value):
         start_time_search = time.monotonic()
         relevant_memories = mem_client.search(query=question, user_id=user_id, top_k=top_k_value)
         search_memories_duration = time.monotonic() - start_time_search
+
+        memories_data = (
+            relevant_memories.get("data", {}) if isinstance(relevant_memories, dict) else {}
+        )
+        memories_list = memories_data.get("memory_detail_list", [])
+        pref_string = (
+            relevant_memories.get("pref_string", "") if isinstance(relevant_memories, dict) else ""
+        )
+
         memories_str = (
-            "\n".join(
-                f"- {entry.get('memory', '')}"
-                for entry in relevant_memories["text_mem"][0]["memories"]
-            )
-            + f"\n{relevant_memories.get('pref_string', '')}"
+            "\n".join(f"- {entry.get('memory_value', '')}" for entry in memories_list)
+            + f"\n{pref_string}"
         )
 
         memory_tokens_used = len(tokenizer.encode(memories_str))
@@ -231,9 +239,9 @@ def main():
     elif args.lib == "memos-api-online":
         mem_client = MemosApiOnlineClient()
 
-    os.makedirs(f"results/prefeval/{args.lib}_{args.version}", exist_ok=True)
+    os.makedirs(f"evaluation/results/prefeval/{args.lib}_{args.version}", exist_ok=True)
     success_records = set()
-    record_file = f"results/prefeval/{args.lib}_{args.version}/success_records.txt"
+    record_file = f"evaluation/results/prefeval/{args.lib}_{args.version}/success_records.txt"
     if os.path.exists(record_file):
         print(f"Loading existing success records from {record_file}...")
         with open(record_file, encoding="utf-8") as f:

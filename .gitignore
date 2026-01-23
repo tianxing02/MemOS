@@ -11,6 +11,8 @@ tmp/
 **settings.json**
 evaluation/*tmp/
 evaluation/results
+evaluation/data
+evaluation/logs
 evaluation/.env
 !evaluation/configs-example/*.json
 evaluation/configs/*

@@ -5,7 +5,6 @@ import json
 import os
 import threading
 import time
-import traceback
 
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -13,6 +12,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from langchain_text_splitters import Language, RecursiveCharacterTextSplitter
 
+from evaluation.scripts.utils.client import get_lib_client, retry_operation
 from evaluation.scripts.utils.metrics import Metrics
 
 
@@ -20,21 +20,6 @@ load_dotenv()
 
 fastgpt_dataset_id = os.getenv("FASTGPT_DATASET_ID_MM_LONGBENCH")
 memos_knowledgebase_id = os.getenv("MEMOS_KNOWLEDGEBASE_ID_MM_LONGBENCH")
-
-
-def retry_operation(func, *args, retries=5, delay=2, **kwargs):
-    for attempt in range(retries):
-        try:
-            return func(*args, **kwargs)
-        except Exception as e:
-            if attempt < retries - 1:
-                traceback.print_exc()
-                func_name = getattr(func, "__name__", "Operation")
-                print(f"[Retry] {func_name} failed: {e}. Retrying in {delay}s...")
-                time.sleep(delay)
-                delay *= 2
-            else:
-                raise e
 
 
 def read_filenames(filepath: str) -> list[str]:
@@ -76,7 +61,7 @@ def run_concurrent_add(
         Statistics result
     """
 
-    client = _get_lib_client(lib)
+    client = get_lib_client(lib)
     metrics = Metrics()
     total_files = len(filenames)
     completed = 0
@@ -104,7 +89,7 @@ def run_concurrent_add(
 
         result = None
         try:
-            if lib == "memos-online":
+            if lib == "memos-api-online":
                 result = retry_operation(client.upload_file, memos_knowledgebase_id, file_url)
                 file_id = None
                 if isinstance(result, dict):
@@ -269,29 +254,6 @@ def parse_args():
     return parser.parse_args()
 
 
-def _get_lib_client(lib: str):
-    if lib == "memos":
-        from evaluation.scripts.utils.client import MemosApiClient
-
-        return MemosApiClient()
-    if lib == "mem0":
-        from evaluation.scripts.utils.client import Mem0Client
-
-        return Mem0Client(enable_graph=False)
-    if lib == "supermemory":
-        from evaluation.scripts.utils.client import SupermemoryClient
-
-        return SupermemoryClient()
-    if lib == "fastgpt":
-        from evaluation.scripts.utils.client import FastGPTClient
-
-        return FastGPTClient()
-    if lib == "memos-online":
-        from evaluation.scripts.utils.client import MemosApiOnlineClient
-
-        return MemosApiOnlineClient()
-
-
 def main():
     args = parse_args()
 
@@ -326,9 +288,7 @@ def main():
         filenames = filenames[: args.limit]
 
     # Determine output file path
-    import os
-
-    version_output_dir = os.path.join("evaluation/data/mmlongbench", args.version_dir)
+    version_output_dir = os.path.join("evaluation/results/mmlongbench", args.version_dir)
     os.makedirs(version_output_dir, exist_ok=True)
     output_path = os.path.join(version_output_dir, f"{args.lib}_add_results.json")
 

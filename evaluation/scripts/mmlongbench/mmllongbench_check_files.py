@@ -120,9 +120,9 @@ def _reupload_failed_files(
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
-        description="Check MMLongbench memos-online file status and reupload failed files."
+        description="Check MMLongbench memos-api-online file status and reupload failed files."
     )
-    parser.add_argument("--lib", type=str, default="memos-online")
+    parser.add_argument("--lib", type=str, default="memos-api-online")
     parser.add_argument("--version-dir", "-v", default=None)
     parser.add_argument("--batch-size", type=int, default=50)
     parser.add_argument(
@@ -132,8 +132,8 @@ def main(argv: list[str] | None = None) -> None:
     )
     args = parser.parse_args(argv)
 
-    if args.lib != "memos-online":
-        print(f"Only memos-online is supported, got lib={args.lib}")
+    if args.lib != "memos-api-online":
+        print(f"Only memos-api-online is supported, got lib={args.lib}")
         return
 
     output_dir = Path("evaluation/data/mmlongbench")

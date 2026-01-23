@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # Common parameters for all scripts
-LIB="memos-api-online"
-VERSION="default_memos_0120"
+LIB=${LIB:-"memos-api-online"}
+VERSION=${VERSION:-"weekly_eval_20260121"}
 WORKERS=10
 TOPK=20
 

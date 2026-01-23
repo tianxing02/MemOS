@@ -6,12 +6,12 @@ cd "$ROOT_DIR"
 export PYTHONPATH="$ROOT_DIR"
 
 # Common parameters
-LIB="fastgpt"
+LIB="memos-online"
 WORKERS=5
 TOPK=30
 ADD_MODE="fine"
 SEARCH_MODE="fast"
-VERSION_DIR="longbench_v2_fastgpt_0114"
+VERSION_DIR="test_0113_memos_02"
 ASYNC_MODE="sync"
 CHAT_MODEL="gpt-4o-mini"
 #CHAT_MODEL="o4-mini"
@@ -33,15 +33,15 @@ LIMIT=300
 #   --lib "$LIB" \
 #   --version-dir "$VERSION_DIR" \
 
-## Search
-#echo "Running longbench_v2_search.py..."
-#python -m evaluation.scripts.longbench_v2.longbench_v2_search \
-# --lib "$LIB" \
-# --workers "$WORKERS" \
-# --version-dir "$VERSION_DIR" \
-# --top-k "$TOPK" \
-# --mode "$SEARCH_MODE" \
-##  --limit "$LIMIT"
+# Search
+echo "Running longbench_v2_search.py..."
+python -m evaluation.scripts.longbench_v2.longbench_v2_search \
+ --lib "$LIB" \
+ --workers "$WORKERS" \
+ --version-dir "$VERSION_DIR" \
+ --top-k "$TOPK" \
+ --mode "$SEARCH_MODE" \
+#  --limit "$LIMIT"
 
 # Eval
  echo "Running longbench_v2_eval.py..."

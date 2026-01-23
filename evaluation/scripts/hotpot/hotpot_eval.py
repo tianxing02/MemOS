@@ -155,7 +155,7 @@ def main(argv: list[str] | None = None) -> None:
 
     args = parser.parse_args(argv)
 
-    output_dir = Path(f"evaluation/data/hotpot/{args.version_dir}")
+    output_dir = Path(f"evaluation/results/hotpot/{args.version_dir}")
     output_dir.mkdir(parents=True, exist_ok=True)
 
     if args.lib == "memos":

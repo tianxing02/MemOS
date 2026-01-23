@@ -12,50 +12,13 @@ from dotenv import load_dotenv
 from langchain_text_splitters import Language, RecursiveCharacterTextSplitter
 from tqdm import tqdm
 
+from evaluation.scripts.utils.client import get_lib_client, retry_operation
 from evaluation.scripts.utils.metrics import Metrics
 
 
 load_dotenv()
 fastgpt_dataset_id = os.getenv("FASTGPT_DATASET_ID_LONGBENCH_V2")
 memos_knowledgebase_id = os.getenv("MEMOS_KNOWLEDGEBASE_ID_LONGBENCH_V2")
-
-
-def retry_operation(func, *args, retries=5, delay=2, **kwargs):
-    for attempt in range(retries):
-        try:
-            return func(*args, **kwargs)
-        except Exception as e:
-            if attempt < retries - 1:
-                traceback.print_exc()
-                func_name = getattr(func, "__name__", "Operation")
-                print(f"[Retry] {func_name} failed: {e}. Retrying in {delay}s...")
-                time.sleep(delay)
-                delay *= 2
-            else:
-                raise e
-
-
-def _get_lib_client(lib: str):
-    if lib == "mem0":
-        from evaluation.scripts.utils.client import Mem0Client
-
-        return Mem0Client(enable_graph=False)
-    if lib == "supermemory":
-        from evaluation.scripts.utils.client import SupermemoryClient
-
-        return SupermemoryClient()
-    if lib == "fastgpt":
-        from evaluation.scripts.utils.client import FastGPTClient
-
-        return FastGPTClient()
-    if lib == "memos-online":
-        from evaluation.scripts.utils.client import MemosApiOnlineClient
-
-        return MemosApiOnlineClient()
-    if lib == "memos":
-        from evaluation.scripts.utils.client import MemosApiClient
-
-        return MemosApiClient()
 
 
 def _load_dataset_jsonl(dataset_path: Path) -> list[dict]:
@@ -147,7 +110,7 @@ def ingest_context(
     file_url = f"{url_prefix.rstrip('/')}/{sample_id}.txt"  # URL前缀 + 文件名
 
     file_id = ""
-    if lib == "memos" or lib == "memos-online":
+    if lib == "memos" or lib == "memos-api-online":
         result = retry_operation(client.upload_file, memos_knowledgebase_id, file_url)
         file_id = result["data"][0]["id"]
     if lib == "fastgpt":
@@ -235,7 +198,7 @@ def main() -> None:
     if args.limit is not None:
         dataset = dataset[: args.limit]
 
-    version_output_dir = os.path.join("evaluation/data/longbench_v2", args.version_dir)
+    version_output_dir = os.path.join("evaluation/results/longbench_v2", args.version_dir)
     os.makedirs(version_output_dir, exist_ok=True)
     output_path = os.path.join(version_output_dir, f"{args.lib}_add_results.json")
     output_path = Path(output_path)
@@ -248,7 +211,7 @@ def main() -> None:
     if not pending:
         return
 
-    client = _get_lib_client(args.lib)
+    client = get_lib_client(args.lib)
     metrics = Metrics()
 
     def do_ingest(sample):

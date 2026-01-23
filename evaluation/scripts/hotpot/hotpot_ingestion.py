@@ -2,7 +2,6 @@ import argparse
 import json
 import os
 import time
-import traceback
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -11,50 +10,13 @@ from dotenv import load_dotenv
 from tqdm import tqdm
 
 from evaluation.scripts.hotpot.data_loader import load_hotpot_data
+from evaluation.scripts.utils.client import get_lib_client, retry_operation
 from evaluation.scripts.utils.metrics import Metrics
 
 
 load_dotenv()
 memos_knowledgebase_id = os.getenv("MEMOS_KNOWLEDGEBASE_ID_HOTPOT")
 fastgpt_dataset_id = os.getenv("FASTGPT_DATASET_ID_HOTPOT")
-
-
-def retry_operation(func, *args, retries=5, delay=2, **kwargs):
-    for attempt in range(retries):
-        try:
-            return func(*args, **kwargs)
-        except Exception as e:
-            traceback.print_exc()
-            if attempt < retries - 1:
-                func_name = getattr(func, "__name__", "Operation")
-                print(f"[Retry] {func_name} failed: {e}. Retrying in {delay}s...")
-                time.sleep(delay)
-                delay *= 2
-            else:
-                raise e
-
-
-def _get_lib_client(lib: str):
-    if lib == "mem0":
-        from evaluation.scripts.utils.client import Mem0Client
-
-        return Mem0Client(enable_graph=False)
-    if lib == "supermemory":
-        from evaluation.scripts.utils.client import SupermemoryClient
-
-        return SupermemoryClient()
-    if lib == "memos-online":
-        from evaluation.scripts.utils.client import MemosApiOnlineClient
-
-        return MemosApiOnlineClient()
-    if lib == "fastgpt":
-        from evaluation.scripts.utils.client import FastGPTClient
-
-        return FastGPTClient()
-    if lib == "memos":
-        from evaluation.scripts.utils.client import MemosApiClient
-
-        return MemosApiClient()
 
 
 def _load_added_ids(records_path: Path) -> dict[str, str | None]:
@@ -106,26 +68,6 @@ def _build_tasks(ctx: dict | list | None) -> list[str]:
     return tasks
 
 
-def _build_memory_texts(ctx: dict | list | None) -> list[str]:
-    texts: list[str] = []
-
-    if not ctx:
-        return texts
-
-    for item in ctx:
-        if not isinstance(item, list | tuple) or len(item) != 2:
-            continue
-
-        title, sentences = item
-        if not isinstance(sentences, list):
-            continue
-
-        for sentence in sentences:
-            texts.append(f"{title}: {sentence}")
-
-    return texts
-
-
 def add_context_memories(
     client,
     lib: str,
@@ -142,7 +84,7 @@ def add_context_memories(
     file_id = None
     file_url = f"{url_prefix.rstrip('/')}/{user_id}_context.txt"
 
-    if lib == "memos-online":
+    if lib == "memos-api-online":
         result = retry_operation(
             client.upload_file,
             memos_knowledgebase_id,
@@ -209,7 +151,7 @@ def main(argv: list[str] | None = None) -> None:
     print("hotpotQA Product Add Concurrent Tool")
     print("=" * 60)
 
-    output_dir = Path("evaluation/data/hotpot")
+    output_dir = Path("evaluation/results/hotpot")
     if args.version_dir:
         output_dir = output_dir / args.version_dir
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -231,7 +173,7 @@ def main(argv: list[str] | None = None) -> None:
     if not pending_items:
         return
 
-    client = _get_lib_client(args.lib)
+    client = get_lib_client(args.lib)
     metrics = Metrics()
 
     def do_ingest(item):

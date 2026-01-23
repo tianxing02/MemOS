@@ -44,7 +44,6 @@ def mem0_search(client, query, user_id, top_k):
 def memos_search(client, query, user_id, top_k):
     start = time()
     results = client.search(query=query, user_id=user_id, top_k=top_k)
-
     context = (
         "\n".join([i["memory_value"] for i in results["data"]["memory_detail_list"]])
         + f"\n{results.get('pref_string', '')}"

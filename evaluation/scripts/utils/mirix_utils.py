@@ -54,7 +54,7 @@ def get_mirix_client(config_path, load_from=None):
 
 if __name__ == "__main__":
     config_path = "configs-example/mirix_config.yaml"
-    out_dir = "results/mirix-test"
+    out_dir = "evaluation/results/mirix-test"
 
     assistant = get_mirix_client(config_path)
 

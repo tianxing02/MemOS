@@ -14,25 +14,11 @@ from dotenv import load_dotenv
 from openai import OpenAI
 from tqdm import tqdm
 
+from evaluation.scripts.utils.client import retry_operation
 from evaluation.scripts.utils.prompts import LONGBENCH_V2_ANSWER_PROMPT
 
 
 load_dotenv()
-
-
-def retry_operation(func, *args, retries=5, delay=2, **kwargs):
-    for attempt in range(retries):
-        try:
-            return func(*args, **kwargs)
-        except Exception as e:
-            traceback.print_exc()
-            if attempt < retries - 1:
-                func_name = getattr(func, "__name__", "Operation")
-                print(f"[Retry] {func_name} failed: {e}. Retrying in {delay}s...")
-                time.sleep(delay)
-                delay *= 2
-            else:
-                raise e
 
 
 def extract_answer(response: str) -> str | None:
@@ -248,7 +234,7 @@ def main() -> None:
 
     start_time = time.time()
 
-    output_dir = os.path.join("evaluation/data/longbench_v2", args.version_dir)
+    output_dir = os.path.join("evaluation/results/longbench_v2", args.version_dir)
     search_filename = f"{args.lib}_search_results.json"
     search_path = Path(os.path.join(output_dir, search_filename))
 
@@ -256,7 +242,10 @@ def main() -> None:
         raise FileNotFoundError(f"Search results not found: {search_path}")
 
     search_rows = _load_json_list(search_path)
-    output_filename = f"{args.lib}_eval_results.json"
+    if args.chat_model == "o4-mini":
+        output_filename = f"{args.lib}_cot_eval_results.json"
+    else:
+        output_filename = f"{args.lib}_eval_results.json"
     output_path = Path(os.path.join(output_dir, output_filename))
 
     results: list[dict] = []

@@ -82,9 +82,9 @@ def memobase_search(client, query, user_id, top_k):
 def memos_search(client, user_id, query, top_k):
     start = time()
     results = client.search(query=query, user_id=user_id, top_k=top_k)
+    memories = results.get("data", {}).get("memory_detail_list", [])
     search_memories = (
-        "\n".join(item["memory"] for cube in results["text_mem"] for item in cube["memories"])
-        + f"\n{results.get('pref_string', '')}"
+        "\n".join(item["memory_value"] for item in memories) + f"\n{results.get('pref_string', '')}"
     )
     context = MEMOS_CONTEXT_TEMPLATE.format(user_id=user_id, memories=search_memories)
 
@@ -237,7 +237,7 @@ def process_user(row_data, conv_idx, frame, version, top_k=20):
 
         client = MemosApiOnlineClient()
         print("🔌 Using memos-api-online client for search...")
-        context, duration_ms = memos_search(client, question, user_id, top_k)
+        context, duration_ms = memos_search(client, user_id, question, top_k)
 
     search_results[user_id].append(
         {

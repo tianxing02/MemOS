@@ -122,14 +122,14 @@ def rag_search(client, user_id, query, top_k, frame):
                 cleaned_chat_history = f"{role}: {content}\n"
                 combine_info.append(cleaned_chat_history)
 
-    with open("results/output/combine_info.json", "w", encoding="utf-8") as f:
+    with open("evaluation/results/output/combine_info.json", "w", encoding="utf-8") as f:
         json.dump(combine_info, f, ensure_ascii=False, indent=2)
 
-    with open("results/output/message_output.json", "w", encoding="utf-8") as f:
+    with open("evaluation/results/output/message_output.json", "w", encoding="utf-8") as f:
         json.dump(message, f, ensure_ascii=False, indent=2)
 
     chunks, embeddings = client.split_chunks(combine_info, client.chunk_size)
-    with open("results/output/chunks_output.json", "w", encoding="utf-8") as f:
+    with open("evaluation/results/output/chunks_output.json", "w", encoding="utf-8") as f:
         json.dump(chunks, f, ensure_ascii=False, indent=2)
     print("Writing chunks output have finished!")
 

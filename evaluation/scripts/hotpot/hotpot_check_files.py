@@ -136,11 +136,11 @@ def _reupload_failed_files(
 
 
 def main(argv: list[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(description="Check HotpotQA memos-online file status.")
+    parser = argparse.ArgumentParser(description="Check HotpotQA memos-api-online file status.")
     parser.add_argument(
         "--lib",
         type=str,
-        default="memos-online",
+        default="memos-api-online",
     )
     parser.add_argument("--version-dir", "-v", default=None, help="Version directory name")
     parser.add_argument("--batch-size", type=int, default=50)
@@ -154,8 +154,8 @@ def main(argv: list[str] | None = None) -> None:
 
     args = parser.parse_args(argv)
 
-    if args.lib != "memos-online":
-        print(f"Only memos-online is supported, got lib={args.lib}")
+    if args.lib != "memos-api-online":
+        print(f"Only memos-api-online is supported, got lib={args.lib}")
         return
 
     output_dir = Path("evaluation/data/hotpot")
