@@ -91,6 +91,7 @@ def post_process_pref_mem(
             {
                 "cube_id": mem_cube_id,
                 "memories": pref_formatted_mem,
+                "total_nodes": len(pref_formatted_mem),
             }
         )
         pref_instruction, pref_note = instruct_completion(pref_formatted_mem)
@@ -123,12 +124,14 @@ def post_process_textual_mem(
         {
             "cube_id": mem_cube_id,
             "memories": fact_mem,
+            "total_nodes": len(fact_mem),
         }
     )
     memories_result["tool_mem"].append(
         {
             "cube_id": mem_cube_id,
             "memories": tool_mem,
+            "total_nodes": len(tool_mem),
         }
     )
     return memories_result
@@ -141,7 +144,7 @@ def separate_knowledge_and_conversation_mem(memories: list[dict[str, Any]]):
     knowledge_mem = []
     conversation_mem = []
     for item in memories:
-        sources = item["metadata"]["sources"]
+        sources = item.get("metadata", {}).get("sources", [])
         if (
             len(sources) > 0
             and "type" in sources[0]
@@ -180,8 +183,15 @@ def rerank_knowledge_mem(
 
     knowledge_mem, conversation_mem = separate_knowledge_and_conversation_mem(memories_list)
     knowledge_mem_top_k = max(int(top_k * file_mem_proportion), int(top_k - len(conversation_mem)))
-    reranked_knowledge_mem = reranker.rerank(query, knowledge_mem, top_k=len(knowledge_mem))
-    reranked_knowledge_mem = [item[0] for item in reranked_knowledge_mem]
+    # rerank set unuse
+    reranked_knowledge_mem = knowledge_mem
+
+    # Sort by relativity in descending order
+    reranked_knowledge_mem = sorted(
+        reranked_knowledge_mem,
+        key=lambda item: item.get("metadata", {}).get("relativity", 0.0),
+        reverse=True,
+    )
 
     # TODO revoke sources replace memory value
     for item in reranked_knowledge_mem:
@@ -189,7 +199,7 @@ def rerank_knowledge_mem(
         item["metadata"]["sources"] = []
 
     for item in conversation_mem:
-        item["metadata"]["sources"] = []
+        item.setdefault("metadata", {})["sources"] = []
 
     # deduplicate: remove items with duplicate memory content
     original_count = len(reranked_knowledge_mem)
