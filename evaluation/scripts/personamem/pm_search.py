@@ -82,9 +82,9 @@ def memobase_search(client, query, user_id, top_k):
 def memos_search(client, user_id, query, top_k):
     start = time()
     results = client.search(query=query, user_id=user_id, top_k=top_k)
+    memories = results.get("data", {}).get("memory_detail_list", [])
     search_memories = (
-        "\n".join(item["memory"] for cube in results["text_mem"] for item in cube["memories"])
-        + f"\n{results.get('pref_string', '')}"
+        "\n".join(item["memory_value"] for item in memories) + f"\n{results.get('pref_string', '')}"
     )
     context = MEMOS_CONTEXT_TEMPLATE.format(user_id=user_id, memories=search_memories)
 
@@ -237,7 +237,7 @@ def process_user(row_data, conv_idx, frame, version, top_k=20):
 
         client = MemosApiOnlineClient()
         print("🔌 Using memos-api-online client for search...")
-        context, duration_ms = memos_search(client, question, user_id, top_k)
+        context, duration_ms = memos_search(client, user_id, question, top_k)
 
     search_results[user_id].append(
         {
@@ -254,9 +254,10 @@ def process_user(row_data, conv_idx, frame, version, top_k=20):
         }
     )
 
-    os.makedirs(f"results/pm/{frame}-{version}/tmp", exist_ok=True)
+    os.makedirs(f"evaluation/results/pm/{frame}-{version}/tmp", exist_ok=True)
     with open(
-        f"results/pm/{frame}-{version}/tmp/{frame}_pm_search_results_{conv_idx}.json", "w"
+        f"evaluation/results/pm/{frame}-{version}/tmp/{frame}_pm_search_results_{conv_idx}.json",
+        "w",
     ) as f:
         json.dump(search_results, f, indent=4)
     print(f"💾 Search results for conversation {conv_idx} saved...")
@@ -266,7 +267,9 @@ def process_user(row_data, conv_idx, frame, version, top_k=20):
 
 
 def load_existing_results(frame, version, group_idx):
-    result_path = f"results/pm/{frame}-{version}/tmp/{frame}_pm_search_results_{group_idx}.json"
+    result_path = (
+        f"evaluation/results/pm/{frame}-{version}/tmp/{frame}_pm_search_results_{group_idx}.json"
+    )
     if os.path.exists(result_path):
         try:
             with open(result_path) as f:
@@ -281,8 +284,8 @@ def main(frame, version, top_k=20, num_workers=2):
     print(f"🔍 PERSONAMEM SEARCH - {frame.upper()} v{version}".center(80))
     print("=" * 80)
 
-    question_csv_path = "data/personamem/questions_32k.csv"
-    context_jsonl_path = "data/personamem/shared_contexts_32k.jsonl"
+    question_csv_path = "evaluation/data/personamem/questions_32k.csv"
+    context_jsonl_path = "evaluation/data/personamem/shared_contexts_32k.jsonl"
     total_rows = count_csv_rows(question_csv_path)
 
     print(f"📚 Loaded PersonaMem dataset from {question_csv_path} and {context_jsonl_path}")
@@ -328,9 +331,11 @@ def main(frame, version, top_k=20, num_workers=2):
     print(f"⏱️  Total time taken to search {total_rows} users: {elapsed_time_str}")
     print(f"🔄 Framework: {frame} | Version: {version} | Workers: {num_workers}")
 
-    with open(f"results/pm/{frame}-{version}/{frame}_pm_search_results.json", "w") as f:
+    with open(f"evaluation/results/pm/{frame}-{version}/{frame}_pm_search_results.json", "w") as f:
         json.dump(dict(all_search_results), f, indent=4)
-    print(f"📁 Results saved to: mresults/pm/{frame}-{version}/{frame}_pm_search_results.json")
+    print(
+        f"📁 Results saved to: mevaluation/results/pm/{frame}-{version}/{frame}_pm_search_results.json"
+    )
     print("=" * 80 + "\n")
 
 

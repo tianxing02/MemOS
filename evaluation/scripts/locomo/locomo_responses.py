@@ -77,15 +77,15 @@ async def process_qa(frame, qa, search_result, oai_client):
 
 
 async def main(frame, version="default"):
-    search_path = f"results/locomo/{frame}-{version}/{frame}_locomo_search_results.json"
-    response_path = f"results/locomo/{frame}-{version}/{frame}_locomo_responses.json"
+    search_path = f"evaluation/results/locomo/{frame}-{version}/{frame}_locomo_search_results.json"
+    response_path = f"evaluation/results/locomo/{frame}-{version}/{frame}_locomo_responses.json"
 
     load_dotenv()
     oai_client = AsyncOpenAI(
         api_key=os.getenv("CHAT_MODEL_API_KEY"), base_url=os.getenv("CHAT_MODEL_BASE_URL")
     )
 
-    locomo_df = pd.read_json("data/locomo/locomo10.json")
+    locomo_df = pd.read_json("evaluation/data/locomo/locomo10.json")
     with open(search_path) as file:
         locomo_search_results = json.load(file)
 

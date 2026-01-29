@@ -279,8 +279,8 @@ async def main(frame, version, nlp_options, num_runs=3, num_workers=5):
     load_dotenv()
     oai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"), base_url=os.getenv("OPENAI_BASE_URL"))
 
-    response_path = f"results/lme/{frame}-{version}/{frame}_lme_responses.json"
-    judged_path = f"results/lme/{frame}-{version}/{frame}_lme_judged.json"
+    response_path = f"evaluation/results/lme/{frame}-{version}/{frame}_lme_responses.json"
+    judged_path = f"evaluation/results/lme/{frame}-{version}/{frame}_lme_judged.json"
 
     with open(response_path) as file:
         lme_responses = json.load(file)

@@ -11,6 +11,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from evaluation.scripts.utils.client import get_lib_client
 from evaluation.scripts.utils.metrics import Metrics
 
 
@@ -18,20 +19,7 @@ load_dotenv()
 
 fastgpt_dataset_id = os.getenv("FASTGPT_DATASET_ID_MM_LONGBENCH")
 memos_knowledgebase_id = os.getenv("MEMOS_KNOWLEDGEBASE_ID_MM_LONGBENCH")
-
-
-def retry_operation(func, *args, retries=5, delay=2, **kwargs):
-    for attempt in range(retries):
-        try:
-            return func(*args, **kwargs)
-        except Exception as e:
-            if attempt < retries - 1:
-                func_name = getattr(func, "__name__", "Operation")
-                print(f"[Retry] {func_name} failed: {e}. Retrying in {delay}s...")
-                time.sleep(delay)
-                delay *= 2
-            else:
-                raise e
+dify_dataset_id = os.getenv("DIFY_DATASET_ID_MM_LONGBENCH")
 
 
 def load_samples(filepath: str) -> list[dict]:
@@ -44,8 +32,7 @@ def load_samples(filepath: str) -> list[dict]:
 
 
 def memos_search(client, user_id: str, query: str, top_k: int, mode: str) -> list[str]:
-    results = retry_operation(
-        client.search,
+    results = client.search(
         query=query,
         user_id=user_id,
         top_k=top_k,
@@ -59,20 +46,25 @@ def memos_search(client, user_id: str, query: str, top_k: int, mode: str) -> lis
 
 
 def mem0_search(client, user_id: str, query: str, top_k: int) -> tuple[list[str], list[str]]:
-    res = retry_operation(client.search, query, user_id, top_k)
+    res = client.search(query, user_id, top_k)
     results = res.get("results", [])
     mem_texts = [m.get("memory", "") for m in results if m.get("memory")]
     return mem_texts, mem_texts
 
 
 def supermemory_search(client, user_id: str, query: str, top_k: int) -> tuple[list[str], list[str]]:
-    chunk_list = retry_operation(client.search, query, user_id, top_k)
+    chunk_list = client.search(query, user_id, top_k)
     return chunk_list, chunk_list
 
 
 def fastgpt_search(client, query: str, top_k: int) -> list[str]:
-    result = retry_operation(client.search, datasetId=fastgpt_dataset_id, query=query, top_k=top_k)
+    result = client.search(dataset_id=fastgpt_dataset_id, query=query, top_k=top_k)
     return [item["q"] for item in result[:top_k]]
+
+
+def dify_search(client, question, dify_dataset_id, top_k) -> list[str]:
+    result = client.search(dify_dataset_id, question, top_k)
+    return [item["segment"]["content"] for item in result[:top_k]]
 
 
 def _load_existing_results(path: str | os.PathLike[str]) -> tuple[list[dict], set[str]]:
@@ -93,29 +85,6 @@ def _load_existing_results(path: str | os.PathLike[str]) -> tuple[list[dict], se
         return [], set()
 
 
-def _get_lib_client(lib: str):
-    if lib == "memos":
-        from evaluation.scripts.utils.client import MemosApiClient
-
-        return MemosApiClient()
-    if lib == "mem0":
-        from evaluation.scripts.utils.client import Mem0Client
-
-        return Mem0Client(enable_graph=False)
-    if lib == "supermemory":
-        from evaluation.scripts.utils.client import SupermemoryClient
-
-        return SupermemoryClient()
-    if lib == "fastgpt":
-        from evaluation.scripts.utils.client import FastGPTClient
-
-        return FastGPTClient()
-    if lib == "memos-online":
-        from evaluation.scripts.utils.client import MemosApiOnlineClient
-
-        return MemosApiOnlineClient()
-
-
 def run_concurrent_search(
     lib: str, samples: list[dict], user_prefix: str, concurrency: int, top_k: int, mode: str
 ) -> dict:
@@ -134,7 +103,7 @@ def run_concurrent_search(
         Search results
     """
 
-    client = _get_lib_client(lib)
+    client = get_lib_client(lib)
     metrics = Metrics()
     total_samples = len(samples)
     completed = 0
@@ -155,8 +124,8 @@ def run_concurrent_search(
         user_id = doc_id[:20]
         start_time = time.perf_counter()
         try:
-            memories, sources = [], []
-            if lib == "memos" or lib == "memos-online":
+            memories = []
+            if lib == "memos" or lib == "memos-api-online":
                 memories = memos_search(
                     client=client,
                     query=question,
@@ -164,13 +133,10 @@ def run_concurrent_search(
                     top_k=top_k,
                     mode=mode,
                 )
-            elif lib == "mem0":
-                memories, sources = mem0_search(client, user_id, question, top_k=top_k)
-            elif lib == "supermemory":
-                memories, sources = supermemory_search(client, user_id, question, top_k=top_k)
             elif lib == "fastgpt":
                 memories = fastgpt_search(client, question, top_k=top_k)
-
+            elif lib == "dify":
+                memories = dify_search(client, question, dify_dataset_id, top_k)
             duration = time.perf_counter() - start_time
             metrics.record(duration, True)
 
@@ -377,9 +343,7 @@ def main():
         return
 
     # Determine output file path
-    import os
-
-    output_dir = os.path.join("evaluation/data/mmlongbench", args.version_dir)
+    output_dir = os.path.join("evaluation/results/mmlongbench", args.version_dir)
     os.makedirs(output_dir, exist_ok=True)
     output_filename = f"{args.lib}_search_results.json"
     output_path = os.path.join(output_dir, output_filename)

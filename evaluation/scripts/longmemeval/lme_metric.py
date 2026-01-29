@@ -274,9 +274,9 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
     lib, version = args.lib, args.version
-    judged_path = f"results/lme/{lib}-{version}/{lib}_lme_judged.json"
-    grade_path = f"results/lme/{lib}-{version}/{lib}_lme_grades.json"
-    output_path = f"results/lme/{lib}-{version}/{lib}_lme_results.xlsx"
+    judged_path = f"evaluation/results/lme/{lib}-{version}/{lib}_lme_judged.json"
+    grade_path = f"evaluation/results/lme/{lib}-{version}/{lib}_lme_grades.json"
+    output_path = f"evaluation/results/lme/{lib}-{version}/{lib}_lme_results.xlsx"
     with open(judged_path) as file:
         data = json.load(file)
     calculate_scores(data, grade_path, output_path)

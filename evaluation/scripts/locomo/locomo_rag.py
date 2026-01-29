@@ -308,7 +308,7 @@ def main():
     parser.add_argument(
         "--output_folder",
         type=str,
-        default="results/locomo/mem0-default/",
+        default="evaluation/results/locomo/mem0-default/",
         help="Output path for results",
     )
     parser.add_argument("--top_k", type=int, default=30, help="Number of top memories to retrieve")

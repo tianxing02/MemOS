@@ -16,6 +16,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 def ingest_session(session, user_id, session_id, frame, client):
     messages = []
+
     if frame == "zep":
         pass
     elif "mem0" in frame:
@@ -27,7 +28,7 @@ def ingest_session(session, user_id, session_id, frame, client):
         timestamp_add = int(time.time() * 100)
         client.add(messages=messages, user_id=user_id, timestamp=timestamp_add, batch_size=10)
         print(f"[{frame}] ✅ Session [{session_id}]: Ingested {len(messages)} messages")
-    elif frame == "memos-api":
+    elif frame == "memos-api" or frame == "memos-api-online":
         client.add(messages=session, user_id=user_id, conv_id=session_id, batch_size=10)
         print(f"[{frame}] ✅ Session [{session_id}]: Ingested {len(session)} messages")
     elif frame == "memobase":
@@ -51,13 +52,11 @@ def ingest_session(session, user_id, session_id, frame, client):
                     "chat_time": datetime.now().astimezone().isoformat(),
                 }
             )
-        client.add(messages, user_id)
+        client.add(messages=messages, user_id=user_id)
     elif frame == "memu":
         for _idx, msg in enumerate(session):
             messages.append({"role": msg["role"], "content": msg["content"]})
         client.add(messages, user_id, datetime.now().astimezone().isoformat())
-    elif frame == "memos-api-online":
-        client.add(messages, user_id, session_id, batch_size=10)
 
 
 def build_jsonl_index(jsonl_path):
@@ -187,8 +186,8 @@ def ingest_conv(row_data, context, version, conv_idx, frame, success_records, f)
 
 
 def main(frame, version, num_workers=2, clear=False):
-    os.makedirs(f"results/pm/{frame}-{version}/", exist_ok=True)
-    record_file = f"results/pm/{frame}-{version}/success_records.txt"
+    os.makedirs(f"evaluation/results/pm/{frame}-{version}/", exist_ok=True)
+    record_file = f"evaluation/results/pm/{frame}-{version}/success_records.txt"
 
     if clear and os.path.exists(record_file):
         os.remove(record_file)
@@ -198,8 +197,8 @@ def main(frame, version, num_workers=2, clear=False):
     print(f"🚀 PERSONAMEM INGESTION - {frame.upper()} v{version}".center(80))
     print("=" * 80)
 
-    question_csv_path = "data/personamem/questions_32k.csv"
-    context_jsonl_path = "data/personamem/shared_contexts_32k.jsonl"
+    question_csv_path = "evaluation/data/personamem/questions_32k.csv"
+    context_jsonl_path = "evaluation/data/personamem/shared_contexts_32k.jsonl"
     total_rows = count_csv_rows(question_csv_path)
 
     print(f"📚 Loaded PersonaMem dataset from {question_csv_path} and {context_jsonl_path}")

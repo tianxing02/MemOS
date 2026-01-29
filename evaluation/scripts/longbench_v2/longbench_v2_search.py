@@ -10,48 +10,14 @@ from pathlib import Path
 from dotenv import load_dotenv
 from tqdm import tqdm
 
+from evaluation.scripts.utils.client import get_lib_client
 from evaluation.scripts.utils.metrics import Metrics
 
 
 load_dotenv()
 fastgpt_dataset_id = os.getenv("FASTGPT_DATASET_ID_LONGBENCH_V2")
 memos_knowledgebase_id = os.getenv("MEMOS_KNOWLEDGEBASE_ID_LONGBENCH_V2")
-
-
-def retry_operation(func, *args, retries=5, delay=2, **kwargs):
-    for attempt in range(retries):
-        try:
-            result = func(*args, **kwargs)
-            if isinstance(result, dict) and "data" in result:
-                return result["data"]
-            return result
-        except Exception as e:
-            if attempt < retries - 1:
-                func_name = getattr(func, "__name__", "Operation")
-                print(f"[Retry] {func_name} failed: {e}. Retrying in {delay}s...")
-                time.sleep(delay)
-                delay *= 2
-            else:
-                raise e
-
-
-def _get_lib_client(lib: str):
-    if lib == "mem0":
-        from evaluation.scripts.utils.client import Mem0Client
-
-        return Mem0Client(enable_graph=False)
-    if lib == "supermemory":
-        from evaluation.scripts.utils.client import SupermemoryClient
-
-        return SupermemoryClient()
-    if lib == "fastgpt":
-        from evaluation.scripts.utils.client import FastGPTClient
-
-        return FastGPTClient()
-    if lib == "memos-online":
-        from evaluation.scripts.utils.client import MemosApiOnlineClient
-
-        return MemosApiOnlineClient()
+dify_dataset_id = os.getenv("DIFY_DATASET_ID_LONGBENCH_V2")
 
 
 def _load_dataset_jsonl(dataset_path: Path) -> list[dict]:
@@ -67,16 +33,20 @@ def _load_dataset_jsonl(dataset_path: Path) -> list[dict]:
 
 def memos_search(client, user_id: str, query: str, top_k: int, search_mode: str) -> list[str]:
     readable_cube_ids = [user_id]
-    results = retry_operation(
-        client.search,
+    results = client.search(
         query=query,
         user_id=user_id,
         top_k=top_k,
         readable_cube_ids=readable_cube_ids,
         mode=search_mode,
     )
-    memories = results["text_mem"][0]["memories"]
-    return [m["memory"] for m in memories]
+    if isinstance(results, dict) and "data" in results:
+        results = results["data"]
+
+    if results.get("memory_detail_list"):
+        memories = results["memory_detail_list"]
+        return [m.get("memory_value", "") for m in memories]
+    return []
 
 
 def memos_online_search(client, user_id: str, query: str, top_k: int, mode: str) -> list[str]:
@@ -94,17 +64,22 @@ def memos_online_search(client, user_id: str, query: str, top_k: int, mode: str)
 
 
 def mem0_search(client, user_id: str, query: str, top_k: int) -> list[str]:
-    res = retry_operation(client.search, query, user_id, top_k)
+    res = client.search(query, user_id, top_k)
     results = res.get("results", [])
     return [m.get("memory", "") for m in results if m.get("memory")]
 
 
 def supermemory_search(client, user_id: str, query: str, top_k: int) -> list[str]:
-    return retry_operation(client.search, query, user_id, top_k)
+    return client.search(query, user_id, top_k)
 
 
 def fastgpt_search(client, query: str, top_k: int) -> list[str]:
-    return retry_operation(client.search, datasetId=fastgpt_dataset_id, query=query, top_k=top_k)
+    return client.search(dataset_id=fastgpt_dataset_id, query=query, top_k=top_k)
+
+
+def dify_search(client, question, dify_dataset_id, top_k) -> list[str]:
+    result = client.search(dify_dataset_id, question, top_k)
+    return [item["segment"]["content"] for item in result[:top_k]]
 
 
 def _load_existing_results(output_path: Path) -> tuple[list[dict], set[str]]:
@@ -142,12 +117,12 @@ def search_one(sample: dict, lib: str, top_k: int, version_dir: str, search_mode
         "D": sample.get("choice_D") or "",
     }
 
-    client = _get_lib_client(lib)
+    client = get_lib_client(lib)
     if lib == "memos":
         memories = memos_search(
             client, user_id, str(question), top_k=top_k, search_mode=search_mode
         )
-    elif lib == "memos-online":
+    elif lib == "memos-api-online":
         memories = memos_online_search(
             client=client,
             query=str(question),
@@ -161,6 +136,8 @@ def search_one(sample: dict, lib: str, top_k: int, version_dir: str, search_mode
         memories = supermemory_search(client, user_id, str(question), top_k=top_k)
     elif lib == "fastgpt":
         memories = fastgpt_search(client, str(question), top_k=top_k)
+    elif lib == "dify":
+        memories = dify_search(client, str(question), top_k=top_k)
     else:
         memories = []
     print(f"[{lib} Search] sample_id: {sample_id} search memories: {len(memories)}")
@@ -244,7 +221,7 @@ def main() -> None:
     if args.limit is not None:
         dataset = dataset[: args.limit]
 
-    output_dir = os.path.join("evaluation/data/longbench_v2", args.version_dir)
+    output_dir = os.path.join("evaluation/results/longbench_v2", args.version_dir)
     os.makedirs(output_dir, exist_ok=True)
     output_filename = f"{args.lib}_search_results.json"
     output_path = Path(os.path.join(output_dir, output_filename))

@@ -122,14 +122,14 @@ def rag_search(client, user_id, query, top_k, frame):
                 cleaned_chat_history = f"{role}: {content}\n"
                 combine_info.append(cleaned_chat_history)
 
-    with open("results/output/combine_info.json", "w", encoding="utf-8") as f:
+    with open("evaluation/results/output/combine_info.json", "w", encoding="utf-8") as f:
         json.dump(combine_info, f, ensure_ascii=False, indent=2)
 
-    with open("results/output/message_output.json", "w", encoding="utf-8") as f:
+    with open("evaluation/results/output/message_output.json", "w", encoding="utf-8") as f:
         json.dump(message, f, ensure_ascii=False, indent=2)
 
     chunks, embeddings = client.split_chunks(combine_info, client.chunk_size)
-    with open("results/output/chunks_output.json", "w", encoding="utf-8") as f:
+    with open("evaluation/results/output/chunks_output.json", "w", encoding="utf-8") as f:
         json.dump(chunks, f, ensure_ascii=False, indent=2)
     print("Writing chunks output have finished!")
 
@@ -194,9 +194,10 @@ def process_user(lme_df, conv_idx, frame, version, chunk_size, num_chunks, top_k
         }
     )
 
-    os.makedirs(f"results/lme/{frame}-{version}/tmp", exist_ok=True)
+    os.makedirs(f"evaluation/results/lme/{frame}-{version}/tmp", exist_ok=True)
     with open(
-        f"results/lme/{frame}-{version}/tmp/{frame}_lme_search_results_{conv_idx}.json", "w"
+        f"evaluation/results/lme/{frame}-{version}/tmp/{frame}_lme_search_results_{conv_idx}.json",
+        "w",
     ) as f:
         json.dump(search_results, f, indent=4)
     print(f"💾 \033[92mSearch results for conversation {conv_idx} saved...\033[0m")
@@ -270,10 +271,12 @@ def main(frame, version, chunk_size, num_chunks, top_k=20, num_workers=2):
         f"🔄 Framework: \033[94m{frame}\033[0m | Version: \033[94m{version}\033[0m | Workers: \033[94m{num_workers}\033[0m"
     )
 
-    with open(f"results/lme/{frame}-{version}/{frame}_lme_search_results.json", "w") as f:
+    with open(
+        f"evaluation/results/lme/{frame}-{version}/{frame}_lme_search_results.json", "w"
+    ) as f:
         json.dump(dict(all_search_results), f, indent=4)
     print(
-        f"📁 Results saved to: \033[1;94mresults/lme/{frame}-{version}/{frame}_lme_search_results.json\033[0m"
+        f"📁 Results saved to: \033[1;94mevaluation/results/lme/{frame}-{version}/{frame}_lme_search_results.json\033[0m"
     )
     print("=" * 80 + "\n")
 

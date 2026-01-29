@@ -17,6 +17,43 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 load_dotenv()
 
 
+def with_retry(retries=5, delay=2):
+    def decorator(func):
+        def wrapper(*args, **kwargs):
+            current_delay = delay
+            for attempt in range(retries):
+                try:
+                    return func(*args, **kwargs)
+                except Exception as e:
+                    if attempt < retries - 1:
+                        func_name = getattr(func, "__name__", "Operation")
+                        print(f"[Retry] {func_name} failed: {e}. Retrying in {current_delay}s...")
+                        time.sleep(current_delay)
+                        current_delay *= 2
+                    else:
+                        raise e
+
+        return wrapper
+
+    return decorator
+
+
+def get_lib_client(lib: str):
+    if lib == "mem0":
+        return Mem0Client(enable_graph=False)
+    if lib == "supermemory":
+        return SupermemoryClient()
+    if lib == "memos-api-online":
+        return MemosApiOnlineClient()
+    if lib == "fastgpt":
+        return FastGPTClient()
+    if lib == "memos":
+        return MemosApiClient()
+    if lib == "dify":
+        return DifyClient()
+    raise ValueError(f"Unknown library: {lib}")
+
+
 class ZepClient:
     def __init__(self):
         from zep_cloud.client import Zep
@@ -24,6 +61,7 @@ class ZepClient:
         api_key = os.getenv("ZEP_API_KEY")
         self.client = Zep(api_key=api_key)
 
+    @with_retry()
     def add(self, messages, user_id, timestamp):
         iso_date = datetime.fromtimestamp(timestamp).isoformat()
         for msg in messages:
@@ -34,6 +72,7 @@ class ZepClient:
                 group_id=user_id,
             )
 
+    @with_retry()
     def search(self, query, user_id, top_k):
         search_results = (
             self.client.graph.search(
@@ -56,6 +95,7 @@ class Mem0Client:
         self.client = MemoryClient(api_key=os.getenv("MEM0_API_KEY"))
         self.enable_graph = enable_graph
 
+    @with_retry()
     def add(self, messages, user_id, timestamp, batch_size=2):
         for i in range(0, len(messages), batch_size):
             batch_messages = messages[i : i + batch_size]
@@ -74,6 +114,7 @@ class Mem0Client:
                     infer=False,
                 )
 
+    @with_retry()
     def search(self, query, user_id, top_k):
         res = self.client.search(
             query=query,
@@ -93,6 +134,7 @@ class MemobaseClient:
             project_url=os.getenv("MEMOBASE_PROJECT_URL"), api_key=os.getenv("MEMOBASE_API_KEY")
         )
 
+    @with_retry()
     def add(self, messages, user_id, batch_size=2):
         """
         messages = [{"role": "assistant", "content": data, "created_at": iso_date}]
@@ -103,16 +145,9 @@ class MemobaseClient:
         user = self.client.get_or_create_user(real_uid)
         for i in range(0, len(messages), batch_size):
             batch_messages = messages[i : i + batch_size]
-            max_retries = 5
-            for attempt in range(max_retries):
-                try:
-                    _ = user.insert(ChatBlob(messages=batch_messages), sync=True)
-                except Exception as e:
-                    if attempt < max_retries - 1:
-                        time.sleep(2**attempt)
-                    else:
-                        raise e
+            _ = user.insert(ChatBlob(messages=batch_messages), sync=True)
 
+    @with_retry()
     def search(self, query, user_id, top_k):
         real_uid = self.string_to_uuid(user_id)
         user = self.client.get_user(real_uid, no_get=True)
@@ -124,6 +159,7 @@ class MemobaseClient:
         )
         return memories
 
+    @with_retry()
     def delete_user(self, user_id):
         from memobase.error import ServerError
 
@@ -143,6 +179,7 @@ class MemosApiClient:
         self.headers = {"Content-Type": "application/json"}
         self.timeout = timeout
 
+    @with_retry()
     def add(
         self,
         messages,
@@ -190,6 +227,7 @@ class MemosApiClient:
 
         return body
 
+    @with_retry()
     def search(self, query, user_id, readable_cube_ids: list[str], top_k: str, mode: str):
         """
         调用 /product/search 接口
@@ -235,34 +273,38 @@ class MemosApiOnlineClient:
             "Authorization": f"Token {os.environ['MEMOS_API_KEY']}",
         }
 
+    @with_retry()
     def add(
         self,
         messages,
         user_id,
-        writable_cube_ids: list[str],
-        source_type: str,
-        mode: str,
-        async_mode: str,
+        conv_id,
+        batch_size: int = 2,
+        mode: str = "fine",
+        async_mode: str = "async",
     ):
-        url = f"{self.memos_url}/add/message"
-        payload = json.dumps(
-            {
-                "user_id": user_id,
-                "conversation_id": user_id,
-                "messages": messages,
-                "writable_cube_ids": writable_cube_ids,
-                "info": {"source_type": source_type},
-                "mode": mode,
-                "async_mode": async_mode,
-            }
-        )
+        url = f"{self.memos_url}/add/message123"
+        for i in range(0, len(messages), batch_size):
+            batch_messages = messages[i : i + batch_size]
+            payload = json.dumps(
+                {
+                    "user_id": user_id,
+                    "conversation_id": conv_id,
+                    "messages": batch_messages,
+                }
+            )
+            resp = requests.request("POST", url, data=payload, headers=self.headers)
+            resp.raise_for_status()
 
-        response = requests.request("POST", url, data=payload, headers=self.headers)
-        assert response.status_code == 200, response.text
-        assert json.loads(response.text)["message"] == "ok", response.text
-        return response.json()
-
-    def search(self, query: str, user_id: str, top_k: int, mode: str, knowledgebase_ids: list[str]):
+    @with_retry()
+    def search(
+        self,
+        query: str,
+        user_id: str,
+        top_k: int,
+        mode: str = "fast",
+        knowledgebase_ids: list[str] | None = None,
+    ):
         """Search memories."""
         url = f"{self.memos_url}/search/memory"
         data = {
@@ -272,11 +314,11 @@ class MemosApiOnlineClient:
             "knowledgebase_ids": knowledgebase_ids,
             "mode": mode,
         }
-
         resp = requests.post(url, headers=self.headers, json=data, timeout=60)
         resp.raise_for_status()
         return resp.json()
 
+    @with_retry()
     def upload_file(self, knowledgebase_id: str, file_url: str):
         """Upload file."""
         url = f"{self.memos_url}/add/knowledgebase-file"
@@ -288,12 +330,12 @@ class MemosApiOnlineClient:
                 }
             ],
         }
-
         resp = requests.post(url, headers=self.headers, json=data, timeout=60)
         resp.raise_for_status()
         return resp.json()
 
-    def check_file(self, file_ids: list[str]):
+    @with_retry()
+    def check_file(self, dataset_id: str, file_ids: list[str]):
         """Check file state."""
         url = f"{self.memos_url}/get/knowledgebase-file"
         data = {"file_ids": file_ids}
@@ -328,6 +370,7 @@ class SupermemoryClient:
             t = f"tag_{t}" if t else "tag_default"
         return t
 
+    @with_retry()
     def add(
         self, content: str | None = None, user_id: str | None = None, messages: list | None = None
     ):
@@ -337,16 +380,7 @@ class SupermemoryClient:
                 for msg in messages
             )
 
-            max_retries = 5
-            for attempt in range(max_retries):
-                try:
-                    self.client.memories.add(content=content, container_tag=user_id)
-                    break
-                except Exception as e:
-                    if attempt < max_retries - 1:
-                        time.sleep(2**attempt)
-                    else:
-                        raise e
+            self.client.memories.add(content=content, container_tag=user_id)
             return
 
         payload = {
@@ -364,6 +398,7 @@ class SupermemoryClient:
         resp.raise_for_status()
         return resp.json()
 
+    @with_retry()
     def search(self, query: str, user_id: str, top_k: int):
         payload = {
             "q": query,
@@ -419,6 +454,7 @@ class MemuClient:
         res = [m.memory.content for m in user_memories.related_memories]
         return res
 
+    @with_retry()
     def wait_for_completion(self, task_id):
         while True:
             status = self.memu_client.get_task_status(task_id)
@@ -432,6 +468,7 @@ class FastGPTClient:
         self.base_url = os.getenv("FASTGPT_BASE_URL")
         self.api_key = os.getenv("FASTGPT_API_KEY")
 
+    @with_retry()
     def create_dataset(self, dataset_name: str):
         url = f"{self.base_url}/core/dataset/create"
         headers = {
@@ -446,6 +483,7 @@ class FastGPTClient:
         dataset_id = resp.json()["data"]
         return dataset_id
 
+    @with_retry()
     def delete_dataset(self, dataset_id: str):
         url = f"{self.base_url}/core/dataset/delete?id={dataset_id}"
         headers = {"Authorization": f"Bearer {self.api_key}"}
@@ -453,6 +491,7 @@ class FastGPTClient:
         resp.raise_for_status()
         return resp.json()
 
+    @with_retry()
     def add_content(self, dataset_id: str, content: str, collection_name: str):
         url = f"{self.base_url}/core/dataset/collection/create/text"
         headers = {
@@ -470,6 +509,7 @@ class FastGPTClient:
         resp.raise_for_status()
         return resp.json()
 
+    @with_retry()
     def upload_file(self, dataset_id: str, file_url: str):
         url = f"{self.base_url}/proApi/core/dataset/collection/create/externalFileUrl"
         headers = {
@@ -487,6 +527,7 @@ class FastGPTClient:
         resp.raise_for_status()
         return resp.json()
 
+    @with_retry()
     def batch_add_content(self, collection_id: str, data: list[str]):
         url = f"{self.base_url}/core/dataset/data/pushData"
         headers = {
@@ -498,6 +539,7 @@ class FastGPTClient:
         resp.raise_for_status()
         return resp.json()
 
+    @with_retry()
     def search(self, dataset_id: str, query: str, top_k: int):
         url = f"{self.base_url}/core/dataset/searchTest"
         headers = {
@@ -506,12 +548,13 @@ class FastGPTClient:
         }
         data = {"datasetId": dataset_id, "text": query, "searchMode": "embedding"}
         resp = requests.post(url, headers=headers, json=data, timeout=30)
-        resp.raise_for_status()
 
+        resp.raise_for_status()
         result = resp.json()
         data_list = result["data"]["list"]
         return data_list
 
+    @with_retry()
     def create_collection(self, dataset_id: str, collection_name: str):
         url = f"{self.base_url}/core/dataset/collection/create"
         headers = {
@@ -525,6 +568,110 @@ class FastGPTClient:
         return collection_id
 
 
+class DifyClient:
+    def __init__(self):
+        self.base_url = os.getenv("DIFY_BASE_URL")
+        self.api_key = os.getenv("DIFY_API_KEY")
+
+    @with_retry()
+    def create_dataset(self, dataset_name: str, top_k: int):
+        url = f"{self.base_url}/datasets"
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        data = {
+            "name": dataset_name,
+            "indexing_technique": "high_quality",
+            "permission": "only_me",
+            "embedding_model_provider": "openai",
+            "embedding_model": "text-embedding-3-small",
+            "retrieval_model": {
+                "search_method": "hybrid_search",
+                "top_k": top_k,
+                "reranking_enable": False,
+                "score_threshold_enabled": False,
+            },
+        }
+        resp = requests.post(url, headers=headers, json=data)
+        resp.raise_for_status()
+        dataset_id = resp.json()["id"]
+        return dataset_id
+
+    @with_retry()
+    def delete_dataset(self, dataset_id: str):
+        url = f"{self.base_url}/datasets/{dataset_id}"
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+        }
+        resp = requests.delete(url, headers=headers)
+        resp.raise_for_status()
+        return resp.json()
+
+    @with_retry()
+    def search(self, dataset_id: str, query: str, top_k: int):
+        url = f"{self.base_url}/datasets/{dataset_id}/retrieve"
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        data = {"query": query, "top_k": top_k}
+        resp = requests.post(url, headers=headers, json=data)
+        resp.raise_for_status()
+        data_list = resp.json()["records"]
+        return data_list
+
+    @with_retry()
+    def upload_file(self, dataset_id: str, file_url: str, mime_type: str = "application/pdf"):
+        url = f"{self.base_url}/datasets/{dataset_id}/document/create-by-file"
+        headers = {"Authorization": f"Bearer {self.api_key}"}
+
+        filename = os.path.basename(file_url)
+
+        data_json = {
+            "indexing_technique": "high_quality",
+            "process_rule": {
+                "mode": "custom",
+                "rules": {
+                    "pre_processing_rules": [
+                        {"id": "remove_extra_spaces", "enabled": True},
+                        {"id": "remove_urls_emails", "enabled": True},
+                    ],
+                    "segmentation": {"separator": "###", "max_tokens": 500},
+                },
+            },
+        }
+
+        with open(file_url, "rb") as f:
+            files = {
+                "data": (None, json.dumps(data_json), "text/plain"),
+                "file": (filename, f, mime_type),
+            }
+
+            resp = requests.post(url, headers=headers, files=files, timeout=300)
+        print("upload results: ", resp.json())
+        resp.raise_for_status()
+        return resp.json()
+
+    @with_retry()
+    def check_file(self, dataset_id: str, file_ids: list[str]):
+        """Check file state."""
+        url = f"{self.base_url}/datasets/{dataset_id}/documents/{file_ids[0]}/indexing-status"
+        headers = {"Authorization": f"Bearer {self.api_key}"}
+        resp = requests.get(url, headers=headers)
+        resp.raise_for_status()
+        file_info = resp.json()["data"]
+        return file_info
+
+    @with_retry()
+    def get_dataset_documents(self, dataset_id: str, page: int = 1, limit: int = 20):
+        url = f"{self.base_url}/datasets/{dataset_id}/documents?page={page}&limit={limit}"
+        headers = {"Authorization": f"Bearer {self.api_key}"}
+        resp = requests.get(url, headers=headers)
+        resp.raise_for_status()
+        return resp.json()
+
+
 if __name__ == "__main__":
     messages = [
         {"role": "user", "content": "杭州西湖有什么好玩的"},
@@ -532,14 +679,13 @@ if __name__ == "__main__":
     ]
     user_id = "lme_exper_user_default_499"
     iso_date = "2023-05-01T00:00:00.000Z"
-    timestamp = 1682899200
     query = "杭州西湖有什么"
     top_k = 5
 
     # MEMOS-API
-    client = MemosApiClient()
+    client = MemosApiOnlineClient()
     for m in messages:
         m["created_at"] = iso_date
-    client.add(messages, user_id, [user_id], "extreme_multimodal", "fine", "async")
-    memories = client.search(query, user_id, [user_id], top_k, "fast")
+    client.add(messages, user_id, user_id)
+    memories = client.search(query, user_id, top_k)
     print(memories)

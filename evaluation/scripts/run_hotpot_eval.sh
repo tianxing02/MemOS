@@ -7,11 +7,11 @@ export PYTHONPATH="$ROOT_DIR"
 
 # Common parameters
 LIB="fastgpt"
-WORKERS=20
+WORKERS=2
 TOPK=7
 ADD_MODE="fine"
 SEARCH_MODE="fine"
-VERSION_DIR="hotpot_fastgpt_0114"
+VERSION_DIR="hotpot_fastgpt_0119"
 ASYNC_MODE="sync"
 CHAT_MODEL="gpt-4o-mini"
 LIMIT=1000
@@ -33,18 +33,18 @@ python -m evaluation.scripts.hotpot.hotpot_ingestion \
 #   --version-dir "$VERSION_DIR" \
 
 # Search
-#echo "Running hotpot_search.py..."
-#python -m evaluation.scripts.hotpot.hotpot_search \
-#  --lib "$LIB" \
-#  --workers "$WORKERS" \
-#  --version-dir "$VERSION_DIR" \
-#  --top-k "$TOPK" \
-#  --search-mode "$SEARCH_MODE" \
-#  --limit "$LIMIT"
+echo "Running hotpot_search.py..."
+python -m evaluation.scripts.hotpot.hotpot_search \
+ --lib "$LIB" \
+ --workers "$WORKERS" \
+ --version-dir "$VERSION_DIR" \
+ --top-k "$TOPK" \
+ --search-mode "$SEARCH_MODE" \
+ --limit "$LIMIT"
 
 # Eval
-#echo "Running hotpot_eval.py..."
-#python -m evaluation.scripts.hotpot.hotpot_eval \
+# echo "Running hotpot_eval.py..."
+# python -m evaluation.scripts.hotpot.hotpot_eval \
 #  --lib "$LIB" \
 #  --version-dir "$VERSION_DIR" \
 #  --workers "$WORKERS" \

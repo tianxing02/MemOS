@@ -10,43 +10,14 @@ from dotenv import load_dotenv
 from tqdm import tqdm
 
 from evaluation.scripts.hotpot.data_loader import load_hotpot_data
+from evaluation.scripts.utils.client import get_lib_client
 from evaluation.scripts.utils.metrics import Metrics
 
 
 load_dotenv()
 memos_knowledgebase_id = os.getenv("MEMOS_KNOWLEDGEBASE_ID_HOTPOT")
-
-
-def retry_operation(func, *args, retries=5, delay=2, **kwargs):
-    for attempt in range(retries):
-        try:
-            return func(*args, **kwargs)
-        except Exception as e:
-            if attempt < retries - 1:
-                func_name = getattr(func, "__name__", "Operation")
-                print(f"[Retry] {func_name} failed: {e}. Retrying in {delay}s...")
-                time.sleep(delay)
-                delay *= 2
-            else:
-                raise e
-
-
-def _get_lib_client(lib: str):
-    if lib == "mem0":
-        from evaluation.scripts.utils.client import Mem0Client
-
-        return Mem0Client(enable_graph=False)
-    if lib == "supermemory":
-        from evaluation.scripts.utils.client import SupermemoryClient
-
-        return SupermemoryClient()
-    if lib == "memos-online":
-        from evaluation.scripts.utils.client import MemosApiOnlineClient
-
-        return MemosApiOnlineClient()
-    from evaluation.scripts.utils.client import MemosApiClient
-
-    return MemosApiClient()
+fastgpt_dataset_id = os.getenv("FASTGPT_DATASET_ID_HOTPOT")
+dify_dataset_id = os.getenv("DIFY_DATASET_ID_HOTPOT")
 
 
 def _load_added_ids(records_path: Path) -> dict[str, str | None]:
@@ -98,26 +69,6 @@ def _build_tasks(ctx: dict | list | None) -> list[str]:
     return tasks
 
 
-def _build_memory_texts(ctx: dict | list | None) -> list[str]:
-    texts: list[str] = []
-
-    if not ctx:
-        return texts
-
-    for item in ctx:
-        if not isinstance(item, list | tuple) or len(item) != 2:
-            continue
-
-        title, sentences = item
-        if not isinstance(sentences, list):
-            continue
-
-        for sentence in sentences:
-            texts.append(f"{title}: {sentence}")
-
-    return texts
-
-
 def add_context_memories(
     client,
     lib: str,
@@ -132,11 +83,10 @@ def add_context_memories(
         return None
 
     file_id = None
+    file_url = f"{url_prefix.rstrip('/')}/{user_id}_context.txt"
 
-    if lib == "memos-online":
-        file_url = f"{url_prefix.rstrip('/')}/{user_id}_context.txt"
-        result = retry_operation(
-            client.upload_file,
+    if lib == "memos-api-online":
+        result = client.upload_file(
             memos_knowledgebase_id,
             file_url,
         )
@@ -145,8 +95,7 @@ def add_context_memories(
     if lib == "memos":
         messages = [{"type": "text", "text": content} for content in tasks]
         writable_cube_ids = [user_id]
-        retry_operation(
-            client.add,
+        client.add(
             messages=messages,
             user_id=user_id,
             writable_cube_ids=writable_cube_ids,
@@ -154,15 +103,33 @@ def add_context_memories(
             mode=mode,
             async_mode=async_mode,
         )
+    if lib == "fastgpt":
+        result = client.upload_file(dataset_id=fastgpt_dataset_id, file_url=file_url)
+        file_id = result["data"]["collectionId"]
+
+    if lib == "dify":
+        documents_dir = os.path.abspath("evaluation/data/hotpot/documents")
+        os.makedirs(documents_dir, exist_ok=True)
+        file_path = os.path.join(documents_dir, f"{user_id}_context.txt")
+
+        if not os.path.exists(file_path):
+            with open(file_path, "w", encoding="utf-8") as f:
+                for task in tasks:
+                    f.write(task + "\n")
+
+        result = client.upload_file(
+            dataset_id=dify_dataset_id, file_url=file_path, mime_type="text/plain"
+        )
+        file_id = result["batch"]
 
     if lib == "mem0":
         ts = int(time.time())
         messages = [{"role": "user", "content": content} for content in tasks]
-        retry_operation(client.add, messages=messages, user_id=user_id, timestamp=ts, batch_size=10)
+        client.add(messages=messages, user_id=user_id, timestamp=ts, batch_size=10)
 
     if lib == "supermemory":
         for content in tasks:
-            retry_operation(client.add, content=content, user_id=user_id)
+            client.add(content=content, user_id=user_id)
 
     return file_id
 
@@ -196,7 +163,7 @@ def main(argv: list[str] | None = None) -> None:
     print("hotpotQA Product Add Concurrent Tool")
     print("=" * 60)
 
-    output_dir = Path("evaluation/data/hotpot")
+    output_dir = Path("evaluation/results/hotpot")
     if args.version_dir:
         output_dir = output_dir / args.version_dir
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -218,7 +185,7 @@ def main(argv: list[str] | None = None) -> None:
     if not pending_items:
         return
 
-    client = _get_lib_client(args.lib)
+    client = get_lib_client(args.lib)
     metrics = Metrics()
 
     def do_ingest(item):
@@ -244,10 +211,7 @@ def main(argv: list[str] | None = None) -> None:
             try:
                 sid, fid = f.result()
                 if sid:
-                    if args.lib == "memos-online":
-                        added_ids[sid] = str(fid) if fid else None
-                    else:
-                        added_ids.setdefault(sid, None)
+                    added_ids[sid] = str(fid) if fid else None
 
                     if len(added_ids) % 20 == 0:
                         _save_added_ids(records_path, added_ids)

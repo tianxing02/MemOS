@@ -45,7 +45,7 @@ def memos_search(client, query, user_id, top_k):
     start = time()
     results = client.search(query=query, user_id=user_id, top_k=top_k)
     context = (
-        "\n".join([i["memory"] for i in results["text_mem"][0]["memories"]])
+        "\n".join([i["memory_value"] for i in results["data"]["memory_detail_list"]])
         + f"\n{results.get('pref_string', '')}"
     )
     context = MEMOS_CONTEXT_TEMPLATE.format(user_id=user_id, memories=context)
@@ -151,9 +151,10 @@ def process_user(lme_df, conv_idx, frame, version, top_k=20):
         }
     )
 
-    os.makedirs(f"results/lme/{frame}-{version}/tmp", exist_ok=True)
+    os.makedirs(f"evaluation/results/lme/{frame}-{version}/tmp", exist_ok=True)
     with open(
-        f"results/lme/{frame}-{version}/tmp/{frame}_lme_search_results_{conv_idx}.json", "w"
+        f"evaluation/results/lme/{frame}-{version}/tmp/{frame}_lme_search_results_{conv_idx}.json",
+        "w",
     ) as f:
         json.dump(search_results, f, indent=4)
     print(f"💾 Search results for conversation {conv_idx} saved...")
@@ -163,7 +164,9 @@ def process_user(lme_df, conv_idx, frame, version, top_k=20):
 
 
 def load_existing_results(frame, version, group_idx):
-    result_path = f"results/lme/{frame}-{version}/tmp/{frame}_lme_search_results_{group_idx}.json"
+    result_path = (
+        f"evaluation/results/lme/{frame}-{version}/tmp/{frame}_lme_search_results_{group_idx}.json"
+    )
     if os.path.exists(result_path):
         try:
             with open(result_path) as f:
@@ -178,7 +181,7 @@ def main(frame, version, top_k=20, num_workers=2):
     print(f"🔍 LONGMEMEVAL SEARCH - {frame.upper()} v{version}".center(80))
     print("=" * 80)
 
-    lme_df = pd.read_json("data/longmemeval/longmemeval_s.json")
+    lme_df = pd.read_json("evaluation/data/longmemeval/longmemeval_s.json")
     print("📚 Loaded LongMemeval dataset from data/longmemeval/longmemeval_s.json")
     num_multi_sessions = len(lme_df)
     print(f"👥 Number of users: {num_multi_sessions}")
@@ -212,9 +215,13 @@ def main(frame, version, top_k=20, num_workers=2):
     print(f"⏱️  Total time taken to search {num_multi_sessions} users: {elapsed_time_str}")
     print(f"🔄 Framework: {frame} | Version: {version} | Workers: {num_workers}")
 
-    with open(f"results/lme/{frame}-{version}/{frame}_lme_search_results.json", "w") as f:
+    with open(
+        f"evaluation/results/lme/{frame}-{version}/{frame}_lme_search_results.json", "w"
+    ) as f:
         json.dump(dict(all_search_results), f, indent=4)
-    print(f"📁 Results saved to: results/lme/{frame}-{version}/{frame}_lme_search_results.json")
+    print(
+        f"📁 Results saved to: evaluation/results/lme/{frame}-{version}/{frame}_lme_search_results.json"
+    )
     print("=" * 80 + "\n")
 
 

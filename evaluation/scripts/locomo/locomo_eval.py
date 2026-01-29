@@ -297,7 +297,7 @@ async def main(frame, version="default", options=None, num_runs=1, max_workers=4
     )
     print(f"Using {max_workers} concurrent workers for processing groups")
 
-    results_dir = f"results/locomo/{frame}-{version}"
+    results_dir = f"evaluation/results/locomo/{frame}-{version}"
     response_path = f"{results_dir}/{frame}_locomo_responses.json"
     judged_path = f"{results_dir}/{frame}_locomo_judged.json"
 

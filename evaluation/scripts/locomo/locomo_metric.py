@@ -31,8 +31,8 @@ args = parser.parse_args()
 lib = args.lib
 version = args.version
 
-judged_path = f"results/locomo/{lib}-{version}/{lib}_locomo_judged.json"
-grade_path = f"results/locomo/{lib}-{version}/{lib}_locomo_grades.json"
+judged_path = f"evaluation/results/locomo/{lib}-{version}/{lib}_locomo_judged.json"
+grade_path = f"evaluation/results/locomo/{lib}-{version}/{lib}_locomo_grades.json"
 
 # Load the input data from the file
 with open(judged_path) as file:
@@ -367,7 +367,7 @@ with open(grade_path, "w") as outfile:
     json.dump(results, outfile, indent=4)
 
 # Save results to Excel
-excel_path = f"results/locomo/{lib}-{version}/{lib}_locomo_results.xlsx"
+excel_path = f"evaluation/results/locomo/{lib}-{version}/{lib}_locomo_results.xlsx"
 save_to_excel(results, excel_path)
 
 # Print the LLM-as-a-Judge score to match the formatting in locomo_eval.py

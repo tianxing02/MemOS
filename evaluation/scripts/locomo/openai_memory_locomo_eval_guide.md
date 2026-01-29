@@ -20,7 +20,7 @@ import json
 import os
 
 # Ensure the path to the dataset is correct
-LOCOMO_DATA_PATH = "data/locomo/locomo10.json"
+LOCOMO_DATA_PATH = "evaluation/data/locomo/locomo10.json"
 SAVE_DIR = "openai_inputs"
 
 os.makedirs(SAVE_DIR, exist_ok=True)

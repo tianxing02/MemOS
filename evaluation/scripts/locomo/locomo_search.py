@@ -106,11 +106,11 @@ def memos_api_search(
     search_b_results = client.search(query=query, user_id=speaker_b_user_id, top_k=top_k)
 
     speaker_a_context = (
-        "\n".join([i["memory"] for i in search_a_results["text_mem"][0]["memories"]])
+        "\n".join([i["memory_value"] for i in search_a_results["data"]["memory_detail_list"]])
         + f"\n{search_a_results.get('pref_string', '')}"
     )
     speaker_b_context = (
-        "\n".join([i["memory"] for i in search_b_results["text_mem"][0]["memories"]])
+        "\n".join([i["memory_value"] for i in search_b_results["data"]["memory_detail_list"]])
         + f"\n{search_b_results.get('pref_string', '')}"
     )
 
@@ -221,9 +221,7 @@ def search_query(client, query, metadata, frame, version, top_k=20):
 
 
 def load_existing_results(frame, version, group_idx):
-    result_path = (
-        f"results/locomo/{frame}-{version}/tmp/{frame}_locomo_search_results_{group_idx}.json"
-    )
+    result_path = f"evaluation/results/locomo/{frame}-{version}/tmp/{frame}_locomo_search_results_{group_idx}.json"
     if os.path.exists(result_path):
         try:
             with open(result_path) as f:
@@ -306,9 +304,10 @@ def process_user(conv_idx, locomo_df, frame, version, top_k=20, num_workers=1):
             if result:
                 search_results[conv_id].append(result)
 
-    os.makedirs(f"results/locomo/{frame}-{version}/tmp/", exist_ok=True)
+    os.makedirs(f"evaluation/results/locomo/{frame}-{version}/tmp/", exist_ok=True)
     with open(
-        f"results/locomo/{frame}-{version}/tmp/{frame}_locomo_search_results_{conv_idx}.json", "w"
+        f"evaluation/results/locomo/{frame}-{version}/tmp/{frame}_locomo_search_results_{conv_idx}.json",
+        "w",
     ) as f:
         json.dump(dict(search_results), f, indent=2)
         print(f"Save search results {conv_idx}")
@@ -318,10 +317,10 @@ def process_user(conv_idx, locomo_df, frame, version, top_k=20, num_workers=1):
 
 def main(frame, version="default", num_workers=1, top_k=20):
     load_dotenv()
-    locomo_df = pd.read_json("data/locomo/locomo10.json")
+    locomo_df = pd.read_json("evaluation/data/locomo/locomo10.json")
 
     num_users = 10
-    os.makedirs(f"results/locomo/{frame}-{version}/", exist_ok=True)
+    os.makedirs(f"evaluation/results/locomo/{frame}-{version}/", exist_ok=True)
     all_search_results = defaultdict(list)
 
     for idx in range(num_users):
@@ -330,7 +329,9 @@ def main(frame, version="default", num_workers=1, top_k=20):
         for conv_id, results in user_results.items():
             all_search_results[conv_id].extend(results)
 
-    with open(f"results/locomo/{frame}-{version}/{frame}_locomo_search_results.json", "w") as f:
+    with open(
+        f"evaluation/results/locomo/{frame}-{version}/{frame}_locomo_search_results.json", "w"
+    ) as f:
         json.dump(dict(all_search_results), f, indent=2)
         print("Save all search results")
 

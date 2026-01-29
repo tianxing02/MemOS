@@ -233,9 +233,9 @@ def main():
 
     mem_client = MemobaseClient()
 
-    os.makedirs(f"results/prefeval/{args.lib}_{args.version}", exist_ok=True)
+    os.makedirs(f"evaluation/results/prefeval/{args.lib}_{args.version}", exist_ok=True)
     success_records = set()
-    record_file = f"results/prefeval/{args.lib}_{args.version}/success_records.txt"
+    record_file = f"evaluation/results/prefeval/{args.lib}_{args.version}/success_records.txt"
     if os.path.exists(record_file):
         print(f"Loading existing success records from {record_file}...")
         with open(record_file, encoding="utf-8") as f:

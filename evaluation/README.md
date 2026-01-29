@@ -82,3 +82,21 @@ get `questions_32k.csv` and `shared_contexts_32k.jsonl` from https://huggingface
 # If you want to use MIRIX, edit the the configuration in ./scripts/personamem/config.yaml
 ./scripts/run_pm_eval.sh
 ```
+
+### Weekly Evaluation
+We provide a unified script to run all major evaluations (`LoCoMo`, `LongMemEval`, `PersonaMem`, `PrefEval`) sequentially. This is useful for regular benchmarking.
+
+**Manual Execution:**
+```bash
+./run_weekly_evals.sh
+```
+
+**Scheduled Execution (Crontab):**
+To run the evaluation weekly (e.g., every Sunday at 2:00 AM), add the following line to your crontab (`crontab -e`):
+
+```bash
+0 2 * * 0 /absolute/path/to/MemOS/evaluation/run_weekly_evals.sh
+```
+*Note: Please replace `/absolute/path/to/MemOS` with your actual project path.*
+
+Logs will be saved in `evaluation/logs/`.

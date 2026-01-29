@@ -11,15 +11,11 @@ from evaluation.scripts.utils.client import MemosApiOnlineClient, get_lib_client
 
 
 load_dotenv()
-# Knowledgebase ID used when re-uploading LongBench-v2 files
-memos_knowledgebase_id = os.getenv("MEMOS_KNOWLEDGEBASE_ID_LONGBENCH_V2")
-dify_dataset_id = os.getenv("DIFY_DATASET_ID_LONGBENCH_V2")
+memos_knowledgebase_id = os.getenv("MEMOS_KNOWLEDGEBASE_ID_MM_LONGBENCH")
+dify_dataset_id = os.getenv("DIFY_DATASET_ID_MM_LONGBENCH")
 
 
 def _load_added_ids(records_path: Path) -> dict[str, str | None]:
-    """
-    Load mapping from sample_id (version-prefixed user id) to file_id from add_results.json.
-    """
     if not records_path.exists():
         return {}
     try:
@@ -35,15 +31,12 @@ def _load_added_ids(records_path: Path) -> dict[str, str | None]:
 def _check_file_status(
     client: MemosApiOnlineClient, lib: str, dataset_id: str, added_ids: dict, batch_size: int
 ) -> dict[str, dict[str, str | None]]:
-    """
-    Phase 1: Query file processing status for all given file_ids in batches.
-    Returns file_id -> {name, size, status}.
-    """
     file_status: dict[str, dict[str, str | None]] = {}
 
     if lib == "dify":
+        # Dify implementation using get_dataset_documents
         page = 1
-        limit = 20
+        limit = 20  # Adjust limit as needed
         has_more = True
 
         while has_more:
@@ -62,14 +55,19 @@ def _check_file_status(
                         "name": file_name,
                         "status": item.get("indexing_status"),
                         "error": item.get("error"),
-                        "id": item.get("id"),
+                        "id": item.get("id"),  # Keep Dify ID for reference if needed
                     }
             except Exception as e:
                 print(f"[Check] error fetching dify documents page {page}: {e}")
                 break
+
         return file_status
 
     file_ids = sorted({fid for fid in added_ids.values() if fid})
+    print(f"[Check] total file ids: {len(file_ids)}")
+    if not file_ids:
+        return {}
+
     for i in tqdm(range(0, len(file_ids), batch_size), desc="Checking files"):
         batch = file_ids[i : i + batch_size]
         try:
@@ -77,21 +75,22 @@ def _check_file_status(
         except Exception as e:
             print(f"[Check] error for batch starting at {i}: {e}")
             continue
-        if not isinstance(resp, dict):
-            continue
-        data = resp.get("data") or {}
-        details = data.get("file_detail_list") or []
-        for item in details:
-            if not isinstance(item, dict):
-                continue
-            fid = item.get("id")
-            if not fid:
-                continue
-            file_status[str(fid)] = {
-                "name": item.get("name"),
-                "size": item.get("size"),
-                "status": item.get("status"),
-            }
+
+        if lib == "memos-api-online":
+            data = resp.get("data") or {}
+            details = data.get("file_detail_list") or []
+            for item in details:
+                if not isinstance(item, dict):
+                    continue
+                fid = item.get("id")
+                if not fid:
+                    continue
+                file_status[str(fid)] = {
+                    "name": item.get("name"),
+                    "size": item.get("size"),
+                    "status": item.get("status"),
+                }
+
     return file_status
 
 
@@ -102,72 +101,62 @@ def _reupload_failed_files(
     url_prefix: str,
     lib: str,
 ) -> list[dict[str, str | None]]:
-    """
-    Phase 2: Re-upload files whose status == PROCESSING_FAILED (or 'error' for Dify).
-    LongBench-v2 user_id is '<version>_<sample_id>', so the file URL uses the last segment.
-    Returns a list of per-file reupload results for auditing.
-    """
-    fid_to_user: dict[str, str] = {}
+    fid_to_filename: dict[str, str] = {}
+
     if lib != "dify":
-        for uid, fid in added_ids.items():
+        for filename, fid in added_ids.items():
             if fid:
-                fid_to_user[str(fid)] = str(uid)
+                fid_to_filename[str(fid)] = str(filename)
 
     reupload_results: list[dict[str, str | None]] = []
 
     if lib == "dify":
+        # For dify, keys in file_status are filenames
         failed_files = [
             filename for filename, info in file_status.items() if (info.get("status") == "error")
         ]
     else:
-        failed_files = [
-            fid for fid, info in file_status.items() if (info.get("status") == "PROCESSING_FAILED")
+        # For memos, keys in file_status are file_ids
+        failed_ids = [
+            fid for fid, info in file_status.items() if (info.get("status") == "PROCESSING")
         ]
+        failed_files = []  # Not used for memos logic below which iterates failed_ids
 
-    for item in tqdm(failed_files, desc="Reuploading failed files"):
+    iterator = failed_files if lib == "dify" else failed_ids
+
+    for item in tqdm(iterator, desc="Reuploading failed files"):
         if lib == "dify":
-            filename = item
-            # sample_id is filename without extension (assuming .txt)
-            # Actually we just need the local path
-            file_url = os.path.abspath(
-                os.path.join("evaluation/data/longbench_v2/documents", filename)
-            )
-
-            # For reporting
-            uid = filename  # using filename as uid for reporting context
-            fid = file_status[filename].get("id")
-
-            if not os.path.exists(file_url):
-                reupload_results.append(
-                    {
-                        "old_file_id": fid,
-                        "user_id": uid,
-                        "new_file_id": None,
-                        "ok": "false",
-                        "error": "local_file_not_found",
-                    }
-                )
-                continue
+            filename = item  # item is filename
+            fid = file_status[filename].get(
+                "id"
+            )  # get the dify doc id if needed, though we reupload by file path
         else:
-            fid = item
-            uid = fid_to_user.get(fid)
-            if not uid:
-                reupload_results.append(
-                    {
-                        "old_file_id": fid,
-                        "user_id": None,
-                        "new_file_id": None,
-                        "ok": "false",
-                        "error": "user_id_not_found",
-                    }
-                )
-                continue
-            file_url = f"{url_prefix.rstrip('/')}/{uid.split('_')[-1]}.txt"
+            fid = item  # item is fid
+            filename = fid_to_filename.get(fid)
+
+        if not filename:
+            reupload_results.append(
+                {
+                    "old_file_id": fid,
+                    "filename": None,
+                    "new_file_id": None,
+                    "ok": "false",
+                    "error": "filename_not_found",
+                }
+            )
+            continue
+
+        if lib == "dify":
+            file_url = os.path.abspath(
+                os.path.join("evaluation/data/mmlongbench/documents", filename)
+            )
+        else:
+            file_url = f"{url_prefix.rstrip('/')}/{filename}"
 
         try:
             if lib == "dify":
-                resp = client.upload_file(dify_dataset_id or "", file_url, mime_type="text/plain")
-                new_id = resp.get("batch")  # Dify returns batch id
+                resp = client.upload_file(dify_dataset_id or "", file_url)
+                new_id = resp.get("batch")
             else:
                 resp = client.upload_file(memos_knowledgebase_id or "", file_url)
                 new_id = None
@@ -179,10 +168,8 @@ def _reupload_failed_files(
 
             reupload_results.append(
                 {
-                    "old_file_id": fid
-                    if lib != "dify"
-                    else filename,  # Use filename as identifier for Dify old_id context
-                    "user_id": uid,
+                    "old_file_id": fid,
+                    "filename": filename,
                     "new_file_id": new_id,
                     "ok": "true",
                     "error": None,
@@ -191,22 +178,20 @@ def _reupload_failed_files(
         except Exception as e:
             reupload_results.append(
                 {
-                    "old_file_id": fid if lib != "dify" else filename,
-                    "user_id": uid,
+                    "old_file_id": fid,
+                    "filename": filename,
                     "new_file_id": None,
                     "ok": "false",
                     "error": str(e),
                 }
             )
+
     return reupload_results
 
 
 def main(argv: list[str] | None = None) -> None:
-    """
-    Orchestrate file status checking and failed-file reupload for LongBench-v2 memos-api-online runs.
-    """
     parser = argparse.ArgumentParser(
-        description="Check LongBench-v2 memos-api-online file status and reupload failed."
+        description="Check MMLongbench memos-api-online file status and reupload failed files."
     )
     parser.add_argument("--lib", type=str, default="memos-api-online")
     parser.add_argument("--version-dir", "-v", default=None)
@@ -214,15 +199,11 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--url-prefix",
         "-u",
-        default="https://memos-knowledge-base-file-pre.oss-cn-shanghai.aliyuncs.com/longbench_v2_text_files/",
+        default="https://memos-knowledge-base-file-pre.oss-cn-shanghai.aliyuncs.com/mmlongbench_pdf_files/",
     )
     args = parser.parse_args(argv)
 
-    if args.lib != "memos-api-online" and args.lib != "dify":
-        print(f"Only memos-api-online and dify are supported, got lib={args.lib}")
-        return
-
-    output_dir = Path("evaluation/results/longbench_v2")
+    output_dir = Path("evaluation/results/mmlongbench")
     if args.version_dir:
         output_dir = output_dir / args.version_dir
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -233,18 +214,13 @@ def main(argv: list[str] | None = None) -> None:
     added_ids = _load_added_ids(records_path)
     file_ids = sorted({fid for fid in added_ids.values() if fid})
 
-    if args.lib != "dify":
-        print(f"[Check] total file ids: {len(file_ids)}")
-        if not file_ids:
-            return
-
     client = get_lib_client(args.lib)
     batch_size = max(1, args.batch_size)
 
     file_status = {}
     if args.lib == "dify":
         file_status = _check_file_status(client, args.lib, dify_dataset_id, added_ids, 1)
-    else:
+    elif args.lib == "memos-api-online":
         file_status = _check_file_status(
             client, args.lib, memos_knowledgebase_id, added_ids, batch_size
         )
@@ -252,8 +228,6 @@ def main(argv: list[str] | None = None) -> None:
     reupload_results = _reupload_failed_files(
         client, file_status, added_ids, args.url_prefix, args.lib
     )
-
-    # Update added records with new file ids
     if reupload_results:
         try:
             obj: dict = {}
@@ -271,8 +245,8 @@ def main(argv: list[str] | None = None) -> None:
             else:
                 added_obj = dict(added_ids)
             for item in reupload_results:
-                if item.get("ok") == "true" and item.get("user_id") and item.get("new_file_id"):
-                    added_obj[str(item["user_id"])] = str(item["new_file_id"])
+                if item.get("ok") == "true" and item.get("filename") and item.get("new_file_id"):
+                    added_obj[str(item["filename"])] = str(item["new_file_id"])
             obj["added"] = dict(sorted(added_obj.items()))
             tmp_r = records_path.with_suffix(records_path.suffix + ".tmp")
             tmp_r.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -285,16 +259,9 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.lib == "dify":
         file_detail_list = []
-        # Iterate added_ids to report status for all tracked files
-        for sample_id in sorted(added_ids.keys()):
-            filename = f"{sample_id}.txt"
+        for filename in sorted(added_ids.keys()):
             info = file_status.get(filename) or {}
-            detail = {
-                "sample_id": sample_id,
-                "filename": filename,
-                "batch_id": added_ids.get(sample_id),
-                **info,
-            }
+            detail = {"filename": filename, "batch_id": added_ids.get(filename), **info}
             file_detail_list.append(detail)
     else:
         file_detail_list = [{"id": fid, **(file_status.get(fid) or {})} for fid in file_ids]
