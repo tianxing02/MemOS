@@ -6,7 +6,7 @@ cd "$ROOT_DIR"
 export PYTHONPATH="$ROOT_DIR"
 
 # Common parameters
-LIB="memos-online"
+LIB="memos-api-online"
 WORKERS=5
 TOPK=30
 ADD_MODE="fine"
@@ -15,7 +15,7 @@ VERSION_DIR="test_0113_memos_02"
 ASYNC_MODE="sync"
 CHAT_MODEL="gpt-4o-mini"
 #CHAT_MODEL="o4-mini"
-LIMIT=300
+LIMIT=20
 
 # # Add / Ingestion
 # echo "Running longbench_v2_ingestion.py..."
@@ -25,30 +25,30 @@ LIMIT=300
 #   --version-dir "$VERSION_DIR" \
 #   --mode "$ADD_MODE" \
 #   --async-mode "$ASYNC_MODE" \
-#   # --limit "$LIMIT"
+#   --limit "$LIMIT"
 
-# #check
-# echo "Running longbench_v2_check_files.py..."
-# python -m evaluation.scripts.longbench_v2.longbench_v2_check_files \
-#   --lib "$LIB" \
-#   --version-dir "$VERSION_DIR" \
-
-# Search
-echo "Running longbench_v2_search.py..."
-python -m evaluation.scripts.longbench_v2.longbench_v2_search \
- --lib "$LIB" \
- --workers "$WORKERS" \
- --version-dir "$VERSION_DIR" \
- --top-k "$TOPK" \
- --mode "$SEARCH_MODE" \
-#  --limit "$LIMIT"
-
-# Eval
- echo "Running longbench_v2_eval.py..."
- python -m evaluation.scripts.longbench_v2.longbench_v2_eval \
+#check
+echo "Running longbench_v2_check_files.py..."
+python -m evaluation.scripts.longbench_v2.longbench_v2_check_files \
   --lib "$LIB" \
   --version-dir "$VERSION_DIR" \
-  --workers "$WORKERS" \
-  --chat-model "$CHAT_MODEL"
+
+# # Search
+# echo "Running longbench_v2_search.py..."
+# python -m evaluation.scripts.longbench_v2.longbench_v2_search \
+#  --lib "$LIB" \
+#  --workers "$WORKERS" \
+#  --version-dir "$VERSION_DIR" \
+#  --top-k "$TOPK" \
+#  --mode "$SEARCH_MODE" \
+# #  --limit "$LIMIT"
+
+# # Eval
+#  echo "Running longbench_v2_eval.py..."
+#  python -m evaluation.scripts.longbench_v2.longbench_v2_eval \
+#   --lib "$LIB" \
+#   --version-dir "$VERSION_DIR" \
+#   --workers "$WORKERS" \
+#   --chat-model "$CHAT_MODEL"
 
 #echo "All scripts completed successfully!"

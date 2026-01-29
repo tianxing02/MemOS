@@ -12,6 +12,7 @@ from evaluation.scripts.utils.client import MemosApiOnlineClient
 
 load_dotenv()
 memos_knowledgebase_id = os.getenv("MEMOS_KNOWLEDGEBASE_ID_HOTPOT")
+dify_dataset_id = os.getenv("DIFY_DATASET_ID_HOTPOT")
 
 
 # Load user_id -> file_id mapping from added_records.json
@@ -158,7 +159,7 @@ def main(argv: list[str] | None = None) -> None:
         print(f"Only memos-api-online is supported, got lib={args.lib}")
         return
 
-    output_dir = Path("evaluation/data/hotpot")
+    output_dir = Path("evaluation/results/hotpot")
     if args.version_dir:
         output_dir = output_dir / args.version_dir
     output_dir.mkdir(parents=True, exist_ok=True)

@@ -130,6 +130,7 @@ def search_memory_for_line(line_data, mem_client, top_k_value):
 
     except Exception as e:
         user_id_from_data = json.loads(line).get("user_id", "N/A")
+        traceback.print_exc()
         print(f"Error searching memory for line {i + 1} (user_id: {user_id_from_data}): {e}")
         return None
 

@@ -7,12 +7,10 @@ import threading
 import time
 
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
 
 from dotenv import load_dotenv
-from langchain_text_splitters import Language, RecursiveCharacterTextSplitter
 
-from evaluation.scripts.utils.client import get_lib_client, retry_operation
+from evaluation.scripts.utils.client import get_lib_client
 from evaluation.scripts.utils.metrics import Metrics
 
 
@@ -20,6 +18,7 @@ load_dotenv()
 
 fastgpt_dataset_id = os.getenv("FASTGPT_DATASET_ID_MM_LONGBENCH")
 memos_knowledgebase_id = os.getenv("MEMOS_KNOWLEDGEBASE_ID_MM_LONGBENCH")
+dify_dataset_id = os.getenv("DIFY_DATASET_ID_MM_LONGBENCH")
 
 
 def read_filenames(filepath: str) -> list[str]:
@@ -42,8 +41,11 @@ def run_concurrent_add(
     url_prefix: str,
     user_prefix: str,
     workers: int,
-    mode: str = "fine",
-    async_mode: str = "sync",
+    mode: str | None = "fine",
+    async_mode: str | None = "sync",
+    output_path: str | None = None,
+    existing_added: dict | None = None,
+    config: dict | None = None,
 ) -> dict:
     """
     Execute concurrent add operations
@@ -56,6 +58,9 @@ def run_concurrent_add(
         workers: Concurrency
         mode: Mode
         async_mode: Async mode
+        output_path: Path to save output
+        existing_added: Dictionary of already added files
+        config: Configuration dictionary
 
     Returns:
         Statistics result
@@ -66,57 +71,70 @@ def run_concurrent_add(
     total_files = len(filenames)
     completed = 0
     completed_lock = threading.Lock()
+    file_write_lock = threading.Lock()
 
     added_ids: dict[str, str] = {}
+    all_added_ids = dict(existing_added) if existing_added else {}
+
+    start_time = time.time()
+
+    def save_checkpoint():
+        if not output_path:
+            return
+
+        try:
+            current_duration = time.time() - start_time
+            summary = metrics.summary()
+
+            checkpoint_data = {
+                "summary": summary,
+                "total_duration": current_duration,
+                "config": config,
+                "added": dict(sorted(all_added_ids.items())),
+            }
+
+            with open(output_path, "w", encoding="utf-8") as f:
+                json.dump(checkpoint_data, f, ensure_ascii=False, indent=2)
+
+        except Exception as e:
+            print(f"Warning: Failed to save checkpoint: {e}")
 
     def add_single_file(filename: str, doc_id: str = ""):
         nonlocal completed
 
-        file_url = f"{url_prefix.rstrip('/')}/{filename}"  # URL前缀 + 文件名
-        base_dir = Path("ppt_test_result")
-        all_md_files = list(base_dir.rglob("*.md"))
-        stem = Path(filename).stem.lower()
-        name = filename.lower()
-        md_path = ""
-        for md in all_md_files:
-            pstr = str(md).lower()
-            if (stem and stem in pstr) or (name and name in pstr):
-                md_path = md
-        text = md_path.read_text(encoding="utf-8", errors="ignore")
+        if lib == "dify":
+            file_url = os.path.abspath(
+                os.path.join("evaluation/data/mmlongbench/documents", filename)
+            )
+        else:
+            file_url = f"{url_prefix.rstrip('/')}/{filename}"
 
         start_time = time.perf_counter()
-        user_id = user_prefix + "_" + doc_id
 
         result = None
         try:
+            current_file_id = None
             if lib == "memos-api-online":
-                result = retry_operation(client.upload_file, memos_knowledgebase_id, file_url)
-                file_id = None
+                result = client.upload_file(memos_knowledgebase_id, file_url)
                 if isinstance(result, dict):
                     data = result.get("data") or []
                     if isinstance(data, list) and data:
                         first = data[0] if isinstance(data[0], dict) else {}
                         fid = first.get("id")
                         if fid:
-                            file_id = str(fid)
-                if file_id:
-                    added_ids[filename] = file_id
+                            current_file_id = str(fid)
             elif lib == "fastgpt":
-                result = retry_operation(
-                    client.upload_file, dataset_id=fastgpt_dataset_id, file_url=file_url
-                )
-                file_id = result["data"]["collectionId"]
-                added_ids[filename] = file_id
-            elif lib == "supermemory":
-                result = client.add(content=text, user_id=user_id)
-            elif lib == "mem0":
-                chunker = RecursiveCharacterTextSplitter.from_language(
-                    language=Language.PYTHON, chunk_size=5120, chunk_overlap=128
-                )
-                paragraphs = [p for p in chunker.split_text(text) if p.strip()]
-                messages = [{"role": "user", "content": p} for p in paragraphs]
-                ts = int(time.time())
-                result = client.add(messages=messages, user_id=doc_id, timestamp=ts, batch_size=10)
+                result = client.upload_file(dataset_id=fastgpt_dataset_id, file_url=file_url)
+                current_file_id = result["data"]["collectionId"]
+            elif lib == "dify":
+                result = client.upload_file(dataset_id=dify_dataset_id, file_url=file_url)
+                current_file_id = result["batch"]
+
+            if current_file_id:
+                with file_write_lock:
+                    added_ids[filename] = current_file_id
+                    all_added_ids[filename] = current_file_id
+                    save_checkpoint()
 
             duration = time.perf_counter() - start_time
             metrics.record(duration, True)
@@ -315,6 +333,16 @@ def main():
         print("[Add] no pending files, nothing to do.")
         return
 
+    config = {
+        "filenames_file": args.filenames_file,
+        "url_prefix": args.url_prefix,
+        "api_url": args.api_url,
+        "concurrency": args.workers,
+        "mode": args.mode,
+        "async_mode": args.async_mode,
+        "version_dir": args.version_dir,
+    }
+
     # Execute concurrent add
     result = run_concurrent_add(
         lib=args.lib,
@@ -324,6 +352,9 @@ def main():
         workers=args.workers,
         mode=args.mode,
         async_mode=args.async_mode,
+        output_path=output_path,
+        existing_added=existing_added,
+        config=config,
     )
 
     # Save results to file

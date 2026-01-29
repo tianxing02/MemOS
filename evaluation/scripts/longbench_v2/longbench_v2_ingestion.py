@@ -12,13 +12,14 @@ from dotenv import load_dotenv
 from langchain_text_splitters import Language, RecursiveCharacterTextSplitter
 from tqdm import tqdm
 
-from evaluation.scripts.utils.client import get_lib_client, retry_operation
+from evaluation.scripts.utils.client import get_lib_client
 from evaluation.scripts.utils.metrics import Metrics
 
 
 load_dotenv()
 fastgpt_dataset_id = os.getenv("FASTGPT_DATASET_ID_LONGBENCH_V2")
 memos_knowledgebase_id = os.getenv("MEMOS_KNOWLEDGEBASE_ID_LONGBENCH_V2")
+dify_dataset_id = os.getenv("DIFY_DATASET_ID_LONGBENCH_V2")
 
 
 def _load_dataset_jsonl(dataset_path: Path) -> list[dict]:
@@ -111,12 +112,10 @@ def ingest_context(
 
     file_id = ""
     if lib == "memos" or lib == "memos-api-online":
-        result = retry_operation(client.upload_file, memos_knowledgebase_id, file_url)
+        result = client.upload_file(memos_knowledgebase_id, file_url)
         file_id = result["data"][0]["id"]
     if lib == "fastgpt":
-        result = retry_operation(
-            client.upload_file, dataset_id=fastgpt_dataset_id, file_url=file_url
-        )
+        result = client.upload_file(dataset_id=fastgpt_dataset_id, file_url=file_url)
         file_id = result["data"]["collectionId"]
     if lib == "mem0":
         chunker = RecursiveCharacterTextSplitter.from_language(
@@ -125,10 +124,24 @@ def ingest_context(
         chunks = [p for p in chunker.split_text(context or "") if p.strip()]
 
         messages = [{"role": "user", "content": p} for p in chunks]
-        retry_operation(client.add, messages=messages, user_id=user_id, timestamp=ts, batch_size=10)
+        client.add(messages=messages, user_id=user_id, timestamp=ts, batch_size=10)
 
     if lib == "supermemory":
-        retry_operation(client.add, content=context, user_id=user_id)
+        client.add(content=context, user_id=user_id)
+
+    if lib == "dify":
+        documents_dir = os.path.abspath("evaluation/data/longbench_v2/documents")
+        os.makedirs(documents_dir, exist_ok=True)
+        file_path = os.path.join(documents_dir, f"{sample_id}.txt")
+
+        if not os.path.exists(file_path):
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write(context)
+
+        result = client.upload_file(
+            dataset_id=dify_dataset_id, file_url=file_path, mime_type="text/plain"
+        )
+        file_id = result["batch"]
 
     return sample_id, file_id
 

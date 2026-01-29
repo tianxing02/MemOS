@@ -10,13 +10,14 @@ from dotenv import load_dotenv
 from tqdm import tqdm
 
 from evaluation.scripts.hotpot.data_loader import load_hotpot_data
-from evaluation.scripts.utils.client import get_lib_client, retry_operation
+from evaluation.scripts.utils.client import get_lib_client
 from evaluation.scripts.utils.metrics import Metrics
 
 
 load_dotenv()
 memos_knowledgebase_id = os.getenv("MEMOS_KNOWLEDGEBASE_ID_HOTPOT")
 fastgpt_dataset_id = os.getenv("FASTGPT_DATASET_ID_HOTPOT")
+dify_dataset_id = os.getenv("DIFY_DATASET_ID_HOTPOT")
 
 
 def _load_added_ids(records_path: Path) -> dict[str, str | None]:
@@ -85,8 +86,7 @@ def add_context_memories(
     file_url = f"{url_prefix.rstrip('/')}/{user_id}_context.txt"
 
     if lib == "memos-api-online":
-        result = retry_operation(
-            client.upload_file,
+        result = client.upload_file(
             memos_knowledgebase_id,
             file_url,
         )
@@ -95,8 +95,7 @@ def add_context_memories(
     if lib == "memos":
         messages = [{"type": "text", "text": content} for content in tasks]
         writable_cube_ids = [user_id]
-        retry_operation(
-            client.add,
+        client.add(
             messages=messages,
             user_id=user_id,
             writable_cube_ids=writable_cube_ids,
@@ -105,19 +104,32 @@ def add_context_memories(
             async_mode=async_mode,
         )
     if lib == "fastgpt":
-        result = retry_operation(
-            client.upload_file, dataset_id=fastgpt_dataset_id, file_url=file_url
-        )
+        result = client.upload_file(dataset_id=fastgpt_dataset_id, file_url=file_url)
         file_id = result["data"]["collectionId"]
+
+    if lib == "dify":
+        documents_dir = os.path.abspath("evaluation/data/hotpot/documents")
+        os.makedirs(documents_dir, exist_ok=True)
+        file_path = os.path.join(documents_dir, f"{user_id}_context.txt")
+
+        if not os.path.exists(file_path):
+            with open(file_path, "w", encoding="utf-8") as f:
+                for task in tasks:
+                    f.write(task + "\n")
+
+        result = client.upload_file(
+            dataset_id=dify_dataset_id, file_url=file_path, mime_type="text/plain"
+        )
+        file_id = result["batch"]
 
     if lib == "mem0":
         ts = int(time.time())
         messages = [{"role": "user", "content": content} for content in tasks]
-        retry_operation(client.add, messages=messages, user_id=user_id, timestamp=ts, batch_size=10)
+        client.add(messages=messages, user_id=user_id, timestamp=ts, batch_size=10)
 
     if lib == "supermemory":
         for content in tasks:
-            retry_operation(client.add, content=content, user_id=user_id)
+            client.add(content=content, user_id=user_id)
 
     return file_id
 

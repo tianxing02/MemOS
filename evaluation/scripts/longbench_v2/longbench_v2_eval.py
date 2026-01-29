@@ -14,7 +14,6 @@ from dotenv import load_dotenv
 from openai import OpenAI
 from tqdm import tqdm
 
-from evaluation.scripts.utils.client import retry_operation
 from evaluation.scripts.utils.prompts import LONGBENCH_V2_ANSWER_PROMPT
 
 
@@ -45,8 +44,7 @@ def llm_answer(
         .replace("$C_D$", choices.get("D", ""))
     )
     messages = [{"role": "user", "content": prompt}]
-    resp = retry_operation(
-        oai_client.chat.completions.create,
+    resp = oai_client.chat.completions.create(
         model=model_name,
         messages=messages,
         temperature=0.1,

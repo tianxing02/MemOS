@@ -10,12 +10,13 @@ from pathlib import Path
 from tqdm import tqdm
 
 from evaluation.scripts.hotpot.data_loader import load_hotpot_data
-from evaluation.scripts.utils.client import get_lib_client, retry_operation
+from evaluation.scripts.utils.client import get_lib_client
 from evaluation.scripts.utils.metrics import Metrics
 
 
 memos_knowledgebase_id = os.getenv("MEMOS_KNOWLEDGEBASE_ID_HOTPOT")
 fastgpt_dataset_id = os.getenv("FASTGPT_DATASET_ID_HOTPOT")
+dify_dataset_id = os.getenv("DIFY_DATASET_ID_HOTPOT")
 
 
 def _load_existing_results(output_path: Path) -> tuple[list[dict], set[str]]:
@@ -74,8 +75,7 @@ def memos_search(
     client, user_id: str, query: str, top_k: int, search_mode: str
 ) -> tuple[str, list[list[str | int]]]:
     readable_cube_ids = [user_id]
-    results = retry_operation(
-        client.search,
+    results = client.search(
         query=query,
         user_id=user_id,
         readable_cube_ids=readable_cube_ids,
@@ -105,7 +105,7 @@ def memos_search(
 
 
 def mem0_search(client, user_id: str, query: str, top_k: int) -> tuple[str, list[list[str | int]]]:
-    res = retry_operation(client.search, query, user_id, top_k)
+    res = client.search(query, user_id, top_k)
     sources = [m.get("memory", "") for m in res.get("results", []) if m.get("memory")]
     mem_texts, dedup_sp = get_sources_info(sources)
     return mem_texts, dedup_sp
@@ -114,15 +114,21 @@ def mem0_search(client, user_id: str, query: str, top_k: int) -> tuple[str, list
 def supermemory_search(
     client, user_id: str, query: str, top_k: int
 ) -> tuple[str, list[list[str | int]]]:
-    sources = retry_operation(client.search, query, user_id, top_k)
+    sources = client.search(query, user_id, top_k)
     mem_texts, dedup_sp = get_sources_info(sources)
     return mem_texts, dedup_sp
 
 
 def fastgpt_search(client, query: str, top_k: int) -> tuple[str, list[list[str | int]]]:
-    result = retry_operation(client.search, dataset_id=fastgpt_dataset_id, query=query, top_k=top_k)
+    result = client.search(dataset_id=fastgpt_dataset_id, query=query, top_k=top_k)
     sources = [item["q"] for item in result[:top_k]]
     return sources, []
+
+
+def dify_search(client, query: str, top_k: int) -> tuple[list[str], list[list[str | int]]]:
+    result = client.search(dify_dataset_id, query, top_k)
+    mem_texts = [item["segment"]["content"] for item in result[:top_k]]
+    return mem_texts, []
 
 
 def search_one(
@@ -140,6 +146,8 @@ def search_one(
         memories, sp_list = supermemory_search(client, user_id, str(question), top_k)
     elif lib == "fastgpt":
         memories, sp_list = fastgpt_search(client, str(question), top_k)
+    elif lib == "dify":
+        memories, sp_list = dify_search(client, str(question), top_k)
     else:
         memories, sp_list = [], []
 

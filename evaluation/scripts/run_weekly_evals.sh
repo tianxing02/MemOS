@@ -1,16 +1,17 @@
 #!/bin/bash
 set -e
 
-# Get the directory where this script is located (MemOS/evaluation/scripts)
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-
-# Project root (MemOS)
 PROJECT_ROOT="$(dirname "$(dirname "$SCRIPT_DIR")")"
+PYTHON_BIN="${PYTHON_BIN:-python}"
 
 echo "Changing directory to project root: $PROJECT_ROOT"
 cd "$PROJECT_ROOT" || { echo "Failed to change directory"; exit 1; }
 
-# Base logs directory
+"$PYTHON_BIN" -m pip install ".[all]"
+"$PYTHON_BIN" -m pip install -r evaluation/requirements.txt
+export PYTHONPATH="${PROJECT_ROOT}/src:${PYTHONPATH}"
+
 LOG_BASE="evaluation/logs"
 
 # Timestamp (shared by all logs in this run)
@@ -83,9 +84,9 @@ run_script() {
     fi
 }
 
-# run_script "evaluation/scripts/run_lme_eval.sh"
-# run_script "evaluation/scripts/run_locomo_eval.sh"
-# run_script "evaluation/scripts/run_pm_eval.sh"
+run_script "evaluation/scripts/run_lme_eval.sh"
+run_script "evaluation/scripts/run_locomo_eval.sh"
+run_script "evaluation/scripts/run_pm_eval.sh"
 run_script "evaluation/scripts/run_prefeval_eval.sh"
 
 # Finish

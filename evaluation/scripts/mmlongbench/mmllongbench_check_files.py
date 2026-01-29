@@ -7,11 +7,12 @@ from pathlib import Path
 from dotenv import load_dotenv
 from tqdm import tqdm
 
-from evaluation.scripts.utils.client import MemosApiOnlineClient
+from evaluation.scripts.utils.client import MemosApiOnlineClient, get_lib_client
 
 
 load_dotenv()
 memos_knowledgebase_id = os.getenv("MEMOS_KNOWLEDGEBASE_ID_MM_LONGBENCH")
+dify_dataset_id = os.getenv("DIFY_DATASET_ID_MM_LONGBENCH")
 
 
 def _load_added_ids(records_path: Path) -> dict[str, str | None]:
@@ -28,31 +29,68 @@ def _load_added_ids(records_path: Path) -> dict[str, str | None]:
 
 
 def _check_file_status(
-    client: MemosApiOnlineClient, file_ids: list[str], batch_size: int
+    client: MemosApiOnlineClient, lib: str, dataset_id: str, added_ids: dict, batch_size: int
 ) -> dict[str, dict[str, str | None]]:
     file_status: dict[str, dict[str, str | None]] = {}
+
+    if lib == "dify":
+        # Dify implementation using get_dataset_documents
+        page = 1
+        limit = 20  # Adjust limit as needed
+        has_more = True
+
+        while has_more:
+            try:
+                resp = client.get_dataset_documents(dataset_id, page=page, limit=limit)
+                data = resp.get("data", [])
+                has_more = resp.get("has_more", False)
+                page += 1
+
+                for item in data:
+                    file_name = item.get("name")
+                    if not file_name:
+                        continue
+
+                    file_status[file_name] = {
+                        "name": file_name,
+                        "status": item.get("indexing_status"),
+                        "error": item.get("error"),
+                        "id": item.get("id"),  # Keep Dify ID for reference if needed
+                    }
+            except Exception as e:
+                print(f"[Check] error fetching dify documents page {page}: {e}")
+                break
+
+        return file_status
+
+    file_ids = sorted({fid for fid in added_ids.values() if fid})
+    print(f"[Check] total file ids: {len(file_ids)}")
+    if not file_ids:
+        return {}
+
     for i in tqdm(range(0, len(file_ids), batch_size), desc="Checking files"):
         batch = file_ids[i : i + batch_size]
         try:
-            resp = client.check_file(batch)
+            resp = client.check_file(dataset_id, batch)
         except Exception as e:
             print(f"[Check] error for batch starting at {i}: {e}")
             continue
-        if not isinstance(resp, dict):
-            continue
-        data = resp.get("data") or {}
-        details = data.get("file_detail_list") or []
-        for item in details:
-            if not isinstance(item, dict):
-                continue
-            fid = item.get("id")
-            if not fid:
-                continue
-            file_status[str(fid)] = {
-                "name": item.get("name"),
-                "size": item.get("size"),
-                "status": item.get("status"),
-            }
+
+        if lib == "memos-api-online":
+            data = resp.get("data") or {}
+            details = data.get("file_detail_list") or []
+            for item in details:
+                if not isinstance(item, dict):
+                    continue
+                fid = item.get("id")
+                if not fid:
+                    continue
+                file_status[str(fid)] = {
+                    "name": item.get("name"),
+                    "size": item.get("size"),
+                    "status": item.get("status"),
+                }
+
     return file_status
 
 
@@ -61,19 +99,41 @@ def _reupload_failed_files(
     file_status: dict[str, dict[str, str | None]],
     added_ids: dict[str, str | None],
     url_prefix: str,
+    lib: str,
 ) -> list[dict[str, str | None]]:
     fid_to_filename: dict[str, str] = {}
-    for filename, fid in added_ids.items():
-        if fid:
-            fid_to_filename[str(fid)] = str(filename)
+
+    if lib != "dify":
+        for filename, fid in added_ids.items():
+            if fid:
+                fid_to_filename[str(fid)] = str(filename)
 
     reupload_results: list[dict[str, str | None]] = []
-    failed_ids = [
-        fid for fid, info in file_status.items() if (info.get("status") == "PROCESSING_FAILED")
-    ]
 
-    for fid in tqdm(failed_ids, desc="Reuploading failed files"):
-        filename = fid_to_filename.get(fid)
+    if lib == "dify":
+        # For dify, keys in file_status are filenames
+        failed_files = [
+            filename for filename, info in file_status.items() if (info.get("status") == "error")
+        ]
+    else:
+        # For memos, keys in file_status are file_ids
+        failed_ids = [
+            fid for fid, info in file_status.items() if (info.get("status") == "PROCESSING")
+        ]
+        failed_files = []  # Not used for memos logic below which iterates failed_ids
+
+    iterator = failed_files if lib == "dify" else failed_ids
+
+    for item in tqdm(iterator, desc="Reuploading failed files"):
+        if lib == "dify":
+            filename = item  # item is filename
+            fid = file_status[filename].get(
+                "id"
+            )  # get the dify doc id if needed, though we reupload by file path
+        else:
+            fid = item  # item is fid
+            filename = fid_to_filename.get(fid)
+
         if not filename:
             reupload_results.append(
                 {
@@ -86,15 +146,26 @@ def _reupload_failed_files(
             )
             continue
 
-        file_url = f"{url_prefix.rstrip('/')}/{filename}"
+        if lib == "dify":
+            file_url = os.path.abspath(
+                os.path.join("evaluation/data/mmlongbench/documents", filename)
+            )
+        else:
+            file_url = f"{url_prefix.rstrip('/')}/{filename}"
+
         try:
-            resp = client.upload_file(memos_knowledgebase_id or "", file_url)
-            new_id = None
-            if isinstance(resp, dict):
-                data = resp.get("data") or {}
-                if isinstance(data, list) and data:
-                    first = data[0] if isinstance(data[0], dict) else {}
-                    new_id = str(first.get("id")) if first.get("id") else None
+            if lib == "dify":
+                resp = client.upload_file(dify_dataset_id or "", file_url)
+                new_id = resp.get("batch")
+            else:
+                resp = client.upload_file(memos_knowledgebase_id or "", file_url)
+                new_id = None
+                if isinstance(resp, dict):
+                    data = resp.get("data") or {}
+                    if isinstance(data, list) and data:
+                        first = data[0] if isinstance(data[0], dict) else {}
+                        new_id = str(first.get("id")) if first.get("id") else None
+
             reupload_results.append(
                 {
                     "old_file_id": fid,
@@ -132,11 +203,7 @@ def main(argv: list[str] | None = None) -> None:
     )
     args = parser.parse_args(argv)
 
-    if args.lib != "memos-api-online":
-        print(f"Only memos-api-online is supported, got lib={args.lib}")
-        return
-
-    output_dir = Path("evaluation/data/mmlongbench")
+    output_dir = Path("evaluation/results/mmlongbench")
     if args.version_dir:
         output_dir = output_dir / args.version_dir
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -146,16 +213,21 @@ def main(argv: list[str] | None = None) -> None:
 
     added_ids = _load_added_ids(records_path)
     file_ids = sorted({fid for fid in added_ids.values() if fid})
-    print(f"[Check] total file ids: {len(file_ids)}")
-    if not file_ids:
-        return
 
-    client = MemosApiOnlineClient()
+    client = get_lib_client(args.lib)
     batch_size = max(1, args.batch_size)
 
-    file_status = _check_file_status(client, file_ids, batch_size)
-    reupload_results = _reupload_failed_files(client, file_status, added_ids, args.url_prefix)
+    file_status = {}
+    if args.lib == "dify":
+        file_status = _check_file_status(client, args.lib, dify_dataset_id, added_ids, 1)
+    elif args.lib == "memos-api-online":
+        file_status = _check_file_status(
+            client, args.lib, memos_knowledgebase_id, added_ids, batch_size
+        )
 
+    reupload_results = _reupload_failed_files(
+        client, file_status, added_ids, args.url_prefix, args.lib
+    )
     if reupload_results:
         try:
             obj: dict = {}
@@ -184,11 +256,21 @@ def main(argv: list[str] | None = None) -> None:
             print(f"[Update] failed to update add_results: {e}")
 
     output_path = output_dir / f"{args.lib}_file_status.json"
+
+    if args.lib == "dify":
+        file_detail_list = []
+        for filename in sorted(added_ids.keys()):
+            info = file_status.get(filename) or {}
+            detail = {"filename": filename, "batch_id": added_ids.get(filename), **info}
+            file_detail_list.append(detail)
+    else:
+        file_detail_list = [{"id": fid, **(file_status.get(fid) or {})} for fid in file_ids]
+
     result_obj = {
         "lib": args.lib,
         "version_dir": args.version_dir,
-        "total": len(file_ids),
-        "file_detail_list": [{"id": fid, **(file_status.get(fid) or {})} for fid in file_ids],
+        "total": len(file_detail_list),
+        "file_detail_list": file_detail_list,
         "reupload_results": reupload_results,
     }
     tmp = output_path.with_suffix(output_path.suffix + ".tmp")
