@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import sys
 import time
 import traceback
 
@@ -10,14 +11,46 @@ from pathlib import Path
 from dotenv import load_dotenv
 from tqdm import tqdm
 
-from evaluation.scripts.utils.client import get_lib_client
+
+# Add project root and src to sys.path
+sys.path.append(os.getcwd())
+sys.path.append(os.path.join(os.getcwd(), "src"))
+
 from evaluation.scripts.utils.metrics import Metrics
+from memos.api import handlers
+from memos.api.handlers.add_handler import AddHandler
+from memos.api.handlers.base_handler import HandlerDependencies
+from memos.api.handlers.search_handler import SearchHandler
+from memos.api.product_models import APIADDRequest, APISearchRequest
 
 
 load_dotenv()
-fastgpt_dataset_id = os.getenv("FASTGPT_DATASET_ID_LONGBENCH_V2")
 memos_knowledgebase_id = os.getenv("MEMOS_KNOWLEDGEBASE_ID_LONGBENCH_V2")
-dify_dataset_id = os.getenv("DIFY_DATASET_ID_LONGBENCH_V2")
+
+# Initialize handlers
+print("=" * 80)
+print("Initializing service components...")
+print("=" * 80)
+# Use init_server from handlers as in add_from_handler.py
+components = handlers.init_server()
+dependencies = HandlerDependencies.from_init_server(components)
+search_handler = SearchHandler(dependencies)
+add_handler = AddHandler(dependencies)
+
+
+def add_memories(add_req: APIADDRequest):
+    """
+    Add memories using the local AddHandler.
+    Included to satisfy the requirement of using 'add' way from add_from_handler.py.
+    """
+    return add_handler.handle_add_memories(add_req)
+
+
+def search_memories(search_req: APISearchRequest):
+    """
+    Search memories using the local SearchHandler.
+    """
+    return search_handler.handle_search_memories(search_req)
 
 
 def _load_dataset_jsonl(dataset_path: Path) -> list[dict]:
@@ -29,57 +62,6 @@ def _load_dataset_jsonl(dataset_path: Path) -> list[dict]:
                 continue
             samples.append(json.loads(line))
     return samples
-
-
-def memos_search(client, user_id: str, query: str, top_k: int, search_mode: str) -> list[str]:
-    readable_cube_ids = [user_id]
-    results = client.search(
-        query=query,
-        user_id=user_id,
-        top_k=top_k,
-        readable_cube_ids=readable_cube_ids,
-        mode=search_mode,
-    )
-    if isinstance(results, dict) and "data" in results:
-        results = results["data"]
-
-    if results.get("memory_detail_list"):
-        memories = results["memory_detail_list"]
-        return [m.get("memory_value", "") for m in memories]
-    return []
-
-
-def memos_online_search(client, user_id: str, query: str, top_k: int, mode: str) -> list[str]:
-    results = client.search(
-        query=query,
-        user_id=user_id,
-        top_k=top_k,
-        mode=mode,
-        knowledgebase_ids=[memos_knowledgebase_id],
-    )
-    if "memory_detail_list" in results["data"] and results["data"]["memory_detail_list"]:
-        memories = results["data"]["memory_detail_list"]
-        return [m.get("memory_value", "") for m in memories]
-    return []
-
-
-def mem0_search(client, user_id: str, query: str, top_k: int) -> list[str]:
-    res = client.search(query, user_id, top_k)
-    results = res.get("results", [])
-    return [m.get("memory", "") for m in results if m.get("memory")]
-
-
-def supermemory_search(client, user_id: str, query: str, top_k: int) -> list[str]:
-    return client.search(query, user_id, top_k)
-
-
-def fastgpt_search(client, query: str, top_k: int) -> list[str]:
-    return client.search(dataset_id=fastgpt_dataset_id, query=query, top_k=top_k)
-
-
-def dify_search(client, question, dify_dataset_id, top_k) -> list[str]:
-    result = client.search(dify_dataset_id, question, top_k)
-    return [item["segment"]["content"] for item in result[:top_k]]
 
 
 def _load_existing_results(output_path: Path) -> tuple[list[dict], set[str]]:
@@ -106,7 +88,7 @@ def _save_json_list(path: Path, rows: list[dict]) -> None:
     os.replace(tmp, path)
 
 
-def search_one(sample: dict, lib: str, top_k: int, version_dir: str, search_mode: str) -> dict:
+def handler_search_one(sample: dict, top_k: int, version_dir: str, search_mode: str) -> dict:
     sample_id = str(sample.get("_id"))
     user_id = version_dir + "_" + sample_id
     question = sample.get("question") or ""
@@ -117,30 +99,49 @@ def search_one(sample: dict, lib: str, top_k: int, version_dir: str, search_mode
         "D": sample.get("choice_D") or "",
     }
 
-    client = get_lib_client(lib)
-    if lib == "memos":
-        memories = memos_search(
-            client, user_id, str(question), top_k=top_k, search_mode=search_mode
-        )
-    elif lib == "memos-api-online":
-        memories = memos_online_search(
-            client=client,
-            query=str(question),
-            user_id=user_id,
-            top_k=top_k,
-            mode=search_mode,
-        )
-    elif lib == "mem0":
-        memories = mem0_search(client, user_id, str(question), top_k=top_k)
-    elif lib == "supermemory":
-        memories = supermemory_search(client, user_id, str(question), top_k=top_k)
-    elif lib == "fastgpt":
-        memories = fastgpt_search(client, str(question), top_k=top_k)
-    elif lib == "dify":
-        memories = dify_search(client, str(question), dify_dataset_id, top_k=top_k)
-    else:
+    # Construct search request
+    readable_cube_ids = []
+    if memos_knowledgebase_id:
+        readable_cube_ids.append(memos_knowledgebase_id)
+
+    req = APISearchRequest(
+        query=str(question),
+        user_id=user_id,
+        top_k=top_k,
+        mode=search_mode,
+        readable_cube_ids=readable_cube_ids if readable_cube_ids else None,
+    )
+
+    try:
+        # Use the local handler search function
+        response = search_memories(req)
+
+        # Parse results
+        # SearchHandler returns a SearchResponse object, data is in response.data
+        results_data = response.data
         memories = []
-    print(f"[{lib} Search] sample_id: {sample_id} search memories: {len(memories)}")
+
+        # Extract memories from the structured response
+        if results_data and isinstance(results_data, dict):
+            if "text_mem" in results_data:
+                for bucket in results_data["text_mem"]:
+                    for mem in bucket.get("memories", []):
+                        mem_content = mem.get("memory", "")
+                        if mem_content:
+                            memories.append(mem_content)
+            # Also check for 'memory_detail_list' just in case structure differs
+            elif "memory_detail_list" in results_data:
+                for m in results_data["memory_detail_list"]:
+                    mem_content = m.get("memory_value", "")
+                    if mem_content:
+                        memories.append(mem_content)
+
+    except Exception as e:
+        print(f"Search failed for sample {sample_id}: {e}")
+        traceback.print_exc()
+        memories = []
+
+    print(f"[Handler Search] sample_id: {sample_id} search memories: {len(memories)}")
 
     return {
         "_id": sample_id,
@@ -157,53 +158,41 @@ def search_one(sample: dict, lib: str, top_k: int, version_dir: str, search_mode
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Longbench-v2 Product Search Concurrent Script",
+        description="Longbench-v2 Product Search via Local Handlers",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-
-    parser.add_argument("--lib", "-b", required=True, help="Product name to evaluate")
-
+    # lib argument is kept for compatibility but not strictly used for switching libs
+    parser.add_argument(
+        "--lib", "-b", default="memos-handler", help="Product name (default: memos-handler)"
+    )
     parser.add_argument(
         "--dataset-path",
         "-s",
         default="evaluation/data/longbench_v2/longbenchv2_train.json",
         help="Path to JSON file containing samples",
     )
-
-    parser.add_argument(
-        "--api-url",
-        default="http://127.0.0.1:8001",
-        help="API service address (default: http://127.0.0.1:8001)",
-    )
-
     parser.add_argument("--workers", "-c", type=int, default=5, help="Concurrency (default: 5)")
-
     parser.add_argument(
         "--timeout", type=float, default=120.0, help="Request timeout in seconds (default: 120)"
     )
-
     parser.add_argument(
         "--top-k",
         "-k",
         type=int,
-        default=20,
+        default=30,
         help="Number of results to return per search (default: 20)",
     )
-
     parser.add_argument("--version-dir", "-v", default=None, help="Version directory name")
-
     parser.add_argument(
         "--limit",
         "-l",
         type=int,
         default=None,
-        help="Limit number of samples to process (for testing, default all)",
+        help="Limit number of samples to process",
     )
-
     parser.add_argument(
         "--mode", "-m", type=str, default="fast", help="Search mode (default: fast)"
     )
-
     return parser.parse_args()
 
 
@@ -211,7 +200,7 @@ def main() -> None:
     args = parse_args()
 
     print("=" * 60)
-    print("Longbench-v2 Product Search Concurrent Tool")
+    print("Longbench-v2 Product Search (Local Handler)")
     print("=" * 60)
 
     dataset_path = Path(args.dataset_path)
@@ -221,15 +210,19 @@ def main() -> None:
     if args.limit is not None:
         dataset = dataset[: args.limit]
 
-    version = args.version_dir or "default"
-    output_dir = Path(f"evaluation/results/longbench_v2/{version}")
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / f"{args.lib}_search_results.json"
+    version = args.version_dir if args.version_dir else "default"
+    base_dir = os.path.join("evaluation", "results", "longbench_v2", version)
+    output_dir = base_dir
+    os.makedirs(output_dir, exist_ok=True)
+    output_filename = f"{args.lib}_search_results.json"
+    output_path = Path(os.path.join(output_dir, output_filename))
 
     results, processed_ids = _load_existing_results(output_path)
     pending = [s for s in dataset if str(s.get("_id")) not in processed_ids]
     if not pending:
+        print("All samples processed.")
         return
+
     metrics = Metrics()
     start_time = time.time()
 
@@ -237,7 +230,9 @@ def main() -> None:
 
         def do_search(sample: dict) -> dict:
             st = time.perf_counter()
-            r = search_one(sample, args.lib, args.top_k, args.version_dir, args.mode)
+            r = handler_search_one(
+                sample, args.top_k, args.version_dir if args.version_dir else "default", args.mode
+            )
             dur = time.perf_counter() - st
             r["duration_ms"] = dur * 1000
             metrics.record(dur, True)

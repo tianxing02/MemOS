@@ -6,16 +6,21 @@ cd "$ROOT_DIR"
 export PYTHONPATH="$ROOT_DIR"
 
 # Common parameters
-LIB="memos-api-online"
+LIB="coze"
 WORKERS=5
 TOPK=30
+VERSION_DIR="coze_longbench_v2_0224"
+LIMIT=5
+# CHAT_MODEL="gpt-4o-mini"
+CHAT_MODEL="o4-mini"
+
 ADD_MODE="fine"
 SEARCH_MODE="fast"
-VERSION_DIR="test_0113_memos_02"
 ASYNC_MODE="sync"
-CHAT_MODEL="gpt-4o-mini"
-#CHAT_MODEL="o4-mini"
-LIMIT=20
+
+# python evaluation/scripts/longbench_v2/longbench_v2_coze_search.py \
+#   --version-dir "$VERSION_DIR"
+#   # --limit "$LIMIT"
 
 # # Add / Ingestion
 # echo "Running longbench_v2_ingestion.py..."
@@ -27,11 +32,12 @@ LIMIT=20
 #   --async-mode "$ASYNC_MODE" \
 #   --limit "$LIMIT"
 
-#check
-echo "Running longbench_v2_check_files.py..."
-python -m evaluation.scripts.longbench_v2.longbench_v2_check_files \
-  --lib "$LIB" \
-  --version-dir "$VERSION_DIR" \
+
+# #check
+# echo "Running longbench_v2_check_files.py..."
+# python -m evaluation.scripts.longbench_v2.longbench_v2_check_files \
+#   --lib "$LIB" \
+#   --version-dir "$VERSION_DIR" \
 
 # # Search
 # echo "Running longbench_v2_search.py..."
@@ -43,12 +49,12 @@ python -m evaluation.scripts.longbench_v2.longbench_v2_check_files \
 #  --mode "$SEARCH_MODE" \
 # #  --limit "$LIMIT"
 
-# # Eval
-#  echo "Running longbench_v2_eval.py..."
-#  python -m evaluation.scripts.longbench_v2.longbench_v2_eval \
-#   --lib "$LIB" \
-#   --version-dir "$VERSION_DIR" \
-#   --workers "$WORKERS" \
-#   --chat-model "$CHAT_MODEL"
+# Eval
+ echo "Running longbench_v2_eval.py..."
+ python -m evaluation.scripts.longbench_v2.longbench_v2_eval \
+  --lib "$LIB" \
+  --version-dir "$VERSION_DIR" \
+  --workers "$WORKERS" \
+  --chat-model "$CHAT_MODEL"
 
 #echo "All scripts completed successfully!"

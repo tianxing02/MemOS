@@ -222,9 +222,9 @@ def main(argv: list[str] | None = None) -> None:
         print(f"Only memos-api-online and dify are supported, got lib={args.lib}")
         return
 
-    output_dir = Path("evaluation/results/longbench_v2")
-    if args.version_dir:
-        output_dir = output_dir / args.version_dir
+    version = args.version_dir if args.version_dir else "default"
+    base_dir = Path(f"evaluation/results/longbench_v2/{version}")
+    output_dir = base_dir
     output_dir.mkdir(parents=True, exist_ok=True)
 
     records_path = output_dir / f"{args.lib}_add_results.json"
@@ -248,7 +248,6 @@ def main(argv: list[str] | None = None) -> None:
         file_status = _check_file_status(
             client, args.lib, memos_knowledgebase_id, added_ids, batch_size
         )
-
     reupload_results = _reupload_failed_files(
         client, file_status, added_ids, args.url_prefix, args.lib
     )
@@ -284,30 +283,25 @@ def main(argv: list[str] | None = None) -> None:
     output_path = output_dir / f"{args.lib}_file_status.json"
 
     if args.lib == "dify":
-        file_detail_list = []
-        # Iterate added_ids to report status for all tracked files
-        for sample_id in sorted(added_ids.keys()):
-            filename = f"{sample_id}.txt"
-            info = file_status.get(filename) or {}
-            detail = {
-                "sample_id": sample_id,
-                "filename": filename,
-                "batch_id": added_ids.get(sample_id),
-                **info,
-            }
-            file_detail_list.append(detail)
+        to_save = {
+            "lib": args.lib,
+            "version_dir": args.version_dir,
+            "total": len(file_status),
+            "file_detail_list": file_status,
+            "reupload_results": reupload_results,
+        }
     else:
         file_detail_list = [{"id": fid, **(file_status.get(fid) or {})} for fid in file_ids]
+        to_save = {
+            "lib": args.lib,
+            "version_dir": args.version_dir,
+            "total": len(file_detail_list),
+            "file_detail_list": file_detail_list,
+            "reupload_results": reupload_results,
+        }
 
-    result_obj = {
-        "lib": args.lib,
-        "version_dir": args.version_dir,
-        "total": len(file_detail_list),
-        "file_detail_list": file_detail_list,
-        "reupload_results": reupload_results,
-    }
     tmp = output_path.with_suffix(output_path.suffix + ".tmp")
-    tmp.write_text(json.dumps(result_obj, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.write_text(json.dumps(to_save, ensure_ascii=False, indent=2), encoding="utf-8")
     os.replace(tmp, output_path)
     print(f"[Check] saved file status for {len(file_status)} files to {output_path}")
 

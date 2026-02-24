@@ -85,8 +85,23 @@ def _load_existing_results(path: str | os.PathLike[str]) -> tuple[list[dict], se
         return [], set()
 
 
+def _save_json_list(path: str | os.PathLike[str], rows: list[dict]) -> None:
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_suffix(p.suffix + ".tmp")
+    tmp.write_text(json.dumps({"results": rows}, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, p)
+
+
 def run_concurrent_search(
-    lib: str, samples: list[dict], user_prefix: str, concurrency: int, top_k: int, mode: str
+    lib: str,
+    samples: list[dict],
+    user_prefix: str,
+    concurrency: int,
+    top_k: int,
+    mode: str,
+    checkpoint_path: str | os.PathLike[str] | None = None,
+    checkpoint_every: int = 20,
 ) -> dict:
     """
     Execute concurrent search operations
@@ -214,11 +229,19 @@ def run_concurrent_search(
             futures.append(future)
 
         # Wait for all tasks to complete
-        for future in as_completed(futures):
+        for completed_count, future in enumerate(as_completed(futures), start=1):
             try:
                 future.result()
             except Exception as e:
                 print(f"Task execution exception: {e}")
+            if checkpoint_path and completed_count % checkpoint_every == 0:
+                try:
+                    # sort current results and save checkpoint
+                    curr = sorted(all_results, key=lambda x: x["index"])
+                    _save_json_list(checkpoint_path, curr)
+                    print(f"[Checkpoint] saved {len(curr)} rows to {checkpoint_path}")
+                except Exception as e:
+                    print(f"[Checkpoint] save error: {e}")
 
     end_time = time.time()
     total_duration = end_time - start_time
@@ -342,11 +365,11 @@ def main():
         print(f"Error: Failed to read file - {e}")
         return
 
-    # Determine output file path
-    output_dir = os.path.join("evaluation/results/mmlongbench", args.version_dir)
-    os.makedirs(output_dir, exist_ok=True)
-    output_filename = f"{args.lib}_search_results.json"
-    output_path = os.path.join(output_dir, output_filename)
+    # Determine output file path (aligned with longbench_v2 pattern)
+    version = args.version_dir or "default"
+    output_dir = Path(f"evaluation/results/longbench_v2/{version}")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / f"{args.lib}_search_results.json"
 
     existing_results, processed_ids = _load_existing_results(output_path)
     if processed_ids:
@@ -369,6 +392,8 @@ def main():
         concurrency=args.workers,
         top_k=args.top_k,
         mode=args.mode,
+        checkpoint_path=output_path,
+        checkpoint_every=20,
     )
 
     new_results = [r for r in result["results"] if r.get("success")]

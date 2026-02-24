@@ -203,9 +203,9 @@ def main(argv: list[str] | None = None) -> None:
     )
     args = parser.parse_args(argv)
 
-    output_dir = Path("evaluation/results/mmlongbench")
-    if args.version_dir:
-        output_dir = output_dir / args.version_dir
+    version = args.version_dir if args.version_dir else "default"
+    base_dir = Path(f"evaluation/results/longbench_v2/{version}")
+    output_dir = base_dir
     output_dir.mkdir(parents=True, exist_ok=True)
 
     records_path = output_dir / f"{args.lib}_add_results.json"

@@ -6,8 +6,6 @@ import os
 import threading
 import time
 
-from concurrent.futures import ThreadPoolExecutor
-
 from dotenv import load_dotenv
 
 from evaluation.scripts.utils.client import get_lib_client
@@ -19,6 +17,7 @@ load_dotenv()
 fastgpt_dataset_id = os.getenv("FASTGPT_DATASET_ID_MM_LONGBENCH")
 memos_knowledgebase_id = os.getenv("MEMOS_KNOWLEDGEBASE_ID_MM_LONGBENCH")
 dify_dataset_id = os.getenv("DIFY_DATASET_ID_MM_LONGBENCH")
+coze_dataset_id = os.getenv("COZE_DATASET_ID_MM_LONGBENCH")
 
 
 def read_filenames(filepath: str) -> list[str]:
@@ -102,7 +101,7 @@ def run_concurrent_add(
     def add_single_file(filename: str, doc_id: str = ""):
         nonlocal completed
 
-        if lib == "dify":
+        if lib in ("dify", "coze"):
             file_url = os.path.abspath(
                 os.path.join("evaluation/data/mmlongbench/documents", filename)
             )
@@ -129,6 +128,64 @@ def run_concurrent_add(
             elif lib == "dify":
                 result = client.upload_file(dataset_id=dify_dataset_id, file_url=file_url)
                 current_file_id = result["batch"]
+            elif lib == "coze":
+                if not coze_dataset_id:
+                    raise RuntimeError("COZE_DATASET_ID_MM_LONGBENCH not set")
+                import base64
+
+                with open(file_url, "rb") as f:
+                    file_b64 = base64.b64encode(f.read()).decode("utf-8")
+                document_bases = [
+                    {
+                        "source_info": {
+                            "file_base64": file_b64,
+                            "file_type": "pdf",
+                            "document_source": 0,
+                        },
+                        "name": filename,
+                    }
+                ]
+                result = client.create_document(
+                    dataset_id=coze_dataset_id,
+                    document_bases=document_bases,
+                    chunk_strategy=None,
+                    format_type=0,
+                )
+                try:
+                    if isinstance(result, dict):
+                        code = result.get("code")
+                        if code is not None and code != 0:
+                            current_file_id = None
+                        else:
+                            infos = result.get("document_infos")
+                            if isinstance(infos, list) and infos:
+                                first = infos[0]
+                                current_file_id = str(
+                                    first.get("document_id") or first.get("id") or ""
+                                )
+                            if not current_file_id:
+                                data = result.get("data")
+                                if isinstance(data, dict):
+                                    current_file_id = str(
+                                        data.get("id") or data.get("document_id") or ""
+                                    )
+                                elif isinstance(data, list) and data:
+                                    item = data[0]
+                                    current_file_id = str(
+                                        item.get("id") or item.get("document_id") or ""
+                                    )
+                    if not current_file_id:
+                        resp_list = client.list_documents(dataset_id=coze_dataset_id)
+                        if isinstance(resp_list, dict):
+                            items = resp_list.get("data") or resp_list.get("documents") or []
+                            for it in items:
+                                name = str(it.get("name") or "")
+                                doc_id_val = str(it.get("id") or it.get("document_id") or "")
+                                if name == filename and doc_id_val:
+                                    current_file_id = doc_id_val
+                                    break
+                except Exception:
+                    pass
 
             if current_file_id:
                 with file_write_lock:
@@ -166,21 +223,23 @@ def run_concurrent_add(
 
     start_time = time.time()
 
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = []
-        for _, filename in enumerate(filenames):
+    results = []
+    batch_size = 5
+    pause_seconds = 5
+    total_batches = (len(filenames) + batch_size - 1) // batch_size
+    for batch_index in range(total_batches):
+        start = batch_index * batch_size
+        end = min(start + batch_size, len(filenames))
+        current_batch = filenames[start:end]
+        print(f"[Batch {batch_index + 1}/{total_batches}] size={len(current_batch)}")
+        for filename in current_batch:
             doc_id = filename[:-3] + ".pdf"
-            future = executor.submit(add_single_file, filename, doc_id)
-            futures.append((filename, future))
-
-        # Wait for all tasks to complete
-        results = []
-        for filename, future in futures:
-            try:
-                success, result = future.result()
-                results.append({"filename": filename, "success": success, "result": result})
-            except Exception as e:
-                results.append({"filename": filename, "success": False, "result": str(e)})
+            success, result = add_single_file(filename, doc_id)
+            results.append({"filename": filename, "success": success, "result": result})
+        save_checkpoint()
+        if batch_index < total_batches - 1:
+            print(f"[Batch {batch_index + 1}] pause {pause_seconds}s before next batch")
+            time.sleep(pause_seconds)
 
     end_time = time.time()
     total_duration = end_time - start_time
@@ -306,7 +365,10 @@ def main():
         filenames = filenames[: args.limit]
 
     # Determine output file path
-    version_output_dir = os.path.join("evaluation/results/mmlongbench", args.version_dir)
+    base_dir = "evaluation/results/mmlongbench"
+    version_output_dir = os.path.join(
+        base_dir, args.version_dir if args.version_dir else "version_default"
+    )
     os.makedirs(version_output_dir, exist_ok=True)
     output_path = os.path.join(version_output_dir, f"{args.lib}_add_results.json")
 

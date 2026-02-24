@@ -1,8 +1,10 @@
 import argparse
 import json
 import os
+import threading
 import time
 import traceback
+import uuid
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -20,6 +22,9 @@ load_dotenv()
 fastgpt_dataset_id = os.getenv("FASTGPT_DATASET_ID_LONGBENCH_V2")
 memos_knowledgebase_id = os.getenv("MEMOS_KNOWLEDGEBASE_ID_LONGBENCH_V2")
 dify_dataset_id = os.getenv("DIFY_DATASET_ID_LONGBENCH_V2")
+coze_space_id = os.getenv("COZE_SPACE_ID")
+coze_dataset_id = os.getenv("COZE_DATASET_ID_LONGBENCH_V2")
+_records_write_lock = threading.Lock()
 
 
 def _load_dataset_jsonl(dataset_path: Path) -> list[dict]:
@@ -79,20 +84,83 @@ def _save_added_ids(
     added: dict[str, str | None],
     perf: dict | None = None,
 ) -> None:
-    records_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = records_path.with_suffix(records_path.suffix + ".tmp")
+    with _records_write_lock:
+        records_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = records_path.with_suffix(records_path.suffix + f".tmp.{uuid.uuid4().hex}")
+        obj = {
+            "added": dict(sorted(added.items())),
+        }
+        if perf is not None:
+            obj["perf"] = perf
+        tmp.write_text(
+            json.dumps(obj, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        os.replace(tmp, records_path)
 
-    obj = {
-        "added": dict(sorted(added.items())),
-    }
-    if perf is not None:
-        obj["perf"] = perf
 
-    tmp.write_text(
-        json.dumps(obj, ensure_ascii=False, indent=2),
-        encoding="utf-8",
+def ingest_coze_documents(client) -> None:
+    import base64
+
+    merged_dir = os.path.abspath("evaluation/data/longbench_v2/merged_txt")
+    records_path = Path(
+        "evaluation/results/longbench_v2/coze_longbench_v2_0211/coze_add_results.json"
     )
-    os.replace(tmp, records_path)
+    existing_map = _load_added_ids(records_path)
+    try:
+        names = sorted(
+            [n for n in os.listdir(merged_dir) if n.startswith("doc_") and n.endswith(".txt")]
+        )
+    except Exception:
+        names = []
+
+    for i in range(0, len(names), 5):
+        batch_names = names[i : i + 5]
+        batch_added = {}
+        for fname in batch_names:
+            if isinstance(existing_map, dict) and existing_map.get(fname):
+                continue
+            full_path = os.path.join(merged_dir, fname)
+            with open(full_path, "rb") as f:
+                file_b64 = base64.b64encode(f.read()).decode("utf-8")
+            document_bases = [
+                {
+                    "source_info": {
+                        "file_base64": file_b64,
+                        "file_type": "txt",
+                        "document_source": 0,
+                    },
+                    "name": fname,
+                }
+            ]
+
+            print(fname)
+            result = client.create_document(
+                dataset_id=coze_dataset_id,
+                document_bases=document_bases,
+            )
+            print(result)
+
+            rid = ""
+            if isinstance(result, dict):
+                code = result.get("code")
+                if code is None or code == 0:
+                    infos = result.get("document_infos")
+                    if isinstance(infos, list) and infos:
+                        first = infos[0]
+                        rid = str(first.get("document_id") or first.get("id") or "")
+                    if not rid:
+                        data = result.get("data")
+                        if isinstance(data, dict):
+                            rid = str(data.get("id") or data.get("document_id") or "")
+                        elif isinstance(data, list) and data:
+                            item = data[0]
+                            rid = str(item.get("id") or item.get("document_id") or "")
+            if rid:
+                batch_added[fname] = rid
+        existing_map2 = _load_added_ids(records_path)
+        existing_map2.update(batch_added)
+        _save_added_ids(records_path, existing_map2)
 
 
 def ingest_context(
@@ -108,10 +176,10 @@ def ingest_context(
     user_id = version_dir + "_" + sample_id
     context = sample.get("context") or ""
     ts = int(time.time())
-    file_url = f"{url_prefix.rstrip('/')}/{sample_id}.txt"  # URL前缀 + 文件名
+    file_url = f"{url_prefix.rstrip('/')}/{sample_id}.txt"
 
     file_id = ""
-    if lib == "memos" or lib == "memos-api-online":
+    if lib == "memos-api" or lib == "memos-api-online":
         result = client.upload_file(memos_knowledgebase_id, file_url)
         file_id = result["data"][0]["id"]
     if lib == "fastgpt":
@@ -211,13 +279,17 @@ def main() -> None:
     if args.limit is not None:
         dataset = dataset[: args.limit]
 
-    version_output_dir = os.path.join("evaluation/results/longbench_v2", args.version_dir)
+    base_dir = "evaluation/results/longbench_v2"
+    version_output_dir = os.path.join(
+        base_dir, args.version_dir if args.version_dir else "version_default"
+    )
     os.makedirs(version_output_dir, exist_ok=True)
     output_path = os.path.join(version_output_dir, f"{args.lib}_add_results.json")
     output_path = Path(output_path)
 
     added_ids: dict[str, str | None] = _load_added_ids(output_path)
     pending = [s for s in dataset if str(s.get("_id")) not in added_ids]
+
     print(
         f"[Add] lib={args.lib} total={len(dataset)} pending={len(pending)} workers={args.workers}"
     )
@@ -226,6 +298,10 @@ def main() -> None:
 
     client = get_lib_client(args.lib)
     metrics = Metrics()
+
+    if args.lib == "coze":
+        ingest_coze_documents(client)
+        return
 
     def do_ingest(sample):
         start_time = time.perf_counter()
@@ -254,9 +330,9 @@ def main() -> None:
         for f in tqdm(as_completed(futures), total=len(futures), desc="Adding"):
             try:
                 sid, fid = f.result()
-                if sid:
+                if sid and fid:
                     sid = str(sid)
-                    added_ids[sid] = str(fid) if fid else None
+                    added_ids[sid] = str(fid)
                     if len(added_ids) % 10 == 0:
                         _save_added_ids(output_path, added_ids)
 

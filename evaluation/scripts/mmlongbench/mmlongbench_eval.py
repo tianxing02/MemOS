@@ -33,7 +33,7 @@ load_dotenv()
 # Initialize OpenAI Client
 oai_client = openai.Client(
     api_key=os.getenv("OPENAI_API_KEY", "sk-xxxxx"),
-    base_url=os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1"),
+    base_url=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
 )
 
 
@@ -543,10 +543,12 @@ if __name__ == "__main__":
 
     print("[Response model]: ", os.getenv("CHAT_MODEL"))
 
-    base_dir = Path("evaluation/results/mmlongbench")
-    version_dir = base_dir / args.version_dir
+    version = args.version_dir or "default"
+    base_dir = Path(f"evaluation/results/longbench_v2/{version}")
+    base_dir.mkdir(parents=True, exist_ok=True)
+    version_dir = base_dir
     input_filename = f"{args.lib}_search_results.json"
-    input_path = version_dir / input_filename
+    input_path = base_dir / input_filename
 
     if not input_path.exists():
         print(f"Error: Input file not found: {input_path}")

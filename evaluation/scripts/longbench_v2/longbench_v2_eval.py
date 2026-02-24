@@ -194,9 +194,11 @@ def evaluate_one(oai_client, model_name, row: dict) -> dict:
     question = row.get("question") or ""
     choices = row.get("choices") or {}
     memories = row.get("memories_used") or []
+
     response, prompt_tokens = llm_answer(
         oai_client, model_name, list(memories), str(question), dict(choices)
     )
+
     pred = extract_answer(response)
     judge = pred == row.get("answer")
     out = dict(row)
@@ -232,19 +234,21 @@ def main() -> None:
 
     start_time = time.time()
 
-    output_dir = os.path.join("evaluation/results/longbench_v2", args.version_dir)
-    search_filename = f"{args.lib}_search_results.json"
-    search_path = Path(os.path.join(output_dir, search_filename))
+    version = args.version_dir or "default"
+    base_dir = Path(f"evaluation/results/longbench_v2/{version}")
+    base_dir.mkdir(parents=True, exist_ok=True)
+    search_path = base_dir / f"{args.lib}_search_results.json"
 
     if not search_path.exists():
         raise FileNotFoundError(f"Search results not found: {search_path}")
 
     search_rows = _load_json_list(search_path)
-    if args.chat_model == "o4-mini":
-        output_filename = f"{args.lib}_cot_eval_results.json"
-    else:
-        output_filename = f"{args.lib}_eval_results.json"
-    output_path = Path(os.path.join(output_dir, output_filename))
+    output_filename = (
+        f"{args.lib}_cot_eval_results.json"
+        if args.chat_model == "o4-mini"
+        else f"{args.lib}_eval_results.json"
+    )
+    output_path = base_dir / output_filename
 
     results: list[dict] = []
     processed_ids: set[str] = set()
@@ -267,9 +271,7 @@ def main() -> None:
         return
 
     print("[Response model]: ", args.chat_model)
-    oai_client = OpenAI(
-        api_key=os.getenv("CHAT_MODEL_API_KEY"), base_url=os.getenv("CHAT_MODEL_BASE_URL")
-    )
+    oai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"), base_url=os.getenv("OPENAI_BASE_URL"))
 
     with ThreadPoolExecutor(max_workers=args.workers) as executor:
         futures = [

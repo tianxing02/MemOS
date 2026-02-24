@@ -17,7 +17,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 load_dotenv()
 
 
-def with_retry(retries=5, delay=2):
+def with_retry(retries=2, delay=2):
     def decorator(func):
         def wrapper(*args, **kwargs):
             current_delay = delay
@@ -51,6 +51,8 @@ def get_lib_client(lib: str):
         return MemosApiClient()
     if lib == "dify":
         return DifyClient()
+    if lib == "coze":
+        return CozeClient()
     raise ValueError(f"Unknown library: {lib}")
 
 
@@ -283,7 +285,7 @@ class MemosApiOnlineClient:
         mode: str = "fine",
         async_mode: str = "async",
     ):
-        url = f"{self.memos_url}/add/message123"
+        url = f"{self.memos_url}/add/message"
         for i in range(0, len(messages), batch_size):
             batch_messages = messages[i : i + batch_size]
             payload = json.dumps(
@@ -608,66 +610,70 @@ class DifyClient:
         resp.raise_for_status()
         return resp.json()
 
-    @with_retry()
-    def search(self, dataset_id: str, query: str, top_k: int):
-        url = f"{self.base_url}/datasets/{dataset_id}/retrieve"
-        headers = {
+
+class CozeClient:
+    def __init__(self):
+        self.base_url = os.getenv("COZE_BASE_URL") or "https://api.coze.cn"
+        self.api_key = os.getenv("COZE_API_KEY")
+        self.headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
-        data = {"query": query, "top_k": top_k}
-        resp = requests.post(url, headers=headers, json=data)
-        resp.raise_for_status()
-        data_list = resp.json()["records"]
-        return data_list
-
-    @with_retry()
-    def upload_file(self, dataset_id: str, file_url: str, mime_type: str = "application/pdf"):
-        url = f"{self.base_url}/datasets/{dataset_id}/document/create-by-file"
-        headers = {"Authorization": f"Bearer {self.api_key}"}
-
-        filename = os.path.basename(file_url)
-
-        data_json = {
-            "indexing_technique": "high_quality",
-            "process_rule": {
-                "mode": "custom",
-                "rules": {
-                    "pre_processing_rules": [
-                        {"id": "remove_extra_spaces", "enabled": True},
-                        {"id": "remove_urls_emails", "enabled": True},
-                    ],
-                    "segmentation": {"separator": "###", "max_tokens": 500},
-                },
-            },
+        self.open_api_headers = {
+            **self.headers,
+            "Agw-Js-Conv": "str",
         }
 
-        with open(file_url, "rb") as f:
-            files = {
-                "data": (None, json.dumps(data_json), "text/plain"),
-                "file": (filename, f, mime_type),
-            }
+    @with_retry()
+    def create_dataset(self, name: str, space_id: str, format_type: int = 0):
+        url = f"{self.base_url}/v1/datasets"
+        data = {
+            "name": name,
+            "space_id": space_id,
+            "format_type": format_type,
+        }
+        resp = requests.post(url, headers=self.headers, json=data, timeout=60)
+        resp.raise_for_status()
+        return resp.json()
 
-            resp = requests.post(url, headers=headers, files=files, timeout=300)
-        print("upload results: ", resp.json())
+    def create_document(
+        self,
+        dataset_id: str,
+        document_bases: list,
+    ):
+        url = f"{self.base_url}/open_api/knowledge/document/create"
+        payload = {
+            "dataset_id": dataset_id,
+            "chunk_strategy": {
+                "chunk_type": 0,
+                "separator": "#",
+                "max_tokens": 800,
+                "remove_extra_spaces": True,
+                "remove_urls_emails": True,
+                "caption_type": 0,
+            },
+            "format_type": 0,
+            "document_bases": document_bases,
+        }
+
+        resp = requests.post(url, headers=self.open_api_headers, json=payload, timeout=300)
+        resp.raise_for_status()
+        body = resp.json()
+        return body
+
+    @with_retry()
+    def list_documents(self, dataset_id: str):
+        url = f"{self.base_url}/open_api/knowledge/document/list"
+        payload = {"dataset_id": dataset_id}
+        resp = requests.post(url, headers=self.open_api_headers, json=payload, timeout=60)
         resp.raise_for_status()
         return resp.json()
 
     @with_retry()
-    def check_file(self, dataset_id: str, file_ids: list[str]):
-        """Check file state."""
-        url = f"{self.base_url}/datasets/{dataset_id}/documents/{file_ids[0]}/indexing-status"
-        headers = {"Authorization": f"Bearer {self.api_key}"}
-        resp = requests.get(url, headers=headers)
-        resp.raise_for_status()
-        file_info = resp.json()["data"]
-        return file_info
-
-    @with_retry()
-    def get_dataset_documents(self, dataset_id: str, page: int = 1, limit: int = 20):
-        url = f"{self.base_url}/datasets/{dataset_id}/documents?page={page}&limit={limit}"
-        headers = {"Authorization": f"Bearer {self.api_key}"}
-        resp = requests.get(url, headers=headers)
+    def process_status(self, dataset_id: str, document_ids: list[str]):
+        url = f"{self.base_url}/v1/datasets/{dataset_id}/process"
+        payload = {"document_ids": document_ids}
+        resp = requests.post(url, headers=self.headers, json=payload, timeout=60)
         resp.raise_for_status()
         return resp.json()
 
