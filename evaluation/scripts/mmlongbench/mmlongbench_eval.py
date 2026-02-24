@@ -544,7 +544,7 @@ if __name__ == "__main__":
     print("[Response model]: ", os.getenv("CHAT_MODEL"))
 
     version = args.version_dir or "default"
-    base_dir = Path(f"evaluation/results/longbench_v2/{version}")
+    base_dir = Path(f"evaluation/results/mmlongbench/{version}")
     base_dir.mkdir(parents=True, exist_ok=True)
     version_dir = base_dir
     input_filename = f"{args.lib}_search_results.json"

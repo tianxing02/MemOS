@@ -204,7 +204,7 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
 
     version = args.version_dir if args.version_dir else "default"
-    base_dir = Path(f"evaluation/results/longbench_v2/{version}")
+    base_dir = Path(f"evaluation/results/mmlongbench/{version}")
     output_dir = base_dir
     output_dir.mkdir(parents=True, exist_ok=True)
 

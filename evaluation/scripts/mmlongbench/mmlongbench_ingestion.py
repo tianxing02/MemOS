@@ -366,9 +366,7 @@ def main():
 
     # Determine output file path
     base_dir = "evaluation/results/mmlongbench"
-    version_output_dir = os.path.join(
-        base_dir, args.version_dir if args.version_dir else "version_default"
-    )
+    version_output_dir = os.path.join(base_dir, args.version_dir if args.version_dir else "default")
     os.makedirs(version_output_dir, exist_ok=True)
     output_path = os.path.join(version_output_dir, f"{args.lib}_add_results.json")
 

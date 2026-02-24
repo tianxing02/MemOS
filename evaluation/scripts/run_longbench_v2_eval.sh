@@ -58,3 +58,16 @@ ASYNC_MODE="sync"
   --chat-model "$CHAT_MODEL"
 
 #echo "All scripts completed successfully!"
+
+
+# Add
+python evaluation/scripts/longbench_v2/longbench_v2_handler_add.py \
+    --version-dir "$VERSION_DIR" \
+    --lib memos-api \
+    --workers "$WORKERS"
+
+# Search
+python evaluation/scripts/longbench_v2/longbench_v2_handler_search.py \
+    --version-dir "$VERSION_DIR" \
+    --lib memos-api \
+    --workers "$WORKERS"

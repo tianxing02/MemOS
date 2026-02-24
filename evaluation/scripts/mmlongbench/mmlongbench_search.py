@@ -367,7 +367,7 @@ def main():
 
     # Determine output file path (aligned with longbench_v2 pattern)
     version = args.version_dir or "default"
-    output_dir = Path(f"evaluation/results/longbench_v2/{version}")
+    output_dir = Path(f"evaluation/results/mmlongbench/{version}")
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / f"{args.lib}_search_results.json"
 
